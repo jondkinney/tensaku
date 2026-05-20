@@ -16,6 +16,12 @@
       Tensaku is a fork of Satty by Matthias Gabriel, used under the MPL-2.0 license.
     </p>
   </description>
+  <screenshots>
+    <screenshot type="default">
+      <caption>The annotation canvas with the layer panel open — every mark stays selectable, draggable, and re-orderable</caption>
+      <image>https://tensaku.dev/assets/screenshot-layer-panel.png</image>
+    </screenshot>
+  </screenshots>
   <categories>
     <category>Utility</category>
     <category>Graphics</category>
