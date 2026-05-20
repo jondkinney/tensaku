@@ -14,9 +14,10 @@ build-options:
     CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
     RUSTFLAGS: -C link-arg=-Wl,-z,now
 finish-args:
-  # Wayland support
+  # Wayland support; fallback-x11 only grants X11 access when
+  # Wayland isn't available — tighter than --socket=x11.
   - --socket=wayland
-  - --socket=x11
+  - --socket=fallback-x11
   - --device=dri
   # File access
   - --filesystem=home
