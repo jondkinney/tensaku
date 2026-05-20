@@ -1,14 +1,14 @@
 name: release-update-site
 
-# Push the new release tag onto the tensaku landing page so the
-# eyebrow chip ('v<semver> · MPL-2.0') reflects the release that
-# just published. Uses an SSH deploy key scoped to the
-# tensaku-site repo (`TENSAKU_SITE_DEPLOY_KEY` secret) rather than
-# a PAT — the key has no expiry, can't read or write anything
+# Push the new release tag onto the tensaku.dev landing page so
+# the version chip beside "What's new in Tensaku" reflects the
+# release that just published. Uses an SSH deploy key scoped to
+# the tensaku-site repo (`TENSAKU_SITE_DEPLOY_KEY` secret) rather
+# than a PAT — the key has no expiry, can't read or write anything
 # outside this one repo, and lives entirely on the
 # tensaku ↔ tensaku-site axis.
 #
-# Mirrors release-update-site.yml in jondkinney/vernier; see that
+# Mirrors release-update-site.yml in jondkinney/mousehop; see that
 # file for the full design notes.
 
 on:
@@ -60,7 +60,7 @@ jobs:
           new="${{ steps.tag.outputs.version }}"
           # The version is wrapped in <span data-tensaku-version>...</span>
           # so we don't have to anchor on any surrounding copy. Reword
-          # the eyebrow chip however you like — as long as that span
+          # the version chip however you like — as long as that span
           # stays wrapped around the v<semver> string, this workflow
           # keeps working.
           old=$(grep -oE '<span data-tensaku-version>v[0-9]+\.[0-9]+\.[0-9]+</span>' index.html \
