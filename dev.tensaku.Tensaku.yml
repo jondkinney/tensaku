@@ -56,6 +56,17 @@ modules:
       - install -Dm644 dev.tensaku.Tensaku.desktop /app/share/applications/dev.tensaku.Tensaku.desktop
       - install -Dm644 dev.tensaku.Tensaku.metainfo.xml /app/share/metainfo/dev.tensaku.Tensaku.metainfo.xml
       - install -Dm644 assets/tensaku.svg /app/share/icons/hicolor/scalable/apps/dev.tensaku.Tensaku.svg
+      # Render a hicolor PNG ladder from the source SVG so hosts
+      # that prefer fixed-size raster icons (older toolkits, certain
+      # KDE variants) get a sharp render without scaling the SVG at
+      # runtime. rsvg-convert ships with the GNOME runtime.
+      - |
+        for size in 16 22 24 32 48 64 128 256 512; do
+          install -d /app/share/icons/hicolor/${size}x${size}/apps
+          rsvg-convert -w $size -h $size \
+            assets/tensaku.svg \
+            -o /app/share/icons/hicolor/${size}x${size}/apps/dev.tensaku.Tensaku.png
+        done
       - install -Dm644 LICENSE /app/share/licenses/dev.tensaku.Tensaku/LICENSE
       - install -Dm644 NOTICE /app/share/licenses/dev.tensaku.Tensaku/NOTICE
       - install -Dm644 completions/tensaku.bash /app/share/bash-completion/completions/tensaku
