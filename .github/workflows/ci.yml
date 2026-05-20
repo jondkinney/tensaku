@@ -1,0 +1,52 @@
+name: CI
+
+# Per-PR safety net: fmt + clippy + test. Linux-only because tensaku
+# itself is Linux-only. Release-time builds live in release.yml; this
+# is the pre-merge gate that keeps main green.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  check:
+    name: clippy + test
+    runs-on: ubuntu-latest
+    # Same gtk4-rs container the release-x86_64 tarball build uses,
+    # so CI and the release pipeline see the same toolchain + system
+    # libs.
+    container:
+      image: ghcr.io/gtk-rs/gtk4-rs/gtk4:latest
+    steps:
+      - name: Install native deps
+        run: yum install -y gtk4-devel libadwaita-devel gtk4-layer-shell-devel wayland-devel
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --all-features

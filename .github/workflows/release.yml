@@ -1,13 +1,22 @@
 name: release
 
 # Fires when release-plz creates a GitHub Release. Builds and attaches
-# the x86_64 Linux tarball and the Flatpak bundle as release assets.
+# the Linux x86_64 and aarch64 tarballs as release assets.
+#
+# Flatpak builds live in release-flatpak.yml (same trigger) so a
+# Flatpak failure doesn't sink the tarball builds and the manifest
+# can be validated against an arbitrary ref via workflow_dispatch.
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to (re)build binaries for'
+        required: true
 
 jobs:
-  linux-tarball:
+  linux-x86_64-tarball:
     name: "Linux x86_64 tarball"
     runs-on: ubuntu-latest
     container:
@@ -21,6 +30,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
 
       - name: Configure git safe directory
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -29,42 +39,49 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build tarball
-        run: make package
+        run: make ARCH=x86_64 package
 
       - name: Attach tarball to the release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.release.tag_name }}
-          files: tensaku-${{ github.ref_name }}-x86_64.tar.gz
+          tag_name: ${{ github.event.release.tag_name || inputs.tag }}
+          files: tensaku-${{ github.event.release.tag_name || inputs.tag }}-x86_64.tar.gz
 
-  flatpak:
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-49
-      options: --privileged
+  linux-aarch64-tarball:
+    name: "Linux aarch64 tarball"
+    # Native arm runner — the gtk4-rs container is amd64-only, so we
+    # install deps via apt on the host instead of running inside it.
+    runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Install native deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            libgtk4-layer-shell-dev \
+            libwayland-dev \
+            make
+
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
 
       - name: Configure git safe directory
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Build Flatpak
-        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
-        with:
-          manifest-path: dev.tensaku.Tensaku.yml
-          bundle: tensaku-${{ github.ref_name }}.flatpak
-          branch: ${{ github.ref_name }}
-          cache-key: flatpak-builder-${{ github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Attach Flatpak to the release
-        uses: softprops/action-gh-release@v1
+      - name: Build tarball
+        run: make ARCH=aarch64 package
+
+      - name: Attach tarball to the release
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.release.tag_name }}
-          files: tensaku-${{ github.ref_name }}.flatpak
+          tag_name: ${{ github.event.release.tag_name || inputs.tag }}
+          files: tensaku-${{ github.event.release.tag_name || inputs.tag }}-aarch64.tar.gz

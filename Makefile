@@ -2,6 +2,12 @@ ifeq ($(PREFIX),)
     PREFIX := /usr/local
 endif
 
+# Tarball architecture suffix. Overridable so CI can produce both
+# tensaku-<ver>-x86_64.tar.gz and tensaku-<ver>-aarch64.tar.gz from
+# the same target (the tarball just snapshots whatever `make install`
+# produced for the host).
+ARCH ?= x86_64
+
 SOURCEDIRS:=src $(wildcard src/*)
 SOURCEFILES:=$(foreach d,$(SOURCEDIRS),$(wildcard $(d)/*.rs))
 
@@ -90,7 +96,7 @@ package: clean build-release
 
 	# create package
 	$(eval LATEST_TAG := $(shell git describe --tags --abbrev=0))
-	tar -czvf tensaku-${LATEST_TAG}-x86_64.tar.gz -C ${TMP} .
+	tar -czvf tensaku-${LATEST_TAG}-${ARCH}.tar.gz -C ${TMP} .
 
 	# clean up
 	rm -rf $(TMP)

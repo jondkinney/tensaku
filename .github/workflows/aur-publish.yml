@@ -2,7 +2,7 @@ name: AUR publish
 
 # Publishes all three AUR variants after release-plz cuts a Release:
 #   - tensaku      (source build from the GitHub source tarball)
-#   - tensaku-bin  (prebuilt binary from the linux-tarball asset)
+#   - tensaku-bin  (prebuilt binaries from the per-arch linux tarball assets)
 #   - tensaku-git  (tracks main; pkgver() generated at build time)
 #
 # packaging/{aur,aur-bin,aur-git}/PKGBUILD are the source of truth.
@@ -81,19 +81,24 @@ jobs:
               sed -i "s/^pkgver=.*/pkgver=$ver/;s/^pkgrel=.*/pkgrel=1/" aur/PKGBUILD
               ;;
             bin)
-              # The linux-tarball job in release.yml builds the
-              # bundled tarball in parallel with this workflow. Wait
-              # up to ~30 min for it to land on the GitHub Release
-              # before updpkgsums tries to fetch it.
+              # The linux-x86_64-tarball and linux-aarch64-tarball
+              # jobs in release.yml build the per-arch tarballs in
+              # parallel with this workflow. Wait up to ~30 min for
+              # BOTH to land on the GitHub Release before updpkgsums
+              # tries to fetch them — it pulls per-arch sums and will
+              # error if either source is missing.
               sed -i "s/^pkgver=.*/pkgver=$ver/;s/^pkgrel=.*/pkgrel=1/" aur/PKGBUILD
-              tarball_url="https://github.com/${GH_REPO}/releases/download/${TAG}/tensaku-${TAG}-x86_64.tar.gz"
-              for i in $(seq 1 90); do
-                if curl -sfIL -o /dev/null "$tarball_url"; then
-                  echo "linux tarball present"
-                  break
-                fi
-                echo "waiting for linux tarball (attempt $i/90)..."
-                sleep 20
+              base="https://github.com/${GH_REPO}/releases/download/${TAG}"
+              for arch in x86_64 aarch64; do
+                tarball_url="$base/tensaku-${TAG}-${arch}.tar.gz"
+                for i in $(seq 1 90); do
+                  if curl -sfIL -o /dev/null "$tarball_url"; then
+                    echo "$arch tarball present"
+                    break
+                  fi
+                  echo "waiting for $arch tarball (attempt $i/90)..."
+                  sleep 20
+                done
               done
               ;;
             git)
