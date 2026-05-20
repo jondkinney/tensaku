@@ -30,16 +30,21 @@ jobs:
 
   check:
     name: clippy + test
-    runs-on: ubuntu-latest
-    # Same gtk4-rs container the release-x86_64 tarball build uses,
-    # so CI and the release pipeline see the same toolchain + system
-    # libs.
-    container:
-      image: ghcr.io/gtk-rs/gtk4-rs/gtk4:latest
+    runs-on: ubuntu-24.04
     steps:
-      - name: Install native deps
-        run: yum install -y gtk4-devel libadwaita-devel gtk4-layer-shell-devel wayland-devel
       - uses: actions/checkout@v4
+      - name: Install native deps
+        # Same set the release.yml linux-aarch64 job installs; brings
+        # tensaku in line with how mousehop and vernier wire up GTK
+        # builds (apt directly on the runner, no container).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            libgtk4-layer-shell-dev \
+            libwayland-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy

@@ -18,22 +18,24 @@ on:
 jobs:
   linux-x86_64-tarball:
     name: "Linux x86_64 tarball"
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/gtk-rs/gtk4-rs/gtk4:latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - name: Install native deps + make
-        run: yum install -y gtk4-devel libadwaita-devel gtk4-layer-shell-devel wayland-devel make tar gzip
-
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.event.release.tag_name || inputs.tag }}
 
-      - name: Configure git safe directory
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Install native deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            libgtk4-layer-shell-dev \
+            libwayland-dev
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -49,8 +51,8 @@ jobs:
 
   linux-aarch64-tarball:
     name: "Linux aarch64 tarball"
-    # Native arm runner — the gtk4-rs container is amd64-only, so we
-    # install deps via apt on the host instead of running inside it.
+    # ubuntu-24.04-arm is the native aarch64 runner; apt deps match
+    # the x86_64 job above.
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write

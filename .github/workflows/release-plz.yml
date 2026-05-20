@@ -14,25 +14,22 @@ jobs:
   # which the packaging workflows (Flatpak, AUR) build on.
   release:
     name: release-plz release
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/gtk-rs/gtk4-rs/gtk4:latest
+    runs-on: ubuntu-24.04
     steps:
-      - name: Install native deps + gh CLI
-        # gh is needed by release-plz/action to look up the GitHub
-        # viewer's name/email for git authoring; the gtk-rs container
-        # doesn't ship it.
-        run: yum install -y gtk4-devel libadwaita-devel gtk4-layer-shell-devel wayland-devel gh
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Configure git safe directory
-        # Containerized job: workspace is owned by a different uid
-        # than the in-container root, so git refuses to operate on it
-        # without this exception.
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install native deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            libgtk4-layer-shell-dev \
+            libwayland-dev
       - uses: release-plz/action@v0.5
         with:
           command: release
@@ -44,28 +41,25 @@ jobs:
   # every push to main.
   release-pr:
     name: release-plz PR
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/gtk-rs/gtk4-rs/gtk4:latest
+    runs-on: ubuntu-24.04
     concurrency:
       group: release-plz-pr
       cancel-in-progress: false
     steps:
-      - name: Install native deps + gh CLI
-        # gh is needed by release-plz/action to look up the GitHub
-        # viewer's name/email for git authoring; the gtk-rs container
-        # doesn't ship it.
-        run: yum install -y gtk4-devel libadwaita-devel gtk4-layer-shell-devel wayland-devel gh
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Configure git safe directory
-        # Containerized job: workspace is owned by a different uid
-        # than the in-container root, so git refuses to operate on it
-        # without this exception.
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install native deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            libgtk4-layer-shell-dev \
+            libwayland-dev
       - uses: release-plz/action@v0.5
         with:
           command: release-pr
