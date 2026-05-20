@@ -1,10 +1,14 @@
 name: release
 
 # Fires when release-plz creates a GitHub Release. Builds and attaches
-# the Linux x86_64 and aarch64 tarballs as release assets.
+# the Linux x86_64 tarball as a release asset. tensaku is Linux x86_64
+# only — the gtk4-layer-shell C library isn't packaged on Ubuntu, and
+# the Fedora-based gtk4-rs container we depend on is amd64-only, so
+# aarch64 would need a separate "build gtk4-layer-shell from source"
+# pipeline. Not worth it until there's actual aarch64 demand.
 #
 # Flatpak builds live in release-flatpak.yml (same trigger) so a
-# Flatpak failure doesn't sink the tarball builds and the manifest
+# Flatpak failure doesn't sink the tarball build and the manifest
 # can be validated against an arbitrary ref via workflow_dispatch.
 on:
   release:
@@ -18,55 +22,15 @@ on:
 jobs:
   linux-x86_64-tarball:
     name: "Linux x86_64 tarball"
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    # Fedora-based gtk4-rs container — see ci.yml for rationale.
+    container:
+      image: ghcr.io/gtk-rs/gtk4-rs/gtk4:latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ github.event.release.tag_name || inputs.tag }}
-
-      - name: Install native deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config \
-            libgtk-4-dev \
-            libadwaita-1-dev \
-            libgtk4-layer-shell-dev \
-            libwayland-dev
-
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build tarball
-        run: make ARCH=x86_64 package
-
-      - name: Attach tarball to the release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.release.tag_name || inputs.tag }}
-          files: tensaku-${{ github.event.release.tag_name || inputs.tag }}-x86_64.tar.gz
-
-  linux-aarch64-tarball:
-    name: "Linux aarch64 tarball"
-    # ubuntu-24.04-arm is the native aarch64 runner; apt deps match
-    # the x86_64 job above.
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
-    steps:
-      - name: Install native deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config \
-            libgtk-4-dev \
-            libadwaita-1-dev \
-            libgtk4-layer-shell-dev \
-            libwayland-dev \
-            make
+      - name: Install native deps + make
+        run: yum install -y gtk4-devel libadwaita-devel gtk4-layer-shell-devel wayland-devel make tar gzip
 
       - uses: actions/checkout@v4
         with:
@@ -80,10 +44,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build tarball
-        run: make ARCH=aarch64 package
+        run: make ARCH=x86_64 package
 
       - name: Attach tarball to the release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.release.tag_name || inputs.tag }}
-          files: tensaku-${{ github.event.release.tag_name || inputs.tag }}-aarch64.tar.gz
+          files: tensaku-${{ github.event.release.tag_name || inputs.tag }}-x86_64.tar.gz

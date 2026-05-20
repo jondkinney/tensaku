@@ -1,8 +1,10 @@
 name: CI
 
-# Per-PR safety net: fmt + clippy + test. Linux-only because tensaku
-# itself is Linux-only. Release-time builds live in release.yml; this
-# is the pre-merge gate that keeps main green.
+# Per-PR safety net: fmt + clippy + test. Linux x86_64-only because
+# tensaku itself targets Linux x86_64 (the gtk4-layer-shell C library
+# isn't packaged on Ubuntu — see release.yml note). Release-time
+# builds live in release.yml; this is the pre-merge gate that keeps
+# main green.
 
 on:
   push:
@@ -30,21 +32,18 @@ jobs:
 
   check:
     name: clippy + test
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    # Fedora-flavored container because Ubuntu's apt repos don't carry
+    # libgtk4-layer-shell-dev — `gtk4-layer-shell-devel` exists on
+    # Fedora (and so in this image). Matches the gtk4-rs project's
+    # own CI setup. Same container the release.yml Linux build uses
+    # so CI and release see identical toolchain + system libs.
+    container:
+      image: ghcr.io/gtk-rs/gtk4-rs/gtk4:latest
     steps:
-      - uses: actions/checkout@v4
       - name: Install native deps
-        # Same set the release.yml linux-aarch64 job installs; brings
-        # tensaku in line with how mousehop and vernier wire up GTK
-        # builds (apt directly on the runner, no container).
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config \
-            libgtk-4-dev \
-            libadwaita-1-dev \
-            libgtk4-layer-shell-dev \
-            libwayland-dev
+        run: yum install -y gtk4-devel libadwaita-devel gtk4-layer-shell-devel wayland-devel
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy

@@ -1,27 +1,28 @@
 # Maintainer: Jon Kinney
 #
 # Source of truth for the AUR `tensaku-bin` package — prebuilt binary
-# from the GitHub Release. release.yml runs `make ARCH=<arch> package`
-# on both x86_64 and aarch64 runners, producing tarballs with a
-# /usr-style layout inside (bin/, share/applications, etc.).
+# from the GitHub Release. release.yml runs `make ARCH=x86_64 package`
+# which produces tensaku-v<ver>-x86_64.tar.gz with a /usr-style layout
+# inside (bin/, share/applications, etc.).
 # aur-publish.yml copies this file, pins pkgver/pkgrel, refreshes
-# per-arch sha256sums with updpkgsums, regenerates .SRCINFO, and pushes.
+# sha256sums with updpkgsums, regenerates .SRCINFO, and pushes.
+#
+# x86_64 only until either Ubuntu packages gtk4-layer-shell-dev or
+# a Fedora-on-arm container becomes available for the release pipeline.
 pkgname=tensaku-bin
 _pkgname=tensaku
 pkgver=0.25.0
 pkgrel=1
 pkgdesc='Modern screenshot annotation tool for Wayland (prebuilt binary)'
-arch=('x86_64' 'aarch64')
+arch=('x86_64')
 url='https://github.com/jondkinney/tensaku'
 license=('MPL-2.0')
 depends=('gtk4' 'gtk4-layer-shell' 'libadwaita' 'libepoxy' 'fontconfig')
 provides=("$_pkgname=$pkgver")
 conflicts=("$_pkgname" "$_pkgname-git")
-source_x86_64=("$_pkgname-v$pkgver-x86_64.tar.gz::https://github.com/jondkinney/$_pkgname/releases/download/v$pkgver/$_pkgname-v$pkgver-x86_64.tar.gz")
-source_aarch64=("$_pkgname-v$pkgver-aarch64.tar.gz::https://github.com/jondkinney/$_pkgname/releases/download/v$pkgver/$_pkgname-v$pkgver-aarch64.tar.gz")
-# Placeholders — CI's updpkgsums overwrites with real per-arch hashes per release.
-sha256sums_x86_64=('0000000000000000000000000000000000000000000000000000000000000000')
-sha256sums_aarch64=('0000000000000000000000000000000000000000000000000000000000000000')
+source=("$_pkgname-v$pkgver-x86_64.tar.gz::https://github.com/jondkinney/$_pkgname/releases/download/v$pkgver/$_pkgname-v$pkgver-x86_64.tar.gz")
+# Placeholder — CI's updpkgsums overwrites with the real hash per release.
+sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
 
 package() {
   # `make package` tarballs the install-staged tree, so we just need
