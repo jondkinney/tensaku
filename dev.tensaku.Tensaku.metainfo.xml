@@ -16,6 +16,22 @@
       Tensaku is a fork of Satty by Matthias Gabriel, used under the MPL-2.0 license.
     </p>
   </description>
+  <categories>
+    <category>Utility</category>
+    <category>Graphics</category>
+    <category>RasterGraphics</category>
+  </categories>
+  <!-- OARS: every age-rating attribute defaults to "none", which is
+       correct for a screenshot annotation tool. Self-closing element
+       is the standard Flathub shorthand for an all-clean rating. -->
+  <content_rating type="oars-1.1"/>
+  <!-- Per-release entries: prepend a new <release> at the top when
+       release-plz cuts a new tag. Required by Flathub for the
+       Version history section on the listing page; the latest
+       release is the only one strictly required. -->
+  <releases>
+    <release version="0.25.0" date="2026-05-18"/>
+  </releases>
   <url type="homepage">https://tensaku.dev</url>
   <url type="bugtracker">https://github.com/jondkinney/tensaku/issues</url>
   <developer_name>Jon Kinney</developer_name>
