@@ -1,11 +1,14 @@
 name: release
 
 # Fires when release-plz creates a GitHub Release. Builds and attaches
-# the Linux x86_64 tarball as a release asset. tensaku is Linux x86_64
-# only — the gtk4-layer-shell C library isn't packaged on Ubuntu, and
-# the Fedora-based gtk4-rs container we depend on is amd64-only, so
-# aarch64 would need a separate "build gtk4-layer-shell from source"
-# pipeline. Not worth it until there's actual aarch64 demand.
+# the Linux x86_64 and aarch64 tarballs as release assets.
+#
+# x86_64 runs inside the Fedora-based gtk4-rs container so we get
+# `gtk4-layer-shell-devel` from dnf for free (Ubuntu doesn't package
+# it). aarch64 has no equivalent container — the gtk4-rs image is
+# amd64-only — so the aarch64 job builds the gtk4-layer-shell C
+# library from source on ubuntu-24.04-arm and caches the install
+# tree across runs to avoid the rebuild on every release.
 #
 # Flatpak builds live in release-flatpak.yml (same trigger) so a
 # Flatpak failure doesn't sink the tarball build and the manifest
@@ -51,3 +54,81 @@ jobs:
         with:
           tag_name: ${{ github.event.release.tag_name || inputs.tag }}
           files: tensaku-${{ github.event.release.tag_name || inputs.tag }}-x86_64.tar.gz
+
+  linux-aarch64-tarball:
+    name: "Linux aarch64 tarball"
+    # Native arm runner. No gtk4-rs container exists for arm64, so
+    # we install GTK+adwaita via apt and build the gtk4-layer-shell
+    # C library from source (Ubuntu doesn't package it).
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    env:
+      # Pin to a specific tag so the cache key is stable. Bump
+      # together with the gtk4-layer-shell crate dep in Cargo.toml.
+      # The Rust binding (`gtk4-layer-shell = 0.7`) requires the C
+      # library at version >= 1.0; v1.0.5 is the latest 1.0.x patch.
+      GTK4_LAYER_SHELL_VERSION: "v1.0.5"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - name: Install apt deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config make \
+            libgtk-4-dev libadwaita-1-dev libwayland-dev wayland-protocols \
+            meson ninja-build \
+            gobject-introspection libgirepository1.0-dev
+
+      - name: Cache gtk4-layer-shell install tree
+        id: cache-gls
+        uses: actions/cache@v4
+        with:
+          path: /tmp/gtk4-layer-shell-install
+          key: gtk4-layer-shell-aarch64-${{ env.GTK4_LAYER_SHELL_VERSION }}-v1
+
+      - name: Build gtk4-layer-shell from source
+        if: steps.cache-gls.outputs.cache-hit != 'true'
+        # -Dexamples=false / -Ddocs=false / -Dvapi=false skip the
+        # optional outputs we don't need (gtk-doc would otherwise
+        # require xsltproc + docbook, vapi would require valac). The
+        # tensaku Rust binding only needs the .so + .pc + .h.
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/build
+          git clone --depth 1 --branch "$GTK4_LAYER_SHELL_VERSION" \
+            https://github.com/wmww/gtk4-layer-shell.git /tmp/build/gtk4-layer-shell
+          cd /tmp/build/gtk4-layer-shell
+          meson setup build \
+            --prefix=/tmp/gtk4-layer-shell-install \
+            -Dexamples=false \
+            -Ddocs=false \
+            -Dvapi=false
+          meson compile -C build
+          meson install -C build
+
+      - name: Install gtk4-layer-shell to /usr/local
+        # Cargo invokes pkg-config which by default looks under
+        # /usr/local and /usr. Copying the install tree there means
+        # downstream `make package` doesn't need PKG_CONFIG_PATH set.
+        run: |
+          sudo cp -a /tmp/gtk4-layer-shell-install/. /usr/local/
+          sudo ldconfig
+          # Sanity-check: confirm pkg-config + the linker can find it.
+          pkg-config --modversion gtk4-layer-shell-0
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build tarball
+        run: make ARCH=aarch64 package
+
+      - name: Attach tarball to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name || inputs.tag }}
+          files: tensaku-${{ github.event.release.tag_name || inputs.tag }}-aarch64.tar.gz

@@ -15,9 +15,11 @@ is no release script to run.
      order;
    - creates the `vX.Y.Z` tag and the GitHub Release.
 4. The GitHub Release fires the packaging workflows automatically:
-   - `release.yml` — Linux x86_64 tarball. (aarch64 is parked
-     until gtk4-layer-shell-dev is available on Ubuntu or a Fedora
-     arm container exists — see the comment at the top of release.yml.)
+   - `release.yml` — Linux x86_64 + aarch64 tarballs. x86_64 builds
+     in the Fedora-based gtk4-rs container; aarch64 builds
+     `gtk4-layer-shell` from source on `ubuntu-24.04-arm` and caches
+     the install tree across releases. Each platform is a separate
+     job; one failure doesn't block the other.
    - `release-flatpak.yml` — builds the Flatpak bundle.
    - `aur-publish.yml` — pushes the updated packages to the AUR.
 
