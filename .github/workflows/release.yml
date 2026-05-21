@@ -67,8 +67,8 @@ jobs:
       # Pin to a specific tag so the cache key is stable. Bump
       # together with the gtk4-layer-shell crate dep in Cargo.toml.
       # The Rust binding (`gtk4-layer-shell = 0.7`) requires the C
-      # library at version >= 1.0; v1.0.5 is the latest 1.0.x patch.
-      GTK4_LAYER_SHELL_VERSION: "v1.0.5"
+      # library at version >= 1.0; v1.0.4 is the latest 1.0.x patch.
+      GTK4_LAYER_SHELL_VERSION: "v1.0.4"
     steps:
       - uses: actions/checkout@v4
         with:
