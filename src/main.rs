@@ -1,3 +1,5 @@
+//! Tensaku — a modern screenshot annotation tool, forked from Satty.
+
 use configuration::{APP_CONFIG, Configuration};
 use std::io::Read;
 use std::process::exit;
