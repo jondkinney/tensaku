@@ -36,6 +36,14 @@
        Version history section on the listing page; the latest
        release is the only one strictly required. -->
   <releases>
+    <release version="0.25.1" date="2026-05-21">
+      <description>
+        <p>Other:</p>
+        <ul>
+          <li>add crate-level doc comment to main.rs</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.25.0" date="2026-05-18"/>
   </releases>
   <url type="homepage">https://tensaku.dev</url>
