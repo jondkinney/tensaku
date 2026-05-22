@@ -36,6 +36,14 @@
        Version history section on the listing page; the latest
        release is the only one strictly required. -->
   <releases>
+    <release version="0.25.2" date="2026-05-22">
+      <description>
+        <p>Fixed:</p>
+        <ul>
+          <li>correct screenshot sizing &amp; sharpness on fractional-scale monitors</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.25.1" date="2026-05-21">
       <description>
         <p>Other:</p>
