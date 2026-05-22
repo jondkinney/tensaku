@@ -29,17 +29,10 @@ use crate::{
     tools::{CropTool, Drawable, DrawableId, Stacked, Tool, UndoAction},
 };
 
-use super::{font_stack, set_font_stack};
+use super::{CANVAS_PADDING_CSS, font_stack, set_font_stack};
 
 const TRANSPARENCY_SQUARE_SIZE: usize = 64;
 
-/// Breathing room (in CSS px) around the rendered screenshot inside
-/// the canvas. Gives the image visual separation from the toolbars
-/// and lets the drop shadow fall outside the image edges. Scaled to
-/// canvas pixels at render time via the device pixel ratio. Sized to
-/// fully contain the `SHADOW_KEY_*` extent below so the wide key
-/// shadow doesn't get clipped at the canvas edge.
-const CANVAS_PADDING_CSS: f32 = 60.0;
 /// Lowest auto-fit zoom a vertical window resize will shrink the
 /// image to. Enforced two ways so it holds under any window manager:
 /// `apply_vertical_resize_floor` pins a minimum height on `outer_box`

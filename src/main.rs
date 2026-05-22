@@ -481,10 +481,14 @@ impl App {
         content_h: f64,
         monitor: Option<Rectangle>,
     ) -> (i32, i32) {
-        const IMAGE_PAD_CSS: f64 = 40.0;
+        // Reserve the SAME per-side padding the renderer pads the
+        // canvas with — if this is smaller the window is too small
+        // for the renderer's padding and the image renders below
+        // 100%. Single source of truth: `femtovg_area::CANVAS_PADDING_CSS`.
+        let image_pad = femtovg_area::CANVAS_PADDING_CSS as f64;
         const TOOLBAR_CHROME_CSS: f64 = 120.0;
-        let padded_w = content_w + 2.0 * IMAGE_PAD_CSS;
-        let padded_h = content_h + 2.0 * IMAGE_PAD_CSS + TOOLBAR_CHROME_CSS;
+        let padded_w = content_w + 2.0 * image_pad;
+        let padded_h = content_h + 2.0 * image_pad + TOOLBAR_CHROME_CSS;
         let (final_w, final_h) = if let Some(m) = monitor {
             let max_w = m.width() as f64 * 0.90;
             let max_h = m.height() as f64 * 0.90;
@@ -550,16 +554,18 @@ impl App {
         }
 
         let monitor_size_opt = Self::get_monitor_size(root);
-        // Padding around the image (matches CANVAS_PADDING_CSS in the
-        // renderer) + a generous estimate for the top/bottom toolbar
-        // chrome. The renderer scales the image to fit whatever canvas
-        // size GTK gives it, so an over-estimate just means a little
-        // extra breathing room — under-estimating causes the image to
-        // render at <100% even when it should fit at 1:1.
-        const IMAGE_PAD_CSS: f64 = 40.0;
+        // Padding around the image — the SAME per-side amount the
+        // renderer pads the canvas with (`femtovg_area::CANVAS_PADDING_CSS`,
+        // the single source of truth) — plus a generous estimate for
+        // the top/bottom toolbar chrome. The renderer scales the image
+        // to fit whatever canvas size GTK gives it, so an over-estimate
+        // just means a little extra breathing room — under-estimating
+        // causes the image to render at <100% even when it should fit
+        // at 1:1.
+        let image_pad = femtovg_area::CANVAS_PADDING_CSS as f64;
         const TOOLBAR_CHROME_CSS: f64 = 120.0;
-        let padded_image_w = image_width + 2.0 * IMAGE_PAD_CSS;
-        let padded_image_h = image_height + 2.0 * IMAGE_PAD_CSS + TOOLBAR_CHROME_CSS;
+        let padded_image_w = image_width + 2.0 * image_pad;
+        let padded_image_h = image_height + 2.0 * image_pad + TOOLBAR_CHROME_CSS;
 
         // Width floor so the top toolbar opens on a single row no
         // matter how narrow the image is. Measured live — the toolbar
