@@ -24,7 +24,7 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -43,7 +43,7 @@ jobs:
     steps:
       - name: Install native deps
         run: yum install -y gtk4-devel libadwaita-devel gtk4-layer-shell-devel wayland-devel
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy

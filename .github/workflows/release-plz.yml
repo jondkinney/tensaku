@@ -24,7 +24,7 @@ jobs:
         # viewer's name/email for git authoring; the gtk-rs container
         # doesn't ship it.
         run: yum install -y gtk4-devel libadwaita-devel gtk4-layer-shell-devel wayland-devel gh
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - name: Configure git safe directory
@@ -54,7 +54,7 @@ jobs:
     steps:
       - name: Install native deps + gh CLI
         run: yum install -y gtk4-devel libadwaita-devel gtk4-layer-shell-devel wayland-devel gh
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - name: Configure git safe directory
