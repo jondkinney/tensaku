@@ -29,10 +29,17 @@ use crate::{
     tools::{CropTool, Drawable, DrawableId, Stacked, Tool, UndoAction},
 };
 
-use super::{CANVAS_PADDING_CSS, font_stack, set_font_stack};
+use super::{font_stack, set_font_stack};
 
 const TRANSPARENCY_SQUARE_SIZE: usize = 64;
 
+/// Breathing room (in CSS px) around the rendered screenshot inside
+/// the canvas. Gives the image visual separation from the toolbars
+/// and lets the drop shadow fall outside the image edges. Scaled to
+/// canvas pixels at render time via the device pixel ratio. Sized to
+/// fully contain the `SHADOW_KEY_*` extent below so the wide key
+/// shadow doesn't get clipped at the canvas edge.
+const CANVAS_PADDING_CSS: f32 = 60.0;
 /// Lowest auto-fit zoom a vertical window resize will shrink the
 /// image to. Enforced two ways so it holds under any window manager:
 /// `apply_vertical_resize_floor` pins a minimum height on `outer_box`
@@ -556,13 +563,11 @@ impl GLAreaImpl for FemtoVGArea {
         // update scale factor + pan; capture the snapshot we need
         // for the upstream notifications BEFORE releasing the inner
         // borrow so the emit paths don't have to re-acquire it.
-        // The zoom indicator shows a *user-facing* zoom where 100% is
-        // the image at its true 1× logical size. Internally that's
-        // `effective_scale` (a render scale whose 100% is
-        // `natural_scale()`, not 1.0), so divide it back out before
-        // emitting — otherwise a fractional-scaling output would read
-        // e.g. "187%" at the fit-to-window view.
-        let (display_zoom, pan_info, min_canvas_h) = {
+        // `effective_scale` is what the indicator should show — for
+        // committed-crop mode it's `crop_zoom`, for the regular view
+        // it equals `scale_factor`. update_transformation keeps it in
+        // sync now, so one emit covers both paths.
+        let (eff_scale, pan_info, min_canvas_h) = {
             let mut inner_ref = self.inner();
             let inner = inner_ref
                 .as_mut()
@@ -591,12 +596,12 @@ impl GLAreaImpl for FemtoVGArea {
                 canvas_h: canvas.height() as f32,
             };
             (
-                inner.effective_scale / inner.natural_scale(),
+                inner.effective_scale,
                 pan_info,
                 inner.min_canvas_height_logical(),
             )
         };
-        self.notify_zoom_display(display_zoom);
+        self.notify_zoom_display(eff_scale);
         self.notify_pan_display(pan_info);
         self.apply_vertical_resize_floor(min_canvas_h);
     }
@@ -886,25 +891,15 @@ impl FemtoVGArea {
 }
 
 /// Auto-fit scale that fits `content` (device px) inside the padded
-/// `inner` area, capped at `max_scale` — the render scale at which the
-/// image displays at its true 1× logical size (see
-/// `FemtoVgAreaMut::natural_scale`; it's 1.0 on integer-scaled
-/// displays and >1 on fractional-scaling outputs). The *vertical* fit
-/// term is floored at `MIN_AUTO_FIT_ZOOM`: shrinking the window's
-/// height — including a tiling-WM resize that ignores our `outer_box`
-/// min-size request — can't squeeze the image past that zoom; the
-/// canvas clips it instead. The horizontal term is left unfloored,
-/// matching the height-only `min_canvas_height_logical` /
-/// size-request floor.
-fn auto_fit_scale(
-    inner_w: f32,
-    inner_h: f32,
-    content_w: f32,
-    content_h: f32,
-    max_scale: f32,
-) -> f32 {
+/// `inner` area, capped at 1:1. The *vertical* fit term is floored at
+/// `MIN_AUTO_FIT_ZOOM`: shrinking the window's height — including a
+/// tiling-WM resize that ignores our `outer_box` min-size request —
+/// can't squeeze the image past that zoom; the canvas clips it
+/// instead. The horizontal term is left unfloored, matching the
+/// height-only `min_canvas_height_logical` / size-request floor.
+fn auto_fit_scale(inner_w: f32, inner_h: f32, content_w: f32, content_h: f32) -> f32 {
     let fit_h = (inner_h / content_h).max(MIN_AUTO_FIT_ZOOM);
-    (inner_w / content_w).min(fit_h).min(max_scale)
+    (inner_w / content_w).min(fit_h).min(1.0)
 }
 
 impl FemtoVgAreaMut {
@@ -1717,13 +1712,7 @@ impl FemtoVgAreaMut {
             let pad = CANVAS_PADDING_CSS * self.device_pixel_ratio.max(0.0001);
             let inner_w = (canvas_w - 2.0 * pad).max(canvas_w * 0.5).max(1.0);
             let inner_h = (canvas_h - 2.0 * pad).max(canvas_h * 0.5).max(1.0);
-            let base_scale = auto_fit_scale(
-                inner_w,
-                inner_h,
-                crop_size.x,
-                crop_size.y,
-                self.natural_scale(),
-            );
+            let base_scale = auto_fit_scale(inner_w, inner_h, crop_size.x, crop_size.y);
             let scale = base_scale * self.crop_zoom;
             let crop_canvas_w = crop_size.x * scale;
             let crop_canvas_h = crop_size.y * scale;
@@ -1741,11 +1730,8 @@ impl FemtoVgAreaMut {
             self.drag_offset.x = self.drag_offset.x.clamp(-excess_x / 2.0, excess_x / 2.0);
             self.drag_offset.y = self.drag_offset.y.clamp(-excess_y / 2.0, excess_y / 2.0);
             self.last_offset = self.drag_offset;
-            // Round to whole device pixels for the same reason as the
-            // non-crop path in `update_transformation`: a half-pixel
-            // translation blurs the texture through bilinear sampling.
-            let offset_x = (pad_x - scale * crop_pos.x + self.drag_offset.x).round();
-            let offset_y = (pad_y - scale * crop_pos.y + self.drag_offset.y).round();
+            let offset_x = pad_x - scale * crop_pos.x + self.drag_offset.x;
+            let offset_y = pad_y - scale * crop_pos.y + self.drag_offset.y;
             // Visible-content canvas-pixel rect — used by the
             // drop-shadow path so the shadow falls around the
             // cropped region, not the full background image
@@ -2497,27 +2483,6 @@ impl FemtoVgAreaMut {
         }
     }
 
-    /// Render scale at which the background image displays at its true
-    /// 1× logical size — i.e. what "100% zoom" means for this capture.
-    ///
-    /// The image arrives as capture-native (device) pixels. The GL
-    /// canvas renders into a framebuffer `device_pixel_ratio`× the
-    /// logical canvas. So an image drawn at render scale `s` occupies
-    /// `image_px · s / device_pixel_ratio` logical pixels. For that to
-    /// equal the image's own logical size (`image_px / capture_scale`)
-    /// the render scale must be `device_pixel_ratio / capture_scale`.
-    ///
-    /// On integer-scaled displays the capture scale equals the GL DPR,
-    /// so this is exactly `1.0` and nothing changes. On a fractional
-    /// output (e.g. 1.07× — where GTK rounds the GL DPR up to 2) it's
-    /// `2 / 1.07 ≈ 1.87`, which is what stops the screenshot from
-    /// rendering at roughly half size.
-    fn natural_scale(&self) -> f32 {
-        let dpr = self.device_pixel_ratio.max(0.0001);
-        let capture = crate::display::capture_scale().unwrap_or(dpr).max(0.0001);
-        dpr / capture
-    }
-
     pub fn update_transformation(
         &mut self,
         canvas: &mut femtovg::Canvas<femtovg::renderer::OpenGl>,
@@ -2569,13 +2534,7 @@ impl FemtoVgAreaMut {
             let inner_h = (canvas_height - 2.0 * pad)
                 .max(canvas_height * 0.5)
                 .max(1.0);
-            self.scale_factor = auto_fit_scale(
-                inner_w,
-                inner_h,
-                image_width,
-                image_height,
-                self.natural_scale(),
-            );
+            self.scale_factor = auto_fit_scale(inner_w, inner_h, image_width, image_height);
         }
 
         // `effective_scale` is what the zoom indicator should show:
@@ -2599,13 +2558,7 @@ impl FemtoVgAreaMut {
             let inner_h = (canvas_height - 2.0 * pad)
                 .max(canvas_height * 0.5)
                 .max(1.0);
-            auto_fit_scale(
-                inner_w,
-                inner_h,
-                crop_size.x,
-                crop_size.y,
-                self.natural_scale(),
-            ) * self.crop_zoom
+            auto_fit_scale(inner_w, inner_h, crop_size.x, crop_size.y) * self.crop_zoom
         } else {
             self.scale_factor
         };
@@ -2712,19 +2665,6 @@ impl FemtoVgAreaMut {
             //dragged
             self.offset = center_offset + Vec2D::new(effective_x, effective_y);
         }
-
-        // Snap the image origin to whole device pixels. `center_offset`
-        // is `(canvas − image) / 2`, which lands on a half-pixel
-        // whenever `canvas − image` is odd — and a half-pixel
-        // translation makes the GPU sample the background texture
-        // between texels, blurring the *entire* image through bilinear
-        // filtering even at an exact 1:1 scale. Rounding here keeps a
-        // 100%-zoom screenshot pixel-perfect; at a fractional render
-        // scale the image is resampled regardless, so the round is
-        // harmless. Drawables share this transform, so they stay
-        // pinned to the image.
-        self.offset.x = self.offset.x.round();
-        self.offset.y = self.offset.y.round();
     }
 
     /// Pan the canvas by `(dx, dy)` canvas-space pixels. Accumulates
@@ -2843,30 +2783,21 @@ impl FemtoVgAreaMut {
         // user can only see a sliver of the image (above 500%).
         // `factor == 0.0` is the FitCanvas sentinel — preserved as-is
         // so `update_transformation` re-enters the auto-fit branch.
-        //
-        // `zoom_scale` is stored as a *render* scale (the transform
-        // fed to `t.scale`), where `natural_scale()` — not 1.0 — is
-        // 100%. So the user-facing limits and an absolute `factor`
-        // (which arrives in user-zoom terms, 1.0 = 100%) are both
-        // mapped through `natural`. A relative `factor` is a plain
-        // ratio and needs no mapping; only its clamp bounds do.
         const MIN_ZOOM: f32 = 0.10;
         const MAX_ZOOM: f32 = 5.00;
-        let natural = self.natural_scale();
-        let (min_render, max_render) = (MIN_ZOOM * natural, MAX_ZOOM * natural);
 
         if abs {
             if factor == 0.0 {
                 self.zoom_scale = 0.0;
             } else {
-                self.zoom_scale = (factor * natural).clamp(min_render, max_render);
+                self.zoom_scale = factor.clamp(MIN_ZOOM, MAX_ZOOM);
             }
         } else {
             if self.zoom_scale == 0.0 {
                 self.zoom_scale = self.scale_factor;
             }
 
-            self.zoom_scale = (self.zoom_scale * factor).clamp(min_render, max_render);
+            self.zoom_scale = (self.zoom_scale * factor).clamp(MIN_ZOOM, MAX_ZOOM);
         }
     }
 
