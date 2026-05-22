@@ -32,10 +32,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Install native deps + make
-        run: yum install -y gtk4-devel libadwaita-devel gtk4-layer-shell-devel wayland-devel make tar gzip
+      - name: Install native deps + make + gh CLI
+        # gh is used below to attach the tarball; the gtk-rs container
+        # doesn't ship it.
+        run: yum install -y gtk4-devel libadwaita-devel gtk4-layer-shell-devel wayland-devel make tar gzip gh
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: ${{ github.event.release.tag_name || inputs.tag }}
@@ -50,10 +52,10 @@ jobs:
         run: make ARCH=x86_64 package
 
       - name: Attach tarball to the release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.release.tag_name || inputs.tag }}
-          files: tensaku-${{ github.event.release.tag_name || inputs.tag }}-x86_64.tar.gz
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release upload "$TAG" "tensaku-$TAG-x86_64.tar.gz" --clobber --repo "$GITHUB_REPOSITORY"
 
   linux-aarch64-tarball:
     name: "Linux aarch64 tarball"
@@ -70,7 +72,7 @@ jobs:
       # library at version >= 1.0; v1.0.4 is the latest 1.0.x patch.
       GTK4_LAYER_SHELL_VERSION: "v1.0.4"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: ${{ github.event.release.tag_name || inputs.tag }}
@@ -128,7 +130,7 @@ jobs:
         run: make ARCH=aarch64 package
 
       - name: Attach tarball to the release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.release.tag_name || inputs.tag }}
-          files: tensaku-${{ github.event.release.tag_name || inputs.tag }}-aarch64.tar.gz
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release upload "$TAG" "tensaku-$TAG-aarch64.tar.gz" --clobber --repo "$GITHUB_REPOSITORY"
