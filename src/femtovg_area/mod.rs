@@ -21,6 +21,20 @@ use crate::{
     tools::{CropTool, Drawable, DrawableId, DrawableStore, Tool},
 };
 
+/// Breathing room (in CSS px) reserved on every side of the rendered
+/// screenshot inside the canvas. Gives the image visual separation
+/// from the toolbars and lets the drop shadow fall outside the image
+/// edges; sized to fully contain the key drop shadow so it isn't
+/// clipped at the canvas edge.
+///
+/// Single source of truth: the renderer pads the canvas by this much
+/// (`imp.rs`), and `main.rs` reserves the *same* amount when sizing
+/// the launch / crop-commit window — if the two disagree the image
+/// renders below 100% (the window is too small for the renderer's
+/// padding). Kept here, public, so a future user-facing padding
+/// setting has one constant to replace.
+pub const CANVAS_PADDING_CSS: f32 = 60.0;
+
 static FONT_STACK: OnceLock<Vec<FontId>> = OnceLock::new();
 
 pub fn set_font_stack(fonts: Vec<FontId>) {

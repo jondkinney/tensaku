@@ -7,6 +7,32 @@
 //! expose fractional scales (1.25×, 1.5×) reliably.
 
 use std::process::Command;
+use std::sync::OnceLock;
+
+/// The fractional scale the screenshot being edited was captured at,
+/// resolved once and cached. `grim` hands us capture-native (device)
+/// pixels with no scale metadata, so to map them back to logical
+/// ("1×") pixels we need the compositor's fractional output scale —
+/// GTK's `scale_factor()` only exposes the rounded-up integer
+/// (a 1.07× output reports `2`, which would render the image at
+/// roughly half size).
+///
+/// Resolution order: an explicit `input_scale` config override wins;
+/// otherwise the focused Hyprland monitor's fractional `scale`.
+/// Returns `None` when neither is available (not Hyprland, no
+/// override) — callers then fall back to GTK's integer `scale_factor`,
+/// which reproduces the pre-fractional behaviour exactly.
+pub fn capture_scale() -> Option<f32> {
+    static CACHE: OnceLock<Option<f32>> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        let input_scale = crate::APP_CONFIG.read().input_scale();
+        if input_scale != 1.0 {
+            Some(input_scale)
+        } else {
+            detect_hyprland_scale()
+        }
+    })
+}
 
 /// Try to read the focused monitor's scale from Hyprland. Returns
 /// `None` when not running under Hyprland or when `hyprctl` is missing
