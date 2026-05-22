@@ -437,18 +437,13 @@ impl App {
         })
     }
 
-    /// Effective DPI scale to display dimensions in — divides capture-
-    /// native pixels into CSS-px equivalents so a 1498 × 218 image
-    /// taken on a 2× HiDPI screen reads as 749 × 109. Explicit
-    /// `input_scale` wins; otherwise we pick the larger of the
-    /// widget's `scale_factor()` and the monitor's `scale_factor()`
-    /// to handle Wayland fractional-scaling outputs where root can
-    /// report 1.
-    fn display_scale_divisor(root: &Window) -> i32 {
-        let input_scale = APP_CONFIG.read().input_scale();
-        if input_scale != 1.0 {
-            return input_scale.round().max(1.0) as i32;
-        }
+    /// Integer scale factor reported by GTK — the larger of the
+    /// window's and its monitor's `scale_factor()`. The monitor probe
+    /// handles Wayland fractional-scaling outputs where the root
+    /// surface can report `1`. Used only as the fallback when
+    /// `capture_scale` can't determine the real fractional scale
+    /// (non-Hyprland).
+    fn gtk_integer_scale(root: &Window) -> i32 {
         let root_scale = root.scale_factor().max(1);
         let monitor_scale = root
             .surface()
@@ -463,6 +458,18 @@ impl App {
         root_scale.max(monitor_scale)
     }
 
+    /// Fractional scale the screenshot was captured at — divides
+    /// capture-native pixels into logical ("1×") pixels so a
+    /// 1498 × 218 image taken on a 2× HiDPI screen reads as 749 × 109.
+    /// Prefers the real fractional scale (an `input_scale` override,
+    /// else the focused Hyprland monitor); falls back to GTK's integer
+    /// `scale_factor` off-Hyprland. Returns a non-integer on
+    /// fractional-scaling outputs (e.g. 1.07×), which GTK's own
+    /// `scale_factor()` rounds up to 2 and would halve the image.
+    fn capture_scale(root: &Window) -> f32 {
+        display::capture_scale().unwrap_or_else(|| Self::gtk_integer_scale(root) as f32)
+    }
+
     /// Compute the window size to wrap `content_w × content_h` pixels
     /// (in CSS px, already DPR-corrected) with the standard image
     /// padding + toolbar chrome, capped to 90 % of `monitor` on each
@@ -474,10 +481,14 @@ impl App {
         content_h: f64,
         monitor: Option<Rectangle>,
     ) -> (i32, i32) {
-        const IMAGE_PAD_CSS: f64 = 40.0;
+        // Reserve the SAME per-side padding the renderer pads the
+        // canvas with — if this is smaller the window is too small
+        // for the renderer's padding and the image renders below
+        // 100%. Single source of truth: `femtovg_area::CANVAS_PADDING_CSS`.
+        let image_pad = femtovg_area::CANVAS_PADDING_CSS as f64;
         const TOOLBAR_CHROME_CSS: f64 = 120.0;
-        let padded_w = content_w + 2.0 * IMAGE_PAD_CSS;
-        let padded_h = content_h + 2.0 * IMAGE_PAD_CSS + TOOLBAR_CHROME_CSS;
+        let padded_w = content_w + 2.0 * image_pad;
+        let padded_h = content_h + 2.0 * image_pad + TOOLBAR_CHROME_CSS;
         let (final_w, final_h) = if let Some(m) = monitor {
             let max_w = m.width() as f64 * 0.90;
             let max_h = m.height() as f64 * 0.90;
@@ -519,29 +530,14 @@ impl App {
 
         // Convert image dimensions from PIXELS (capture-native, what
         // grim hands us — device px on HiDPI displays) to the GTK
-        // window's CSS-px coordinate system. `input_scale` is the
-        // explicit user override; when it's left at the default 1.0
-        // we fall back to the widget's reported scale factor — and
-        // for Wayland fractional-scaling outputs (where GTK4 reports
-        // scale_factor=1 and relies on wp-fractional-scale) we also
-        // probe the monitor object for its scale.
-        let input_scale = APP_CONFIG.read().input_scale();
-        let root_scale = root.scale_factor().max(1) as f64;
-        let monitor_scale = root
-            .surface()
-            .and_then(|s| {
-                DisplayManager::get()
-                    .default_display()
-                    .and_then(|d| d.monitor_at_surface(&s))
-            })
-            .map(|m| m.scale_factor() as f64)
-            .unwrap_or(1.0)
-            .max(1.0);
-        let scale = if input_scale != 1.0 {
-            input_scale as f64
-        } else {
-            root_scale.max(monitor_scale)
-        };
+        // window's CSS-px coordinate system. `capture_scale` is the
+        // fractional scale the screenshot was taken at: an explicit
+        // `input_scale` override, else the focused Hyprland monitor's
+        // scale, else GTK's integer `scale_factor`. Using the
+        // fractional value matters on outputs like 1.07× — GTK's own
+        // `scale_factor()` rounds those to 2 and would size the
+        // window for a half-scale image.
+        let scale = Self::capture_scale(root) as f64;
         let image_width = self.image_dimensions.0 as f64 / scale;
         let image_height = self.image_dimensions.1 as f64 / scale;
 
@@ -558,16 +554,18 @@ impl App {
         }
 
         let monitor_size_opt = Self::get_monitor_size(root);
-        // Padding around the image (matches CANVAS_PADDING_CSS in the
-        // renderer) + a generous estimate for the top/bottom toolbar
-        // chrome. The renderer scales the image to fit whatever canvas
-        // size GTK gives it, so an over-estimate just means a little
-        // extra breathing room — under-estimating causes the image to
-        // render at <100% even when it should fit at 1:1.
-        const IMAGE_PAD_CSS: f64 = 40.0;
+        // Padding around the image — the SAME per-side amount the
+        // renderer pads the canvas with (`femtovg_area::CANVAS_PADDING_CSS`,
+        // the single source of truth) — plus a generous estimate for
+        // the top/bottom toolbar chrome. The renderer scales the image
+        // to fit whatever canvas size GTK gives it, so an over-estimate
+        // just means a little extra breathing room — under-estimating
+        // causes the image to render at <100% even when it should fit
+        // at 1:1.
+        let image_pad = femtovg_area::CANVAS_PADDING_CSS as f64;
         const TOOLBAR_CHROME_CSS: f64 = 120.0;
-        let padded_image_w = image_width + 2.0 * IMAGE_PAD_CSS;
-        let padded_image_h = image_height + 2.0 * IMAGE_PAD_CSS + TOOLBAR_CHROME_CSS;
+        let padded_image_w = image_width + 2.0 * image_pad;
+        let padded_image_h = image_height + 2.0 * image_pad + TOOLBAR_CHROME_CSS;
 
         // Width floor so the top toolbar opens on a single row no
         // matter how narrow the image is. Measured live — the toolbar
@@ -961,15 +959,15 @@ impl Component for App {
             AppInput::DimensionsUpdate(dimensions) => {
                 let d = dimensions.unwrap_or(self.image_dimensions);
                 // Show the dimensions in the same coordinate system
-                // the user perceives — divide by the display's DPR
+                // the user perceives — divide by the capture scale
                 // so a 1498×218 image captured on a 2× HiDPI screen
                 // reads as 749×109 (the visual size of the region
                 // they framed), not the doubled device-pixel count.
-                let scale = Self::display_scale_divisor(root);
+                let scale = Self::capture_scale(root);
                 self.output_dimensions_label.set_text(&format!(
                     "{} x {}",
-                    d.0 / scale,
-                    d.1 / scale
+                    (d.0 as f32 / scale).round() as i32,
+                    (d.1 as f32 / scale).round() as i32
                 ));
                 // (NB: the crop-mode toolbar W/H entries get their
                 // live values via `CropEditDimensions` instead, so
@@ -1069,16 +1067,11 @@ impl Component for App {
             AppInput::ContentSizeChanged { width, height } => {
                 // Fit the window around the new content — applied via
                 // `set_default_size`, which Wayland's compositor will
-                // generally honor as a resize request. Same
-                // input_scale → device-pixel-ratio fallback as the
-                // initial-resize path: convert capture-native pixels
-                // into the window's CSS-px coord system.
-                let input_scale = APP_CONFIG.read().input_scale();
-                let scale = if input_scale != 1.0 {
-                    input_scale as f64
-                } else {
-                    root.scale_factor().max(1) as f64
-                };
+                // generally honor as a resize request. Uses the same
+                // fractional `capture_scale` as the initial-resize
+                // path to convert capture-native pixels into the
+                // window's CSS-px coord system.
+                let scale = Self::capture_scale(root) as f64;
                 let scaled_w = width as f64 / scale;
                 let scaled_h = height as f64 / scale;
                 let monitor = Self::get_monitor_size(root);
@@ -1597,14 +1590,14 @@ impl Component for App {
         // full image size so something's visible immediately —
         // sketch_board republishes via DimensionsUpdate whenever the
         // crop changes. Format must match the spaced "W x H" form
-        // used in the DimensionsUpdate handler above. Divide by DPR
-        // here too so the seeded value isn't doubled compared to
-        // what the user sees rendered on screen.
-        let display_scale = Self::display_scale_divisor(&root);
+        // used in the DimensionsUpdate handler above. Divide by the
+        // capture scale here too so the seeded value isn't doubled
+        // compared to what the user sees rendered on screen.
+        let display_scale = Self::capture_scale(&root);
         model.output_dimensions_label.set_text(&format!(
             "{} x {}",
-            image_dimensions.0 / display_scale,
-            image_dimensions.1 / display_scale,
+            (image_dimensions.0 as f32 / display_scale).round() as i32,
+            (image_dimensions.1 as f32 / display_scale).round() as i32,
         ));
 
         // Seed the ToolsToolbar's image_dimensions mirror so the
