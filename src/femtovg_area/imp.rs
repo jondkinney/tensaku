@@ -1741,8 +1741,11 @@ impl FemtoVgAreaMut {
             self.drag_offset.x = self.drag_offset.x.clamp(-excess_x / 2.0, excess_x / 2.0);
             self.drag_offset.y = self.drag_offset.y.clamp(-excess_y / 2.0, excess_y / 2.0);
             self.last_offset = self.drag_offset;
-            let offset_x = pad_x - scale * crop_pos.x + self.drag_offset.x;
-            let offset_y = pad_y - scale * crop_pos.y + self.drag_offset.y;
+            // Round to whole device pixels for the same reason as the
+            // non-crop path in `update_transformation`: a half-pixel
+            // translation blurs the texture through bilinear sampling.
+            let offset_x = (pad_x - scale * crop_pos.x + self.drag_offset.x).round();
+            let offset_y = (pad_y - scale * crop_pos.y + self.drag_offset.y).round();
             // Visible-content canvas-pixel rect — used by the
             // drop-shadow path so the shadow falls around the
             // cropped region, not the full background image
@@ -2709,6 +2712,19 @@ impl FemtoVgAreaMut {
             //dragged
             self.offset = center_offset + Vec2D::new(effective_x, effective_y);
         }
+
+        // Snap the image origin to whole device pixels. `center_offset`
+        // is `(canvas − image) / 2`, which lands on a half-pixel
+        // whenever `canvas − image` is odd — and a half-pixel
+        // translation makes the GPU sample the background texture
+        // between texels, blurring the *entire* image through bilinear
+        // filtering even at an exact 1:1 scale. Rounding here keeps a
+        // 100%-zoom screenshot pixel-perfect; at a fractional render
+        // scale the image is resampled regardless, so the round is
+        // harmless. Drawables share this transform, so they stay
+        // pinned to the image.
+        self.offset.x = self.offset.x.round();
+        self.offset.y = self.offset.y.round();
     }
 
     /// Pan the canvas by `(dx, dy)` canvas-space pixels. Accumulates
