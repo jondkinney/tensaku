@@ -16,6 +16,7 @@ depends=('gtk4' 'gtk4-layer-shell' 'libadwaita' 'libepoxy' 'fontconfig')
 makedepends=('rust' 'git')
 provides=("$_pkgname=$pkgver")
 conflicts=("$_pkgname" "$_pkgname-bin")
+install=tensaku.install
 source=("$_pkgname::git+https://github.com/jondkinney/$_pkgname.git")
 sha256sums=('SKIP')
 
