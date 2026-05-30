@@ -41,6 +41,7 @@ clean:
 
 install: target/release/tensaku
 	install -s -Dm755 target/release/tensaku -t $(BINDIR)
+	install -Dm755 assets/tensaku-edit $(BINDIR)/tensaku-edit
 	install -Dm644 dev.tensaku.Tensaku.desktop $(PREFIX)/share/applications/dev.tensaku.Tensaku.desktop
 	install -Dm644 assets/tensaku.svg $(PREFIX)/share/icons/hicolor/scalable/apps/dev.tensaku.Tensaku.svg
 	install -Dm644 LICENSE $(PREFIX)/share/licenses/tensaku/LICENSE
@@ -55,6 +56,7 @@ install: target/release/tensaku
 
 uninstall:
 	rm ${BINDIR}/tensaku
+	rm ${BINDIR}/tensaku-edit
 	rmdir -p ${PREFIX}/bin || true
 
 	rm ${PREFIX}/share/applications/dev.tensaku.Tensaku.desktop

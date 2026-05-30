@@ -319,6 +319,10 @@ Options:
           Install the desktop entry and app icon into the user's XDG data directory (~/.local/share), then exit. Run this once after `cargo install tensaku`; package installs (AUR, make install) register these files already
       --doctor
           Report whether the optional external tools Tensaku relies on (grim, slurp, wl-copy) are installed and the session looks right, then exit
+      --install-omarchy-wrapper
+          Install the Omarchy screenshot wrapper (~/.local/bin/tensaku-edit) so Omarchy's screenshot keybinds open captures in Tensaku, then exit. Also checks that OMARCHY_SCREENSHOT_EDITOR points at it
+      --wire-omarchy
+          Point Omarchy's screenshot editor at the tensaku-edit wrapper: set OMARCHY_SCREENSHOT_EDITOR in ~/.config/hypr/envs.conf and in the running Hyprland session, then exit. Installs the wrapper first if needed; does not edit keybinds
   -c, --config <CONFIG>
           Path to the config file. Otherwise will be read from XDG_CONFIG_DIR/tensaku/config.toml
   -f, --filename <FILENAME>
@@ -426,21 +430,24 @@ Tensaku supports IME via GTK with and without preediting. Please note, at this p
 Omarchy already ships screenshot keybinds — they run
 `omarchy-capture-screenshot`, which handles the region/window selection
 and hands the capture to whatever `OMARCHY_SCREENSHOT_EDITOR` points at.
-Wire that to Tensaku.
+Tensaku takes its input as a flag, not a positional argument, so it needs
+a small wrapper (`~/.local/bin/tensaku-edit`) to bridge the two — and
+Tensaku manages that wrapper for you. It's installed automatically the
+first time Tensaku runs on an Omarchy session.
 
-Tensaku takes its input as a flag, not a positional argument, so add a
-small wrapper at `~/.local/bin/tensaku-edit`:
+To wire everything up in one step:
 
 ```sh
-#!/bin/bash
-exec tensaku --filename "$1" --output-filename "$1" \
-  --actions-on-enter save-to-clipboard --save-after-copy --copy-command wl-copy
+tensaku --wire-omarchy
 ```
 
-Make it executable, point `OMARCHY_SCREENSHOT_EDITOR` at the wrapper's
-absolute path (e.g. an `env =` line in `~/.config/hypr/envs.conf`), and
-run `hyprctl reload`. Your normal screenshot keys now open each capture
-straight into Tensaku — with Omarchy's window/output highlighting intact.
+This installs the wrapper if needed and points `OMARCHY_SCREENSHOT_EDITOR`
+at it — both in `~/.config/hypr/envs.conf` (persisted, and backed up first)
+and in the running Hyprland session, so your screenshot keys open each
+capture straight into Tensaku, with Omarchy's window/output highlighting
+intact and no restart needed. `tensaku --install-omarchy-wrapper` installs
+just the wrapper without touching any config, and `tensaku --doctor` shows
+the current wrapper and wiring status.
 
 **Scrolling capture** is a separate mode — `omarchy-capture-screenshot`
 doesn't cover it. Bind a key straight to `tensaku --scroll-capture`,

@@ -42,6 +42,8 @@ pub struct Configuration {
     license: bool,
     install_desktop: bool,
     doctor: bool,
+    install_omarchy_wrapper: bool,
+    wire_omarchy: bool,
     input_filename: Option<String>,
     output_filename: Option<String>,
     fullscreen: Option<Fullscreen>,
@@ -546,6 +548,12 @@ impl Configuration {
         if command_line.doctor {
             self.doctor = true;
         }
+        if command_line.install_omarchy_wrapper {
+            self.install_omarchy_wrapper = true;
+        }
+        if command_line.wire_omarchy {
+            self.wire_omarchy = true;
+        }
         if command_line.early_exit {
             self.early_exit = command_line.early_exit;
         }
@@ -690,6 +698,14 @@ impl Configuration {
 
     pub fn doctor(&self) -> bool {
         self.doctor
+    }
+
+    pub fn install_omarchy_wrapper(&self) -> bool {
+        self.install_omarchy_wrapper
+    }
+
+    pub fn wire_omarchy(&self) -> bool {
+        self.wire_omarchy
     }
 
     pub fn early_exit(&self) -> bool {
@@ -949,6 +965,8 @@ impl Default for Configuration {
             license: false,
             install_desktop: false,
             doctor: false,
+            install_omarchy_wrapper: false,
+            wire_omarchy: false,
             input_filename: Some(String::new()),
             output_filename: None,
             fullscreen: None,
