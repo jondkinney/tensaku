@@ -36,6 +36,14 @@
        Version history section on the listing page; the latest
        release is the only one strictly required. -->
   <releases>
+    <release version="0.26.3" date="2026-05-30">
+      <description>
+        <p>Fixed:</p>
+        <ul>
+          <li>report envs.conf wiring, not just the live env</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.26.2" date="2026-05-30">
       <description>
         <p>Fixed:</p>
