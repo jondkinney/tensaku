@@ -40,6 +40,7 @@ mod icons;
 mod ime;
 mod math;
 mod notification;
+mod omarchy_wrapper;
 mod scroll_capture;
 mod sketch_board;
 mod state;
@@ -1843,6 +1844,12 @@ fn main() -> Result<()> {
     if APP_CONFIG.read().doctor() {
         return doctor::run();
     }
+    if APP_CONFIG.read().install_omarchy_wrapper() {
+        return omarchy_wrapper::run();
+    }
+    if APP_CONFIG.read().wire_omarchy() {
+        return omarchy_wrapper::wire();
+    }
     if APP_CONFIG.read().profile_startup() {
         eprintln!(
             "startup timestamp was {}",
@@ -1856,6 +1863,12 @@ fn main() -> Result<()> {
     // Do it silently on the first normal launch — best-effort, never
     // blocks startup. --install-desktop stays the explicit, verbose path.
     desktop_install::ensure_first_launch();
+
+    // First-launch Omarchy wrapper: on an Omarchy session, place
+    // ~/.local/bin/tensaku-edit so the screenshot keybinds open captures
+    // in Tensaku. Silent, one-shot, best-effort; --install-omarchy-wrapper
+    // stays the explicit, verbose path.
+    omarchy_wrapper::ensure_first_launch();
 
     if APP_CONFIG.read().scroll_capture() {
         return match scroll_capture::run() {

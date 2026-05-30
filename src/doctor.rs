@@ -6,7 +6,7 @@
 use anyhow::Result;
 
 /// Is `bin` an executable file somewhere on `$PATH`?
-fn on_path(bin: &str) -> bool {
+pub(crate) fn on_path(bin: &str) -> bool {
     std::env::var_os("PATH")
         .map(|path| std::env::split_paths(&path).any(|dir| dir.join(bin).is_file()))
         .unwrap_or(false)
@@ -56,6 +56,11 @@ pub fn run() -> Result<()> {
             println!("          {}", c.hint);
         }
     }
+
+    if crate::omarchy_wrapper::is_omarchy() {
+        report_omarchy_wrapper();
+    }
+
     println!();
     if missing == 0 {
         println!("All good — every tool Tensaku's workflow uses is present.");
@@ -63,4 +68,45 @@ pub fn run() -> Result<()> {
         println!("{missing} missing. Tensaku still runs, but the noted features won't work.");
     }
     Ok(())
+}
+
+/// On Omarchy, report whether the screenshot wrapper is installed and
+/// whether `$OMARCHY_SCREENSHOT_EDITOR` is wired to it.
+fn report_omarchy_wrapper() {
+    use crate::omarchy_wrapper::{Wiring, classify_wiring, wrapper_path};
+
+    println!();
+    println!("Omarchy detected — screenshot wrapper:");
+
+    let wrapper = match wrapper_path() {
+        Ok(p) => p,
+        Err(_) => {
+            println!("  [miss]  can't locate ~/.local/bin (is $HOME set?)");
+            return;
+        }
+    };
+
+    if wrapper.exists() {
+        println!("  [ ok ]  wrapper installed: {}", wrapper.display());
+    } else {
+        println!("  [miss]  wrapper not installed: {}", wrapper.display());
+        println!("          run: tensaku --install-omarchy-wrapper");
+    }
+
+    match classify_wiring(std::env::var_os("OMARCHY_SCREENSHOT_EDITOR"), &wrapper) {
+        Wiring::Correct => {
+            println!("  [ ok ]  OMARCHY_SCREENSHOT_EDITOR points at the wrapper");
+        }
+        Wiring::Elsewhere(other) => {
+            println!(
+                "  [miss]  OMARCHY_SCREENSHOT_EDITOR points at {}",
+                other.display()
+            );
+            println!("          point it at the wrapper, then run: hyprctl reload");
+        }
+        Wiring::Unset => {
+            println!("  [miss]  OMARCHY_SCREENSHOT_EDITOR is not set");
+            println!("          point it at the wrapper, then run: hyprctl reload");
+        }
+    }
 }

@@ -26,7 +26,7 @@ const DESKTOP_ENTRY: &str = include_str!("../dev.tensaku.Tensaku.desktop");
 const APP_ID: &str = "dev.tensaku.Tensaku";
 
 /// `$XDG_DATA_HOME`, falling back to `$HOME/.local/share`.
-fn xdg_data_home() -> Result<PathBuf> {
+pub(crate) fn xdg_data_home() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("XDG_DATA_HOME").filter(|d| !d.is_empty()) {
         return Ok(PathBuf::from(dir));
     }
