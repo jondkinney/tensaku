@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0](https://github.com/jondkinney/tensaku/compare/v0.25.2...v0.26.0) - 2026-05-30
+
+### Added
+
+- auto-install and wire the Omarchy screenshot wrapper
+
 ## [0.25.2](https://github.com/jondkinney/tensaku/compare/v0.25.1...v0.25.2) - 2026-05-22
 
 ### Fixed
