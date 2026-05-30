@@ -256,6 +256,20 @@ fn find_or_install_wrapper() -> Result<PathBuf> {
     Ok(p)
 }
 
+/// The wrapper that is actually present, if any — a packaged `tensaku-edit`
+/// on `$PATH` (e.g. `/usr/bin`) wins, else the per-user copy if it exists.
+/// Read-only: unlike [`find_or_install_wrapper`] it installs nothing, so
+/// `--doctor` can report the true state without side effects.
+pub(crate) fn installed_wrapper() -> Option<PathBuf> {
+    if let Some(p) = which(WRAPPER_NAME) {
+        return Some(p);
+    }
+    match wrapper_path() {
+        Ok(p) if p.exists() => Some(p),
+        _ => None,
+    }
+}
+
 /// Does a system install already provide the wrapper? A package (AUR /
 /// `make install`) drops `tensaku-edit` into a system bindir on `$PATH`
 /// (e.g. `/usr/bin`); a user-local copy would only shadow it. True when a
