@@ -372,7 +372,7 @@ fn backup_path(file: &Path) -> PathBuf {
 /// which propagates to processes Hyprland spawns afterward. No-op (with a
 /// note) when not in a Hyprland session or `hyprctl` is unavailable.
 fn apply_live(wrapper: &str) {
-    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none() || which("hyprctl").is_none() {
+    if !in_hyprland() {
         println!("(not in a Hyprland session — this takes effect on next Hyprland start.)");
         return;
     }
@@ -421,9 +421,99 @@ fn warn_conflicting_binds(wrapper: &str) {
     }
 }
 
+/// True when we're in a Hyprland session with `hyprctl` available.
+fn in_hyprland() -> bool {
+    std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() && which("hyprctl").is_some()
+}
+
+/// Reload Hyprland config so newly-written window rules take effect for
+/// the next window (rules, unlike `env =`, are re-applied on reload).
+fn hypr_reload() {
+    if in_hyprland() {
+        let _ = std::process::Command::new("hyprctl").arg("reload").output();
+    }
+}
+
+/// Surface any Hyprland config errors after a reload (best-effort).
+fn report_config_errors() {
+    if !in_hyprland() {
+        return;
+    }
+    if let Ok(out) = std::process::Command::new("hyprctl")
+        .arg("configerrors")
+        .output()
+    {
+        let errs = String::from_utf8_lossy(&out.stdout);
+        let errs = errs.trim();
+        if !errs.is_empty() && !errs.to_lowercase().contains("no errors") {
+            println!();
+            println!("Note: Hyprland reports config issues after reload:");
+            println!("{errs}");
+        }
+    }
+}
+
+/// Tensaku's Hyprland window class — what window rules match on. Matches
+/// the desktop entry's `StartupWMClass`.
+const WINDOW_CLASS: &str = "dev.tensaku.Tensaku";
+
+/// `$XDG_CONFIG_HOME/hypr/hyprland.conf` (sibling of envs.conf).
+fn hypr_main_conf() -> Result<PathBuf> {
+    Ok(hypr_envs_conf()?.with_file_name("hyprland.conf"))
+}
+
+/// Is there an uncommented `windowrule = <action>, match:class <our class>`?
+fn has_class_rule(contents: &str, action: &str) -> bool {
+    let needle = format!("match:class {WINDOW_CLASS}");
+    contents.lines().any(|l| {
+        let t = l.trim();
+        !t.starts_with('#')
+            && t.starts_with("windowrule")
+            && t.contains(action)
+            && t.contains(&needle)
+    })
+}
+
+/// The float/center rules that let Tensaku size its own window.
+fn window_rules_block() -> String {
+    format!(
+        "\n# Tensaku: float + center its window. Tensaku sizes its own window\n\
+         # around the capture, so it must float with no fixed-size rule. The\n\
+         # `tag -floating-window` undoes a distro default (e.g. Omarchy's) that\n\
+         # would otherwise pin a fixed size. Added by `tensaku --wire-omarchy`.\n\
+         windowrule = tag -floating-window, match:class {WINDOW_CLASS}\n\
+         windowrule = float on, match:class {WINDOW_CLASS}\n\
+         windowrule = center on, match:class {WINDOW_CLASS}\n"
+    )
+}
+
+/// How hyprland.conf relates to Tensaku's window rules.
+#[derive(Debug, PartialEq, Eq)]
+enum WindowRuleOutcome {
+    /// float + center for our class already present — nothing to add.
+    AlreadyPresent,
+    /// Rules appended; carries the new file contents.
+    Appended(String),
+}
+
+/// Append Tensaku's window rules unless float + center for our class are
+/// already present (so a hand-written setup isn't duplicated). Pure.
+fn apply_window_rules(contents: &str) -> WindowRuleOutcome {
+    if has_class_rule(contents, "float on") && has_class_rule(contents, "center on") {
+        return WindowRuleOutcome::AlreadyPresent;
+    }
+    let mut out = contents.to_string();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&window_rules_block());
+    WindowRuleOutcome::Appended(out)
+}
+
 /// `--wire-omarchy`: point `$OMARCHY_SCREENSHOT_EDITOR` at the wrapper —
-/// persistently in Hyprland's envs.conf, and live in the running session.
-/// Ensures the wrapper exists first; never edits keybinds.
+/// persistently in Hyprland's envs.conf, and live in the running session —
+/// and float + center the Tensaku window. Ensures the wrapper exists
+/// first; never edits keybinds.
 pub fn wire() -> Result<()> {
     let wrapper = find_or_install_wrapper()?;
     let wrapper_str = wrapper.to_string_lossy().into_owned();
@@ -452,7 +542,44 @@ pub fn wire() -> Result<()> {
         }
     }
 
+    // Float + center the Tensaku window so it can size itself around the
+    // capture (otherwise a tiling layout, or a distro's fixed-size rule,
+    // fights it). Written to hyprland.conf; applied live via reload below.
+    let conf = hypr_main_conf()?;
+    let mut rules_changed = false;
+    if conf.exists() {
+        let existing_rules = std::fs::read_to_string(&conf).unwrap_or_default();
+        match apply_window_rules(&existing_rules) {
+            WindowRuleOutcome::AlreadyPresent => {
+                println!("hyprland.conf already floats + centers the Tensaku window.");
+            }
+            WindowRuleOutcome::Appended(new) => {
+                let backup = backup_path(&conf);
+                std::fs::copy(&conf, &backup)
+                    .with_context(|| format!("back up {}", conf.display()))?;
+                println!("Backed up {} → {}", conf.display(), backup.display());
+                std::fs::write(&conf, new).with_context(|| format!("write {}", conf.display()))?;
+                println!(
+                    "Added float + center window rules for {WINDOW_CLASS}\n  in {}",
+                    conf.display()
+                );
+                rules_changed = true;
+            }
+        }
+    } else {
+        println!("(no {} — skipping window rules)", conf.display());
+    }
+
+    // Apply live. Window rules are re-applied on reload (env directives are
+    // not), so reload first, then re-assert the env so reload doesn't drop it.
+    if rules_changed {
+        hypr_reload();
+    }
     apply_live(&wrapper_str);
+    if rules_changed {
+        report_config_errors();
+    }
+
     warn_conflicting_binds(&wrapper_str);
 
     println!();
@@ -527,6 +654,45 @@ mod tests {
         );
         // The envs.conf comma form is not an inline bind value.
         assert!(inline_bind_editor_value("env = OMARCHY_SCREENSHOT_EDITOR,/x").is_none());
+    }
+
+    #[test]
+    fn window_rules_appended_when_absent() {
+        match apply_window_rules("# my hypr config\n") {
+            WindowRuleOutcome::Appended(s) => {
+                assert!(s.contains("float on, match:class dev.tensaku.Tensaku"));
+                assert!(s.contains("center on, match:class dev.tensaku.Tensaku"));
+                assert!(s.contains("tag -floating-window, match:class dev.tensaku.Tensaku"));
+                assert!(s.starts_with("# my hypr config\n"));
+            }
+            other => panic!("expected Appended, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn window_rules_already_present_is_noop() {
+        let c = "windowrule = float on, match:class dev.tensaku.Tensaku\n\
+                 windowrule = center on, match:class dev.tensaku.Tensaku\n";
+        assert_eq!(apply_window_rules(c), WindowRuleOutcome::AlreadyPresent);
+    }
+
+    #[test]
+    fn window_rules_commented_out_dont_count() {
+        let c = "# windowrule = float on, match:class dev.tensaku.Tensaku\n";
+        assert!(matches!(
+            apply_window_rules(c),
+            WindowRuleOutcome::Appended(_)
+        ));
+    }
+
+    #[test]
+    fn window_rules_partial_appends_full_block() {
+        // float present but no center → still append the full block.
+        let c = "windowrule = float on, match:class dev.tensaku.Tensaku\n";
+        assert!(matches!(
+            apply_window_rules(c),
+            WindowRuleOutcome::Appended(_)
+        ));
     }
 
     #[test]

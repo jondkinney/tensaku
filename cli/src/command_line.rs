@@ -32,10 +32,10 @@ pub struct CommandLine {
     #[arg(long, exclusive = true)]
     pub install_omarchy_wrapper: bool,
 
-    /// Point Omarchy's screenshot editor at the tensaku-edit wrapper:
-    /// set OMARCHY_SCREENSHOT_EDITOR in ~/.config/hypr/envs.conf and in
-    /// the running Hyprland session, then exit. Installs the wrapper
-    /// first if needed; does not edit keybinds.
+    /// Point Omarchy's screenshot editor at the tensaku-edit wrapper (sets
+    /// OMARCHY_SCREENSHOT_EDITOR in ~/.config/hypr/envs.conf and the running
+    /// session) and add float + center window rules for Tensaku, then exit.
+    /// Installs the wrapper first if needed; does not edit keybinds.
     #[arg(long, exclusive = true)]
     pub wire_omarchy: bool,
 
