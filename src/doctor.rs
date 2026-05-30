@@ -57,15 +57,15 @@ pub fn run() -> Result<()> {
         }
     }
 
-    if crate::omarchy_wrapper::is_omarchy() {
-        report_omarchy_wrapper();
-    }
-
     println!();
     if missing == 0 {
-        println!("All good — every tool Tensaku's workflow uses is present.");
+        println!("All good — every external tool Tensaku's workflow uses is present.");
     } else {
         println!("{missing} missing. Tensaku still runs, but the noted features won't work.");
+    }
+
+    if crate::omarchy_wrapper::is_omarchy() {
+        report_omarchy_wrapper();
     }
     Ok(())
 }
@@ -73,40 +73,45 @@ pub fn run() -> Result<()> {
 /// On Omarchy, report whether the screenshot wrapper is installed and
 /// whether `$OMARCHY_SCREENSHOT_EDITOR` is wired to it.
 fn report_omarchy_wrapper() {
-    use crate::omarchy_wrapper::{Wiring, classify_wiring, wrapper_path};
+    use crate::omarchy_wrapper::{Wiring, classify_wiring, installed_wrapper, wrapper_path};
 
     println!();
-    println!("Omarchy detected — screenshot wrapper:");
+    println!("Omarchy detected — screenshot integration:");
 
-    let wrapper = match wrapper_path() {
-        Ok(p) => p,
-        Err(_) => {
-            println!("  [miss]  can't locate ~/.local/bin (is $HOME set?)");
-            return;
+    // A packaged /usr/bin/tensaku-edit counts as installed, not just the
+    // per-user copy; wiring is classified against whichever exists (or the
+    // path we'd install to), so this matches what --wire-omarchy does.
+    let wrapper = installed_wrapper();
+    let mut needs_setup = false;
+
+    match &wrapper {
+        Some(p) => println!("  [ ok ]  wrapper installed: {}", p.display()),
+        None => {
+            println!("  [miss]  wrapper not installed");
+            needs_setup = true;
         }
-    };
-
-    if wrapper.exists() {
-        println!("  [ ok ]  wrapper installed: {}", wrapper.display());
-    } else {
-        println!("  [miss]  wrapper not installed: {}", wrapper.display());
-        println!("          run: tensaku --install-omarchy-wrapper");
     }
 
-    match classify_wiring(std::env::var_os("OMARCHY_SCREENSHOT_EDITOR"), &wrapper) {
-        Wiring::Correct => {
-            println!("  [ ok ]  OMARCHY_SCREENSHOT_EDITOR points at the wrapper");
+    if let Some(target) = wrapper.or_else(|| wrapper_path().ok()) {
+        match classify_wiring(std::env::var_os("OMARCHY_SCREENSHOT_EDITOR"), &target) {
+            Wiring::Correct => {
+                println!("  [ ok ]  OMARCHY_SCREENSHOT_EDITOR points at the wrapper");
+            }
+            Wiring::Elsewhere(other) => {
+                println!(
+                    "  [miss]  OMARCHY_SCREENSHOT_EDITOR points at {}",
+                    other.display()
+                );
+                needs_setup = true;
+            }
+            Wiring::Unset => {
+                println!("  [miss]  OMARCHY_SCREENSHOT_EDITOR is not set");
+                needs_setup = true;
+            }
         }
-        Wiring::Elsewhere(other) => {
-            println!(
-                "  [miss]  OMARCHY_SCREENSHOT_EDITOR points at {}",
-                other.display()
-            );
-            println!("          point it at the wrapper, then run: hyprctl reload");
-        }
-        Wiring::Unset => {
-            println!("  [miss]  OMARCHY_SCREENSHOT_EDITOR is not set");
-            println!("          point it at the wrapper, then run: hyprctl reload");
-        }
+    }
+
+    if needs_setup {
+        println!("          → run: tensaku --wire-omarchy");
     }
 }
