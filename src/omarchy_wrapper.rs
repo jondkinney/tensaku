@@ -315,6 +315,23 @@ fn env_line_value(line: &str) -> Option<String> {
     Some(value.to_string())
 }
 
+/// The `OMARCHY_SCREENSHOT_EDITOR` value configured in `envs.conf`, if any.
+///
+/// Unlike the live `$OMARCHY_SCREENSHOT_EDITOR` (which reflects the running
+/// session and goes stale after `--wire-omarchy` until the next login), this
+/// is the *persistent* wiring — what screenshots will use going forward, and
+/// what `--doctor` should report. First matching directive wins, mirroring
+/// [`apply_env_line`]. Read-only and best-effort: a missing or unreadable
+/// file reads as "not configured".
+pub(crate) fn configured_editor() -> Option<OsString> {
+    let path = hypr_envs_conf().ok()?;
+    let contents = std::fs::read_to_string(path).ok()?;
+    contents
+        .lines()
+        .find_map(env_line_value)
+        .map(OsString::from)
+}
+
 /// An inline `env OMARCHY_SCREENSHOT_EDITOR=<value>` prefix on an `exec`
 /// bind, returned as `<value>`. This is the per-command form (NAME=value),
 /// distinct from the envs.conf directive form (NAME,value).

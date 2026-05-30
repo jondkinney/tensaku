@@ -73,7 +73,9 @@ pub fn run() -> Result<()> {
 /// On Omarchy, report whether the screenshot wrapper is installed and
 /// whether `$OMARCHY_SCREENSHOT_EDITOR` is wired to it.
 fn report_omarchy_wrapper() {
-    use crate::omarchy_wrapper::{Wiring, classify_wiring, installed_wrapper, wrapper_path};
+    use crate::omarchy_wrapper::{
+        Wiring, classify_wiring, configured_editor, installed_wrapper, wrapper_path,
+    };
 
     println!();
     println!("Omarchy detected — screenshot integration:");
@@ -93,19 +95,40 @@ fn report_omarchy_wrapper() {
     }
 
     if let Some(target) = wrapper.or_else(|| wrapper_path().ok()) {
-        match classify_wiring(std::env::var_os("OMARCHY_SCREENSHOT_EDITOR"), &target) {
+        // envs.conf is the persistent wiring — what screenshots will use
+        // going forward, so it (not the live env) drives the verdict. The
+        // live $OMARCHY_SCREENSHOT_EDITOR only reflects the running session
+        // and goes stale after --wire-omarchy until the next login; we read
+        // it only to flag a wiring that isn't active in this session yet, or
+        // a session-only value that won't survive a relogin.
+        let active_correct = matches!(
+            classify_wiring(std::env::var_os("OMARCHY_SCREENSHOT_EDITOR"), &target),
+            Wiring::Correct
+        );
+
+        match classify_wiring(configured_editor(), &target) {
             Wiring::Correct => {
-                println!("  [ ok ]  OMARCHY_SCREENSHOT_EDITOR points at the wrapper");
+                println!("  [ ok ]  OMARCHY_SCREENSHOT_EDITOR wired in envs.conf");
+                if !active_correct {
+                    println!("          (active after next login)");
+                }
             }
             Wiring::Elsewhere(other) => {
                 println!(
-                    "  [miss]  OMARCHY_SCREENSHOT_EDITOR points at {}",
+                    "  [miss]  envs.conf wires OMARCHY_SCREENSHOT_EDITOR at {}",
                     other.display()
                 );
                 needs_setup = true;
             }
             Wiring::Unset => {
-                println!("  [miss]  OMARCHY_SCREENSHOT_EDITOR is not set");
+                if active_correct {
+                    println!(
+                        "  [miss]  OMARCHY_SCREENSHOT_EDITOR is set this session but \
+                         not in envs.conf — it won't persist"
+                    );
+                } else {
+                    println!("  [miss]  OMARCHY_SCREENSHOT_EDITOR is not wired in envs.conf");
+                }
                 needs_setup = true;
             }
         }
