@@ -51,7 +51,7 @@ install: target/release/tensaku
 	install -Dm644 completions/tensaku.elv $(ELVDIR)/tensaku.elv
 	install -Dm644 completions/tensaku.nu $(NUDIR)/tensaku.nu
 	install -Dm644 completions/tensaku.ts $(FIGDIR)/tensaku.ts
-	install -Dm644 man/tensaku.1 ${PREFIX}/share/man/man1
+	install -Dm644 man/tensaku.1 ${PREFIX}/share/man/man1/tensaku.1
 
 uninstall:
 	rm ${BINDIR}/tensaku
