@@ -322,7 +322,7 @@ Options:
       --install-omarchy-wrapper
           Install the Omarchy screenshot wrapper (~/.local/bin/tensaku-edit) so Omarchy's screenshot keybinds open captures in Tensaku, then exit. Also checks that OMARCHY_SCREENSHOT_EDITOR points at it
       --wire-omarchy
-          Point Omarchy's screenshot editor at the tensaku-edit wrapper: set OMARCHY_SCREENSHOT_EDITOR in ~/.config/hypr/envs.conf and in the running Hyprland session, then exit. Installs the wrapper first if needed; does not edit keybinds
+          Point Omarchy's screenshot editor at the tensaku-edit wrapper (sets OMARCHY_SCREENSHOT_EDITOR in ~/.config/hypr/envs.conf and the running session) and add float + center window rules for Tensaku, then exit. Installs the wrapper first if needed; does not edit keybinds
   -c, --config <CONFIG>
           Path to the config file. Otherwise will be read from XDG_CONFIG_DIR/tensaku/config.toml
   -f, --filename <FILENAME>
@@ -539,10 +539,13 @@ windowrule = size 875 600,     match:tag floating-window   # ← pins window siz
 windowrule = tag +floating-window, match:class (... dev.tensaku.Tensaku ...)
 ```
 
-If you're on Omarchy (or anywhere else with a similar `size`
-rule), drop the tag for `dev.tensaku.Tensaku` in your local
-`~/.config/hypr/hyprland.conf` and re-apply float + center
-directly:
+**`tensaku --wire-omarchy` sets this up for you** — it appends the float +
+center rules (and the `tag -floating-window` untag) for
+`dev.tensaku.Tensaku` to `~/.config/hypr/hyprland.conf` (backed up first,
+and skipped if they're already present) and reloads Hyprland. To do it by
+hand instead — or on another wlroots compositor — drop the tag for
+`dev.tensaku.Tensaku` in your local `~/.config/hypr/hyprland.conf` and
+re-apply float + center directly:
 
 ```hypr
 # Let Tensaku size its own window around the captured image.
