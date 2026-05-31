@@ -45,6 +45,10 @@ jobs:
   # every push to main.
   release-pr:
     name: release-plz PR
+    # Gate on the publish job: a release-pr that runs while a publish is
+    # still in flight reads a pre-publish registry and opens phantom
+    # patch releases (seen after rapid back-to-back release merges).
+    needs: release
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/gtk-rs/gtk4-rs/gtk4:latest
