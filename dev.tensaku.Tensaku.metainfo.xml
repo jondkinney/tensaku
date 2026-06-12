@@ -36,6 +36,14 @@
        Version history section on the listing page; the latest
        release is the only one strictly required. -->
   <releases>
+    <release version="0.26.4" date="2026-06-12">
+      <description>
+        <p>Fixed:</p>
+        <ul>
+          <li>force SpinButton repaint so detected scale pre-fills</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.26.3" date="2026-05-30">
       <description>
         <p>Fixed:</p>
