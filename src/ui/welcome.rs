@@ -226,6 +226,23 @@ impl Component for WelcomeDialog {
         };
         let widgets = view_output!();
 
+        // The SpinButton's value is set during widget construction (via
+        // the `#[watch] set_value` binding), which runs before the
+        // window is mapped. GTK updates the underlying value/text buffer
+        // correctly, but the pre-map paint leaves the *rendered* glyphs
+        // showing the adjustment's default (1.0) — so the field looks
+        // un-prefilled even though its value is right. Re-assert the
+        // value on an idle tick after `present()`, toggling through a
+        // different value first so GTK registers a real `value-changed`
+        // (set_value to the current value is a no-op and won't repaint).
+        let spin = widgets.spin.clone();
+        let target: f64 = model.value.into();
+        relm4::gtk::glib::idle_add_local_once(move || {
+            let bump = if target == 1.0 { 1.1 } else { 1.0 };
+            spin.set_value(bump);
+            spin.set_value(target);
+        });
+
         // Enter saves so the user can confirm with the keyboard. The
         // controller runs in Capture phase so it fires before the
         // SpinButton's own activation behavior.
