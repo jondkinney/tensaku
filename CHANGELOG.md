@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.5](https://github.com/jondkinney/tensaku/compare/v0.26.4...v0.26.5) - 2026-06-12
+
+### Fixed
+
+- *(toolbars)* dismiss swatch tooltips when the color picker closes
+
 ## [0.26.4](https://github.com/jondkinney/tensaku/compare/v0.26.3...v0.26.4) - 2026-06-12
 
 ### Fixed
