@@ -1107,6 +1107,20 @@ fn ensure_floating_swatch_tip(near: &gtk::Widget) -> (gtk::Popover, gtk::Label) 
     })
 }
 
+/// Force the shared floating swatch tooltip down, if one is showing.
+///
+/// Needed because the tooltip popover is `autohide(false)` and is only
+/// dismissed by the swatch's motion `leave`. When the picker popover
+/// closes (swatch click, Escape, click-away), the swatch the pointer
+/// was over vanishes with the popover surface, so `leave` never fires
+/// — the tooltip would otherwise stay frozen over the toolbar. Call
+/// this from the picker's `closed` handler to clear it.
+fn dismiss_floating_swatch_tip() {
+    if let Some(pair) = FLOATING_SWATCH_TIP.with(|c| c.borrow().clone()) {
+        pair.0.popdown();
+    }
+}
+
 /// Attach a custom floating tooltip to a swatch inside the picker
 /// Attach a secondary-button GestureClick to `target` that pops up a
 /// small "Save as default" popover at the click point. The popover is
@@ -1190,6 +1204,15 @@ fn attach_floating_swatch_tooltip(target: &impl IsA<gtk::Widget>, text: &str) {
                 let Some(window) = target.root() else {
                     return;
                 };
+                // The picker can close during the delay (the swatch is
+                // clicked before the tooltip ever shows). The swatch
+                // widget survives — the grid is only rebuilt on the next
+                // open, so `root()` still resolves — but a closed popover
+                // unmaps its children. Bail when unmapped, or the tooltip
+                // pops up over the toolbar after the picker is gone.
+                if !target.is_mapped() {
+                    return;
+                }
                 let (popover, label) = ensure_floating_swatch_tip(&target);
                 label.set_label(&text);
                 if let Some(bounds) = target.compute_bounds(&window) {
@@ -4544,6 +4567,10 @@ impl Component for ToolsToolbar {
         {
             let sender = sender.clone();
             popover.connect_closed(move |_| {
+                // The picker surface is gone, so any swatch tooltip that
+                // was up will never get its motion `leave` — dismiss it
+                // explicitly or it freezes over the toolbar.
+                dismiss_floating_swatch_tip();
                 sender.input(ToolsToolbarInput::ClearEmptySlotSelection);
                 sender.output_sender().emit(ToolbarEvent::FocusCanvas);
             });
