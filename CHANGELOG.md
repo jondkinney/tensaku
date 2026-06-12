@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.4](https://github.com/jondkinney/tensaku/compare/v0.26.3...v0.26.4) - 2026-06-12
+
+### Fixed
+
+- *(welcome)* force SpinButton repaint so detected scale pre-fills
+
 ## [0.26.3](https://github.com/jondkinney/tensaku/compare/v0.26.2...v0.26.3) - 2026-05-30
 
 ### Fixed
