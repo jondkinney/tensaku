@@ -788,7 +788,9 @@ impl SketchBoard {
     /// drawable spills past, shrinks back toward the original when
     /// the last spilling drawable is gone. Skipped while the Crop
     /// tool is active (crop is for shrinking — auto-extending
-    /// against the crop edit would fight the user). When the renderer
+    /// against the crop edit would fight the user) and while a crop is
+    /// committed (the canvas is locked to that crop — see below). When
+    /// the renderer
     /// reports a resize, refresh the crop tool's bounds and emit the
     /// dimensions-changed events so the toolbar label and main
     /// window resize around the new content.
@@ -798,6 +800,23 @@ impl SketchBoard {
         sender: &ComponentSender<Self>,
     ) {
         if self.active_tool_type() == Tools::Crop {
+            return;
+        }
+        // Once a crop is committed, the canvas is locked to that crop.
+        // Auto-growing here would union an off-canvas annotation's bounds
+        // into the image, translate the image + every drawable to the new
+        // origin, and leave the crop's absolute (un-translated) coords
+        // pointing at a different region — so the visible crop would jump
+        // to a new spot. Skip the grow: the annotation still commits and
+        // renders clipped to the locked crop until the user re-enters the
+        // crop view to adjust it.
+        if self
+            .tools
+            .get_crop_tool()
+            .borrow()
+            .get_committed_rect()
+            .is_some()
+        {
             return;
         }
         let Some((new_w, new_h)) = self.renderer.auto_resize_for_drawables(ids_to_exclude) else {
@@ -3325,6 +3344,15 @@ impl SketchBoard {
                     .unwrap_or(false);
             if same_type {
                 cursor = Some("grab");
+            } else if APP_CONFIG.read().select_any_annotation() {
+                // Select-any mode: this annotation belongs to a
+                // different tool than the active one, but a click will
+                // still select it (see `PointerTool::
+                // should_pass_through_body_hit`). Show the pointer
+                // affordance so the cursor reflects that, instead of the
+                // active drawing tool's crosshair. With the pref off we
+                // fall through and keep whatever cursor the tool dictates.
+                cursor = Some("pointer");
             }
         }
 

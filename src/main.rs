@@ -36,6 +36,7 @@ mod desktop_install;
 mod display;
 mod doctor;
 mod femtovg_area;
+mod glyph_font;
 mod icons;
 mod ime;
 mod math;
@@ -1816,6 +1817,10 @@ fn start_gui(image: Pixbuf) -> Result<()> {
     };
     app.set_application_id(app_id);
     app.set_flags(ApplicationFlags::NON_UNIQUE);
+    // Register the bundled Adwaita Sans face with fontconfig before any
+    // text is laid out so the toolbar tooltips can render ⌃ ⇧ ⌥ modifier
+    // glyphs in the same face the cohort apps use.
+    glyph_font::install();
     let app = RelmApp::from_app(app).with_args(vec![]);
     relm4_icons::initialize_icons(
         icons::icon_names::GRESOURCE_BYTES,

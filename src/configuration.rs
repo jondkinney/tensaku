@@ -92,6 +92,13 @@ pub struct Configuration {
     /// scroll consumers read this through `invert_scrolling()` so a
     /// single toggle reverses the entire app's scroll polarity.
     invert_scrolling: bool,
+    /// User preference: when true, clicking any existing annotation
+    /// selects it regardless of which drawing tool is active (the
+    /// Pointer grabs whatever was clicked). When false, a click only
+    /// selects an annotation whose owning tool matches the active tool
+    /// — otherwise it falls through and starts a new annotation.
+    /// Default is true. Read by `PointerTool::should_pass_through_body_hit`.
+    select_any_annotation: bool,
     /// User preference: when true, pressing Esc on the canvas adds an
     /// `Action::Exit` to whatever `actions_on_escape` already runs, so
     /// the app closes. Default is false — Esc does nothing
@@ -355,6 +362,13 @@ impl Configuration {
         APP_CONFIG
             .write()
             .set_invert_scrolling(crate::state::load_invert_scrolling());
+
+        // Same shape for the select-any-annotation preference — load
+        // from state, fall back to true (click any annotation to select
+        // it) when the field has never been written.
+        APP_CONFIG
+            .write()
+            .set_select_any_annotation(crate::state::load_select_any_annotation());
 
         // Same shape for the "Esc closes satty" preference — load
         // from state, fall back to false (no implicit Exit) when the
@@ -861,6 +875,17 @@ impl Configuration {
         self.invert_scrolling = value;
     }
 
+    pub fn select_any_annotation(&self) -> bool {
+        self.select_any_annotation
+    }
+
+    /// Toggle the select-any-annotation preference. Wired from the
+    /// Preferences dialog; takes effect immediately on the next click
+    /// and is persisted to `state.toml` by the caller.
+    pub fn set_select_any_annotation(&mut self, value: bool) {
+        self.select_any_annotation = value;
+    }
+
     pub fn close_on_esc(&self) -> bool {
         self.close_on_esc
     }
@@ -1015,6 +1040,7 @@ impl Default for Configuration {
             // Default matches the state-load fallback so the value is
             // consistent whether or not state.toml has been written.
             invert_scrolling: true,
+            select_any_annotation: true,
             close_on_esc: false,
             close_on_copy: false,
             close_on_save: false,

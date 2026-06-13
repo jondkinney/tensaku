@@ -160,6 +160,21 @@ pub trait Tool {
         None
     }
 
+    /// Extra in-flight drawables beyond `get_drawable()` — the *other*
+    /// members of a group/move drag, rendered as moved copies. Default
+    /// empty; the Pointer tool overrides it when dragging a
+    /// multi-selection as a group.
+    fn extra_dragging_drawables(&self) -> Vec<&dyn Drawable> {
+        Vec::new()
+    }
+
+    /// Ids of the extra group-drag members (paired with
+    /// `extra_dragging_drawables`). The renderer skips these from the
+    /// normal stack so only their moved copies show. Default empty.
+    fn extra_dragging_ids(&self) -> Vec<DrawableId> {
+        Vec::new()
+    }
+
     /// True when the tool is currently dragging a resize handle (vs a
     /// body / move drag). Sketch_board hides the cursor during a resize
     /// drag so the user can see exactly where the dragged edge or
@@ -1015,13 +1030,13 @@ impl Tools {
         match self {
             Tools::Pointer => "Pointer",
             Tools::Crop => "Crop",
-            Tools::Brush => "Brush",
+            Tools::Brush => "Pen",
             Tools::Line => "Line",
             Tools::Arrow => "Arrow",
             Tools::Rectangle => "Rectangle",
             Tools::Ellipse => "Ellipse",
             Tools::Text => "Text",
-            Tools::Marker => "Numbered Marker",
+            Tools::Marker => "Counter",
             Tools::Blur => "Blur",
             Tools::Highlighter => "Highlighter",
             Tools::Spotlight => "Spotlight",
@@ -1030,7 +1045,7 @@ impl Tools {
 
     /// Starting annotation size for a tool when the user has saved no
     /// per-tool default. `None` means "use the global default"
-    /// (Medium); Numbered Markers read best at the small size.
+    /// (Medium); Counters read best at the small size.
     pub fn builtin_default_size(&self) -> Option<crate::style::Size> {
         match self {
             Tools::Marker => Some(crate::style::Size::Small),

@@ -1967,10 +1967,16 @@ impl FemtoVgAreaMut {
         // tool — the tool will render the moved/transformed copy below.
         let dragging_active = self.active_tool.borrow().dragging_drawable_id();
         let dragging_pointer = self.pointer_tool.borrow().dragging_drawable_id();
+        // Extra members of a group/move drag — skipped here so only their
+        // moved copies (drawn below) show.
+        let extra_dragging = self.pointer_tool.borrow().extra_dragging_ids();
         let selected_ids = self.pointer_tool.borrow().selected_drawables();
 
         for s in &mut self.drawables {
-            if dragging_active == Some(s.id) || dragging_pointer == Some(s.id) {
+            if dragging_active == Some(s.id)
+                || dragging_pointer == Some(s.id)
+                || extra_dragging.contains(&s.id)
+            {
                 continue;
             }
             // Layer-panel visibility: hidden drawables stay in the stack
@@ -2023,6 +2029,10 @@ impl FemtoVgAreaMut {
                 d.draw(canvas, font, bounds)?;
                 super::set_current_drawable_is_selected(false);
             }
+            // Other members of a group/move drag (Pointer as active tool).
+            for d in at.extra_dragging_drawables() {
+                d.draw(canvas, font, bounds)?;
+            }
         }
 
         // The pointer tool's working copy during an implicit-mode drag (active
@@ -2035,6 +2045,10 @@ impl FemtoVgAreaMut {
                 super::set_current_drawable_is_selected(pt.is_resizing());
                 d.draw(canvas, font, bounds)?;
                 super::set_current_drawable_is_selected(false);
+            }
+            // Other members of a group/move drag (implicit-mode pointer).
+            for d in pt.extra_dragging_drawables() {
+                d.draw(canvas, font, bounds)?;
             }
         }
 
@@ -2111,8 +2125,12 @@ impl FemtoVgAreaMut {
         let mut paths: Vec<Path> = Vec::new();
         let dragging_active = self.active_tool.borrow().dragging_drawable_id();
         let dragging_pointer = self.pointer_tool.borrow().dragging_drawable_id();
+        let extra_dragging = self.pointer_tool.borrow().extra_dragging_ids();
         for s in &self.drawables {
-            if dragging_active == Some(s.id) || dragging_pointer == Some(s.id) {
+            if dragging_active == Some(s.id)
+                || dragging_pointer == Some(s.id)
+                || extra_dragging.contains(&s.id)
+            {
                 continue;
             }
             if !s.visible {
@@ -2121,6 +2139,14 @@ impl FemtoVgAreaMut {
             if s.drawable.is_spotlight() {
                 let mut p = Path::new();
                 s.drawable.append_spotlight_path(&mut p);
+                paths.push(p);
+            }
+        }
+        // In-flight spotlight copies from a group/move drag.
+        for d in self.pointer_tool.borrow().extra_dragging_drawables() {
+            if d.is_spotlight() {
+                let mut p = Path::new();
+                d.append_spotlight_path(&mut p);
                 paths.push(p);
             }
         }

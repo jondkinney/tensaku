@@ -192,7 +192,7 @@ impl Drawable for BrushDrawable {
         self
     }
     fn kind_label(&self) -> &'static str {
-        "Brush"
+        "Pen"
     }
     fn icon_name(&self) -> &'static str {
         "pen-regular"

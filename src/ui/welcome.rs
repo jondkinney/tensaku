@@ -13,6 +13,26 @@ use std::rc::Rc;
 use relm4::gtk::prelude::*;
 use relm4::{Component, ComponentParts, ComponentSender, RelmWidgetExt, gtk};
 
+/// Format a scale factor with the minimum decimals needed: whole values
+/// drop the decimals entirely (2× not 2.00×), one-decimal values keep
+/// one (1.5×), and finer values keep two (1.25×). Used for the label
+/// and reset-button text, not the editable field.
+fn format_scale(v: f32) -> String {
+    let s = format!("{v:.2}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// How many decimal places the SpinButton should display: one by
+/// default (so 1.0 / 1.5 / 2.0 read naturally), bumped to two only when
+/// the detected scale actually carries hundredths (e.g. 1.25).
+fn scale_digits(v: f32) -> u32 {
+    if format!("{v:.2}").ends_with('0') {
+        1
+    } else {
+        2
+    }
+}
+
 #[derive(Debug)]
 pub struct WelcomeDialog {
     /// Value currently shown in the SpinButton — what we'll persist on
@@ -126,10 +146,10 @@ impl Component for WelcomeDialog {
                     set_use_markup: true,
                     #[watch]
                     set_label: &format!(
-                        "Detected display scale: <b>{:.2}×</b> ({source}). \
+                        "Detected display scale: <b>{scale}×</b> ({source}). \
                          The field below is pre-filled to match — adjust if \
                          you want bigger or smaller annotations.",
-                        model.detected_scale,
+                        scale = format_scale(model.detected_scale),
                         source = model.source,
                     ),
                 },
@@ -173,7 +193,7 @@ impl Component for WelcomeDialog {
                     },
 
                     gtk::Button {
-                        set_label: "1.00×",
+                        set_label: "Use default (1×)",
                         set_tooltip_text: Some("Reset to the unscaled default"),
                         connect_clicked[sender] => move |_| {
                             sender.input(WelcomeDialogInput::UseDefault);
@@ -185,7 +205,7 @@ impl Component for WelcomeDialog {
                     set_wrap: true,
                     set_xalign: 0.0,
                     set_use_markup: true,
-                    set_label: "<i>You need to save a value to continue. This dialog won't reappear once a factor is persisted — change it later in Preferences (Ctrl+,) or via Alt+scroll on the canvas.</i>",
+                    set_label: "<i>You need to save a value to continue. This dialog won't reappear once a factor is persisted — change it later in Preferences (<span face=\"Adwaita Sans\">⌃</span> ,) or via <span face=\"Adwaita Sans\">⌥ ⇧</span> scroll on the canvas.</i>",
                 },
 
                 gtk::Box {
@@ -225,6 +245,12 @@ impl Component for WelcomeDialog {
             saving,
         };
         let widgets = view_output!();
+
+        // Show only as much precision as the detected scale needs: one
+        // decimal normally (1.0 / 1.5 / 2.0), two only when it carries
+        // hundredths (e.g. 1.25). The view! sets a static `set_digits: 1`;
+        // override it here from the actual detected value.
+        widgets.spin.set_digits(scale_digits(detected_scale));
 
         // The SpinButton's value is set during widget construction (via
         // the `#[watch] set_value` binding), which runs before the

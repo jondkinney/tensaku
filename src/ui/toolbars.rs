@@ -37,14 +37,28 @@ pub trait RobustTooltipExt {
     /// Tooltip pops upward (good for bottom-toolbar buttons so it stays
     /// inside the window).
     fn install_tooltip_above(&self, text: &str);
+    /// Like `install_tooltip` but `text` is Pango markup — used by the
+    /// shortcut tooltips that render modifier glyphs (⌃ ⇧ ⌥) in the
+    /// bundled Adwaita Sans face.
+    fn install_tooltip_markup(&self, markup: &str);
+    /// Like `install_tooltip_above` but `text` is Pango markup — used by
+    /// the scroll-shortcut tooltips that render modifier glyphs (⌃ ⇧ ⌥)
+    /// in the bundled Adwaita Sans face.
+    fn install_tooltip_above_markup(&self, markup: &str);
 }
 
 impl<T: IsA<gtk::Widget> + Clone> RobustTooltipExt for T {
     fn install_tooltip(&self, text: &str) {
-        attach_tooltip(self, text, gtk::PositionType::Bottom);
+        attach_tooltip(self, text, gtk::PositionType::Bottom, false);
     }
     fn install_tooltip_above(&self, text: &str) {
-        attach_tooltip(self, text, gtk::PositionType::Top);
+        attach_tooltip(self, text, gtk::PositionType::Top, false);
+    }
+    fn install_tooltip_markup(&self, markup: &str) {
+        attach_tooltip(self, markup, gtk::PositionType::Bottom, true);
+    }
+    fn install_tooltip_above_markup(&self, markup: &str) {
+        attach_tooltip(self, markup, gtk::PositionType::Top, true);
     }
 }
 
@@ -104,17 +118,20 @@ fn install_dynamic_tooltip<W: IsA<gtk::Widget> + Clone>(
     widget: &W,
     initial: &str,
     position: gtk::PositionType,
+    markup: bool,
 ) -> gtk::Label {
-    attach_tooltip(widget, initial, position)
+    attach_tooltip(widget, initial, position, markup)
 }
 
 fn attach_tooltip<W: IsA<gtk::Widget> + Clone>(
     widget: &W,
     text: &str,
     position: gtk::PositionType,
+    markup: bool,
 ) -> gtk::Label {
     let label = gtk::Label::builder()
         .label(text)
+        .use_markup(markup)
         .margin_start(8)
         .margin_end(8)
         .margin_top(4)
@@ -1501,6 +1518,14 @@ pub struct StyleToolbar {
     /// slider's value can stay in sync via `#[watch]`. Replaces the
     /// 6-button radio bank's `RelmAction` state.
     current_size: Size,
+    /// The size the *next* stroke will be drawn at — a mirror of
+    /// sketch_board's `self.style.size`. Tracked separately from
+    /// `current_size` because `SyncFromSelection` overwrites
+    /// `current_size` with the *selected* drawable's size for display
+    /// (without touching the next-stroke size). On deselect we restore
+    /// the slider from this so it accurately reflects what a new stroke
+    /// will use, rather than getting stuck on the last selection's size.
+    next_stroke_size: Size,
     /// Spotlight overlay darkness (0.10–0.90). Persisted across launches
     /// via state.rs; restored here on init.
     spotlight_darkness: f32,
@@ -1883,17 +1908,26 @@ fn make_arrow_preview(
     (area, cell)
 }
 
-/// Tooltip text for the arrow-style MenuButton — just the active
-/// variant's name (the icon + the "Arrow" toolbar tool already make
-/// the context clear, so the preamble was visual noise).
+/// Tooltip text for the arrow-style MenuButton — the active variant's
+/// name plus the wheel shortcut (Ctrl+Shift+scroll cycles arrow style;
+/// see `scroll_alt_slider`). Returns Pango markup: the modifier glyphs
+/// (⌃ ⇧) ride in an Adwaita Sans span, so the tooltip label must have
+/// `use_markup` set. The variant name is escaped in case a label ever
+/// contains markup-significant characters.
 fn arrow_tooltip_text(s: ArrowStyle) -> String {
-    arrow_style_label(s).to_string()
+    format!(
+        "{} (<span face=\"Adwaita Sans\">⌃ ⇧</span> scroll to adjust)",
+        gtk::glib::markup_escape_text(arrow_style_label(s))
+    )
 }
 
 /// Tooltip text for the blur-style MenuButton — same shape as
-/// `arrow_tooltip_text`, just the active algorithm's name.
+/// `arrow_tooltip_text`, the active algorithm's name plus the glyphs.
 fn blur_tooltip_text(s: BlurStyle) -> String {
-    blur_style_label(s).to_string()
+    format!(
+        "{} (<span face=\"Adwaita Sans\">⌃ ⇧</span> scroll to adjust)",
+        gtk::glib::markup_escape_text(blur_style_label(s))
+    )
 }
 
 fn highlighter_tooltip_text(s: crate::tools::HighlighterStyle) -> String {
@@ -1984,14 +2018,16 @@ fn fill_tooltip_text(fill_shapes: bool) -> &'static str {
 
 /// Size-slider tooltip text. The wheel-resize gesture's modifier
 /// depends on whether anything is selected: with a selection, plain
-/// wheel resizes it; without one, Ctrl+wheel changes the next-stroke
-/// size. Reflecting that in the tooltip surfaces the right keystroke
-/// for the user's current state.
+/// wheel resizes it; without one, Alt+wheel changes the next-stroke
+/// size (plain wheel pans, Ctrl+wheel zooms). Reflecting that in the
+/// tooltip surfaces the right keystroke for the user's current state.
+/// Returns Pango markup (the modifier glyph rides in an Adwaita Sans
+/// span), so the tooltip label must have `use_markup` set.
 fn size_tooltip_text(has_selection: bool) -> &'static str {
     if has_selection {
-        "Annotation size — scroll on canvas to adjust"
+        "Annotation size (scroll to adjust)"
     } else {
-        "Annotation size — Ctrl+scroll on canvas to adjust"
+        "Annotation size (<span face=\"Adwaita Sans\">⌥</span> scroll to adjust)"
     }
 }
 
@@ -2912,7 +2948,7 @@ impl Component for ToolsToolbar {
                         set_hexpand: false,
 
                         set_icon_name: "arrow-undo-filled",
-                        install_tooltip: "Undo (Ctrl-Z)",
+                        install_tooltip_markup: "Undo (<span face=\"Adwaita Sans\">⌃</span> Z)",
                         connect_clicked[sender] => move |_| {sender.output_sender().emit(ToolbarEvent::Undo);},
                     },
                     gtk::Button {
@@ -2920,7 +2956,7 @@ impl Component for ToolsToolbar {
                         set_hexpand: false,
 
                         set_icon_name: "arrow-redo-filled",
-                        install_tooltip: "Redo (Ctrl-Y)",
+                        install_tooltip_markup: "Redo (<span face=\"Adwaita Sans\">⌃</span> Y)",
                         connect_clicked[sender] => move |_| {sender.output_sender().emit(ToolbarEvent::Redo);},
                     },
                     gtk::Separator {},
@@ -2929,7 +2965,7 @@ impl Component for ToolsToolbar {
                         set_hexpand: false,
 
                         set_icon_name: "layer-diagonal-regular",
-                        install_tooltip: "Toggle layer panel (Ctrl-L)",
+                        install_tooltip_markup: "Toggle layer panel (<span face=\"Adwaita Sans\">⌃</span> L)",
                         connect_clicked[sender] => move |_| {sender.output_sender().emit(ToolbarEvent::ToggleLayerPanel);},
                     },
                 },
@@ -3381,7 +3417,7 @@ impl Component for ToolsToolbar {
                         set_hexpand: false,
 
                         set_icon_name: "copy-regular",
-                        install_tooltip: "Copy to clipboard (Ctrl+C)",
+                        install_tooltip_markup: "Copy to clipboard (<span face=\"Adwaita Sans\">⌃</span> C)",
                         connect_clicked[sender] => move |_| {sender.output_sender().emit(ToolbarEvent::CopyClipboard);},
                     },
                     gtk::Button {
@@ -3389,7 +3425,7 @@ impl Component for ToolsToolbar {
                         set_hexpand: false,
 
                         set_icon_name: "save-regular",
-                        install_tooltip: "Save (Ctrl+S)",
+                        install_tooltip_markup: "Save (<span face=\"Adwaita Sans\">⌃</span> S)",
                         connect_clicked[sender] => move |_| {sender.output_sender().emit(ToolbarEvent::SaveFile);},
 
                         set_visible: APP_CONFIG.read().output_filename().is_some()
@@ -3399,7 +3435,7 @@ impl Component for ToolsToolbar {
                         set_hexpand: false,
 
                         set_icon_name: "save-multiple-regular",
-                        install_tooltip: "Save as (Ctrl+Shift+S)",
+                        install_tooltip_markup: "Save as (<span face=\"Adwaita Sans\">⌃ ⇧</span> S)",
                         connect_clicked[sender] => move |_| {sender.output_sender().emit(ToolbarEvent::SaveFileAs);},
                     },
                     // Settings sits last, set off by a separator —
@@ -3410,7 +3446,7 @@ impl Component for ToolsToolbar {
                         set_hexpand: false,
 
                         set_icon_name: "settings-regular",
-                        install_tooltip: "Preferences (Ctrl+,)",
+                        install_tooltip_markup: "Preferences (<span face=\"Adwaita Sans\">⌃</span> ,)",
                         connect_clicked[sender] => move |_| {
                             sender.output_sender().emit(ToolbarEvent::OpenPreferences);
                         },
@@ -4709,17 +4745,24 @@ impl StyleToolbar {
     /// `sticky_session_defaults` preference. When the preference is
     /// on AND the user has touched the slider for `tool` already in
     /// this session, return that in-session value; otherwise fall
-    /// back to `state.toml`'s saved default, then to the tool's
-    /// `builtin_default_size`. Returns `None` for tools with no saved
-    /// and no builtin default — most tools — so the existing callers
-    /// keep their `if let Some` shape.
-    fn effective_size_for_tool(&self, tool: Tools) -> Option<Size> {
+    /// back to `state.toml`'s saved default, then the tool's
+    /// `builtin_default_size`, then the global default
+    /// (`Size::default()`).
+    ///
+    /// Always returns a concrete size so a tool switch reliably resets
+    /// to the default when the preference is OFF — without the final
+    /// `unwrap_or_default`, tools with no saved default (most of them)
+    /// would leave the *previous* tool's in-session size stranded on
+    /// the slider, which looks like sticky defaults are always on.
+    fn effective_size_for_tool(&self, tool: Tools) -> Size {
         if APP_CONFIG.read().sticky_session_defaults()
             && let Some(s) = self.session_size_per_tool.get(&tool).copied()
         {
-            return Some(s);
+            return s;
         }
-        crate::state::load_size_for_tool(tool).or_else(|| tool.builtin_default_size())
+        crate::state::load_size_for_tool(tool)
+            .or_else(|| tool.builtin_default_size())
+            .unwrap_or_default()
     }
 
     fn refresh_brush_smooth_slider_marks(&self) {
@@ -5025,7 +5068,7 @@ impl Component for StyleToolbar {
                     set_valign: gtk::Align::Center,
                     set_height_request: 34,
                     set_model: Some(&gtk::StringList::new(&["Rounded", "Plain"])),
-                    install_tooltip_above: "Text background",
+                    install_tooltip_above_markup: "Text background (<span face=\"Adwaita Sans\">⌃ ⇧</span> scroll to adjust)",
                     #[watch]
                     set_visible: model.current_tool == Tools::Text,
                     connect_selected_notify[sender, text_background_silent]
@@ -5247,15 +5290,17 @@ impl Component for StyleToolbar {
                 // through `dispatch_style_change` and rewrite the
                 // selection back to the tool default — silently undoing
                 // any size edit the user just made.
-                if !self.has_selection
-                    && !matches!(tool, Tools::Pointer | Tools::Crop)
-                    && let Some(default_size) = self.effective_size_for_tool(tool)
-                    && default_size != self.current_size
-                {
-                    self.current_size = default_size;
-                    sender
-                        .output_sender()
-                        .emit(ToolbarEvent::SizeSelected(default_size));
+                if !self.has_selection && !matches!(tool, Tools::Pointer | Tools::Crop) {
+                    let default_size = self.effective_size_for_tool(tool);
+                    if default_size != self.current_size {
+                        self.current_size = default_size;
+                        // Emitting SizeSelected sets sketch_board's
+                        // next-stroke size, so keep the mirror in step.
+                        self.next_stroke_size = default_size;
+                        sender
+                            .output_sender()
+                            .emit(ToolbarEvent::SizeSelected(default_size));
+                    }
                 }
                 // Bold the letter matching the new tool's saved
                 // default (or none, if Pointer / Crop, or if the user
@@ -5267,6 +5312,10 @@ impl Component for StyleToolbar {
                 // slider without re-broadcasting — sketch_board has
                 // already applied the value via dispatch_style_change.
                 self.current_size = size;
+                // This is a next-stroke size change (no selection), so
+                // it's the value the slider should fall back to on a
+                // later deselect.
+                self.next_stroke_size = size;
                 // This input is only fired from the canvas-side
                 // wheel-resize path (Ctrl+wheel with no selection),
                 // which is by definition a user-driven adjustment to
@@ -5279,19 +5328,16 @@ impl Component for StyleToolbar {
                 }
             }
             StyleToolbarInput::SyncToToolDefault => {
-                // Fired by main.rs on deselect — slide back to the
-                // active tool's saved default. Same fall-through
-                // rules as ToolChanged: skip Pointer/Crop, and only
-                // act if the user has actually saved a default for
-                // this tool.
-                if !matches!(self.current_tool, Tools::Pointer | Tools::Crop)
-                    && let Some(default_size) = self.effective_size_for_tool(self.current_tool)
-                    && default_size != self.current_size
-                {
-                    self.current_size = default_size;
-                    sender
-                        .output_sender()
-                        .emit(ToolbarEvent::SizeSelected(default_size));
+                // Fired by main.rs on deselect. The slider was showing
+                // the just-deselected drawable's size (set by
+                // SyncFromSelection); restore it to the next-stroke size
+                // so it accurately reflects what a new stroke will draw
+                // at. `next_stroke_size` mirrors sketch_board's
+                // `style.size`, which selecting/resizing a drawable
+                // never changed — so no SizeSelected re-broadcast is
+                // needed (it's already in sync).
+                if !matches!(self.current_tool, Tools::Pointer | Tools::Crop) {
+                    self.current_size = self.next_stroke_size;
                 }
                 // Empty selection — re-enable sliders so the user
                 // can adjust the next-stroke defaults, and drop the
@@ -5301,7 +5347,7 @@ impl Component for StyleToolbar {
                 self.brush_smooth_slider_disabled = false;
                 self.brush_smooth_slider_show_for_multi = false;
                 self.has_selection = false;
-                // No selection → wheel-resize requires Ctrl;
+                // No selection → wheel-resize requires Alt;
                 // tooltip says so.
                 if let Some(label) = &self.size_tooltip_label {
                     label.set_label(size_tooltip_text(false));
@@ -5312,6 +5358,13 @@ impl Component for StyleToolbar {
             }
             StyleToolbarInput::SizeChanged(size) => {
                 self.current_size = size;
+                // SizeChanged emits `SizeSelected`, which sets
+                // sketch_board's next-stroke `style.size` — so this is
+                // also the next-stroke size the slider should restore to
+                // on a later deselect. (Dragging the slider with a
+                // selection active both resizes the selection AND sets
+                // the next-stroke size, so track it unconditionally.)
+                self.next_stroke_size = size;
                 // Remember the in-session size for this tool so
                 // `effective_size_for_tool` (used by ToolChanged /
                 // SyncToToolDefault) can prefer it over the saved
@@ -5425,7 +5478,10 @@ impl Component for StyleToolbar {
                 // isn't redundantly re-applied + toasted.
                 self.blur_style = style;
                 if let Some(label) = &self.blur_style_tooltip_label {
-                    label.set_text(&blur_tooltip_text(style));
+                    // set_markup, not set_text — the tooltip carries an
+                    // Adwaita Sans glyph span (set_text would disable
+                    // markup and print the raw tags).
+                    label.set_markup(&blur_tooltip_text(style));
                 }
                 if emit_upstream {
                     sender
@@ -5447,7 +5503,8 @@ impl Component for StyleToolbar {
                     area.queue_draw();
                 }
                 if let Some(label) = &self.arrow_style_tooltip_label {
-                    label.set_text(&arrow_tooltip_text(style));
+                    // set_markup, not set_text — see SetBlurStyle.
+                    label.set_markup(&arrow_tooltip_text(style));
                 }
                 if emit_upstream {
                     sender
@@ -5549,6 +5606,7 @@ impl Component for StyleToolbar {
             brush_smooth_slider: None,
             has_crop: false,
             current_size: initial_size,
+            next_stroke_size: initial_size,
             fill_shapes: APP_CONFIG.read().default_fill_shapes(),
             fill_tooltip_label: None,
             blur_style: crate::state::load_blur_style().unwrap_or_default(),
@@ -5644,24 +5702,28 @@ impl Component for StyleToolbar {
             &widgets.size_slider,
             size_tooltip_text(false),
             gtk::PositionType::Top,
+            true,
         );
         model.size_tooltip_label = Some(size_tooltip);
         let arrow_tooltip = install_dynamic_tooltip(
             &widgets.arrow_style_menu,
             &arrow_tooltip_text(model.arrow_style),
             gtk::PositionType::Top,
+            true,
         );
         model.arrow_style_tooltip_label = Some(arrow_tooltip);
         let blur_tooltip = install_dynamic_tooltip(
             &widgets.blur_style_menu,
             &blur_tooltip_text(model.blur_style),
             gtk::PositionType::Top,
+            true,
         );
         model.blur_style_tooltip_label = Some(blur_tooltip);
         let highlighter_tooltip = install_dynamic_tooltip(
             &widgets.highlighter_style_menu,
             &highlighter_tooltip_text(model.highlighter_style),
             gtk::PositionType::Top,
+            false,
         );
         model.highlighter_style_tooltip_label = Some(highlighter_tooltip);
         if let Some(bg) = crate::state::load_text_background() {
@@ -5755,6 +5817,7 @@ impl Component for StyleToolbar {
             &widgets.fill_button,
             fill_tooltip_text(model.fill_shapes),
             gtk::PositionType::Top,
+            false,
         );
         model.fill_tooltip_label = Some(fill_label);
 

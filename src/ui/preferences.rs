@@ -210,8 +210,27 @@ pub fn open<W: IsA<gtk::Widget>>(
             .orientation(gtk::Orientation::Horizontal)
             .spacing(12)
             .build();
+        // Prefs-only mnemonic hints that connect each tool's default
+        // single-key shortcut to something memorable. Kept here rather
+        // than in `display_name` so tool tooltips / toasts stay terse.
+        // (Counter / Text / Arrow / etc. are self-evidently mnemonic, so
+        // they get no hint.)
+        let hint = match *tool {
+            Tools::Highlighter => Some("wide marker"),  // w → wide
+            Tools::Spotlight => Some("glow"),           // g → glow
+            Tools::Line => Some("left-hand twin of L"), // s sits where L does, left hand
+            Tools::Brush => Some("zigzag stroke"),      // z → a zigzag freehand stroke
+            Tools::Crop => Some("scissors"),            // x looks like scissors ✂
+            // Pointer (v) gets no hint — it's the default selection tool
+            // and reads clearly on its own (cf. Photoshop).
+            _ => None,
+        };
+        let label_text = match hint {
+            Some(h) => format!("{} ({h})", tool.display_name()),
+            None => tool.display_name().to_string(),
+        };
         let name = gtk::Label::builder()
-            .label(tool.display_name())
+            .label(label_text)
             .halign(gtk::Align::Start)
             .hexpand(true)
             .build();
@@ -459,6 +478,22 @@ pub fn open<W: IsA<gtk::Widget>>(
     });
     outer.append(&invert_scroll_check);
 
+    let select_any_check = gtk::CheckButton::builder()
+        .label("Click any annotation to select it")
+        .tooltip_text(
+            "When on, clicking any existing annotation selects it no matter which \
+             tool is active. When off, only the active tool's annotations are \
+             selectable and clicking elsewhere starts a new annotation.",
+        )
+        .active(APP_CONFIG.read().select_any_annotation())
+        .build();
+    select_any_check.connect_toggled(|btn| {
+        let value = btn.is_active();
+        crate::state::save_select_any_annotation(value);
+        APP_CONFIG.write().set_select_any_annotation(value);
+    });
+    outer.append(&select_any_check);
+
     let close_on_esc_check = gtk::CheckButton::builder()
         .label("Close window on Esc")
         .active(APP_CONFIG.read().close_on_esc())
@@ -496,6 +531,11 @@ pub fn open<W: IsA<gtk::Widget>>(
 
     let hide_palette_check = gtk::CheckButton::builder()
         .label("Hide default palette colors")
+        .tooltip_text(
+            "When on, the color picker hides its built-in 10-color palette column \
+             and shows only the colors you've saved. The 1–9, 0 number-key shortcuts \
+             then pick from your saved custom colors instead of the defaults.",
+        )
         .active(APP_CONFIG.read().hide_default_palette())
         .build();
     hide_palette_check.connect_toggled(|btn| {
@@ -512,7 +552,7 @@ pub fn open<W: IsA<gtk::Widget>>(
     let sticky_defaults_check = gtk::CheckButton::builder()
         .label("Keep in-session tool adjustments across tool switches")
         .tooltip_text(
-            "When off, switching tools snaps each tool back to its saved default.\n\
+            "When off, switching tools snaps each tool back to its saved default. \
              When on, your in-session size / fill / opacity tweaks persist until \
              you close the app.",
         )
