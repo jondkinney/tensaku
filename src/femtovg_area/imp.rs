@@ -173,6 +173,18 @@ const AUTO_EXTEND_EDGE_SAMPLE_DEPTH: i32 = 8;
 /// Handles pure grow, pure shrink, and any mix (e.g. grow-left while
 /// shrink-right in the same operation). Returns `None` if the new
 /// Pixbuf can't be allocated or `new_w`/`new_h` are non-positive.
+/// Overlapping area of two rects (empty rect if they don't overlap).
+fn rect_intersection(a: crate::math::Rect, b: crate::math::Rect) -> crate::math::Rect {
+    let x0 = a.pos.x.max(b.pos.x);
+    let y0 = a.pos.y.max(b.pos.y);
+    let x1 = (a.pos.x + a.size.x).min(b.pos.x + b.size.x);
+    let y1 = (a.pos.y + a.size.y).min(b.pos.y + b.size.y);
+    crate::math::Rect::new(
+        Vec2D::new(x0, y0),
+        Vec2D::new((x1 - x0).max(0.0), (y1 - y0).max(0.0)),
+    )
+}
+
 fn resize_pixbuf_to_rect(
     original: &Pixbuf,
     src_x: i32,
@@ -406,9 +418,29 @@ pub struct FemtoVGArea {
     pub spring_back_timer: RefCell<Option<gtk::glib::SourceId>>,
 }
 
+/// Saved state of the pre-crop ("original") canvas, kept while a crop is
+/// materialized so re-entering the crop view can reconstruct the larger
+/// original (extending it if annotations spilled past it). Coordinates
+/// are in the ORIGINAL space that was live at materialize time.
+struct CropBase {
+    /// The full pre-crop raster (what `background_image` was right before
+    /// materialization). Same role as `ResizeCanvas::prev_image`.
+    image: Pixbuf,
+    /// `original_rect` (protected screenshot region) at materialize time.
+    original_rect: crate::math::Rect,
+    /// The committed crop rect in original space. Its top-left is the
+    /// offset that maps crop-space back to original space on restore.
+    crop_rect: crate::math::Rect,
+}
+
 pub struct FemtoVgAreaMut {
     background_image: Pixbuf,
     background_image_id: Option<femtovg::ImageId>,
+    /// Present iff a crop has been materialized: the live
+    /// `background_image` is the cropped raster and all drawables sit in
+    /// crop-local space. Holds what's needed to restore the original on
+    /// crop-view re-entry. See `materialize_crop` / `restore_original_for_edit`.
+    crop_base: Option<CropBase>,
     /// Image-space rect of the original (pre-auto-extension)
     /// screenshot inside the current `background_image`. Initially
     /// `(0, 0, orig_w, orig_h)`. When the canvas auto-extends, the
@@ -724,6 +756,7 @@ impl FemtoVGArea {
         self.inner().replace(FemtoVgAreaMut {
             background_image,
             background_image_id: None,
+            crop_base: None,
             original_rect,
             transparent_background_id: None,
             active_tool,
@@ -993,6 +1026,142 @@ impl FemtoVgAreaMut {
             .expect("auto_resize called with empty undo stack");
         self.undo_stack.push(UndoAction::Batch(vec![resize, prior]));
         Some((new_w as f32, new_h as f32))
+    }
+
+    /// Reset pan/zoom so the next frame auto-fits the (newly-resized)
+    /// canvas. Used by every crop transition.
+    fn reset_view_for_transition(&mut self) {
+        self.zoom_scale = 0.0;
+        self.last_scale = 0.0;
+        self.drag_offset = Vec2D::zero();
+        self.last_offset = Vec2D::zero();
+        self.crop_zoom = 1.0;
+    }
+
+    /// Translate every drawable snapshot stored in the undo/redo stacks
+    /// by `delta`, so that after a crop transition re-zeroes the live
+    /// drawables, a later undo restores them into the SAME (new) space —
+    /// this is what makes annotation history survive crossing a crop.
+    /// (ResizeCanvas raster snapshots predate the crop and aren't
+    /// rebased here; undoing across one is a rare Phase-2 edge case that
+    /// only arises when the canvas was auto-grown before cropping.)
+    fn translate_history(&mut self, delta: Vec2D) {
+        fn translate_action(a: &mut UndoAction, delta: Vec2D) {
+            match a {
+                UndoAction::Modify { prev, .. } => prev.translate(delta),
+                UndoAction::Remove { drawable, .. } => drawable.translate(delta),
+                UndoAction::Batch(actions) => {
+                    for sub in actions.iter_mut() {
+                        translate_action(sub, delta);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for a in self.undo_stack.iter_mut() {
+            translate_action(a, delta);
+        }
+        for a in self.redo_stack.iter_mut() {
+            translate_action(a, delta);
+        }
+    }
+
+    /// Materialize a committed crop: replace the live raster with the
+    /// cropped pixels and re-zero every drawable (and undo snapshot) into
+    /// crop-local space, stashing the pre-crop canvas in `crop_base` for
+    /// crop-view re-entry. `crop_rect` is in the current (original)
+    /// space. Returns the new `(w, h)` of the cropped canvas.
+    pub fn materialize_crop(&mut self, crop_rect: crate::math::Rect) -> Option<(f32, f32)> {
+        let img_w = self.background_image.width() as f32;
+        let img_h = self.background_image.height() as f32;
+        // Round + clamp to integer pixels inside the current image.
+        let x0 = crop_rect.pos.x.round().clamp(0.0, img_w) as i32;
+        let y0 = crop_rect.pos.y.round().clamp(0.0, img_h) as i32;
+        let x1 = (crop_rect.pos.x + crop_rect.size.x)
+            .round()
+            .clamp(0.0, img_w) as i32;
+        let y1 = (crop_rect.pos.y + crop_rect.size.y)
+            .round()
+            .clamp(0.0, img_h) as i32;
+        let cw = x1 - x0;
+        let ch = y1 - y0;
+        if cw <= 0 || ch <= 0 {
+            return None;
+        }
+        let crop_rect = crate::math::Rect::new(
+            Vec2D::new(x0 as f32, y0 as f32),
+            Vec2D::new(cw as f32, ch as f32),
+        );
+        let prev_image = self.background_image.clone();
+        let prev_original_rect = self.original_rect;
+        // Pure shrink (crop is inside bounds) — no edge fill.
+        let cropped = resize_pixbuf_to_rect(&self.background_image, x0, y0, cw, ch)?;
+        let t = Vec2D::new(-x0 as f32, -y0 as f32);
+        for s in self.drawables.iter_mut() {
+            s.drawable.translate(t);
+        }
+        self.translate_history(t);
+        self.original_rect = rect_intersection(prev_original_rect, crop_rect).translated(t);
+        self.background_image = cropped;
+        self.background_image_id = None;
+        self.crop_base = Some(CropBase {
+            image: prev_image,
+            original_rect: prev_original_rect,
+            crop_rect,
+        });
+        self.reset_view_for_transition();
+        Some((cw as f32, ch as f32))
+    }
+
+    /// Restore the pre-crop original for crop-view re-entry: bring back
+    /// the original raster (edge-extended if annotations spilled past
+    /// it), map every drawable from crop-local back to original space,
+    /// and clear `crop_base`. Returns `(new_dims, crop_rect_in_restored_space)`
+    /// so the caller can place the crop overlay.
+    pub fn restore_original_for_edit(&mut self) -> Option<((f32, f32), crate::math::Rect)> {
+        let base = self.crop_base.take()?;
+        let origin = base.crop_rect.pos;
+        let orig_bounds = crate::math::Rect::new(
+            Vec2D::zero(),
+            Vec2D::new(base.image.width() as f32, base.image.height() as f32),
+        );
+        // Everything that must stay visible, in ORIGINAL space: the
+        // original raster, the crop rect, and every annotation (currently
+        // crop-local → +origin maps it back to original space).
+        let mut needed = orig_bounds.union(base.crop_rect);
+        for s in &self.drawables {
+            if let Some(b) = s.drawable.bounds() {
+                needed = needed.union(b.translated(origin));
+            }
+        }
+        let x0 = needed.pos.x.floor() as i32;
+        let y0 = needed.pos.y.floor() as i32;
+        let x1 = (needed.pos.x + needed.size.x).ceil() as i32;
+        let y1 = (needed.pos.y + needed.size.y).ceil() as i32;
+        let nw = x1 - x0;
+        let nh = y1 - y0;
+        if nw <= 0 || nh <= 0 {
+            return None;
+        }
+        // Grow the original with dominant-color edge fill if needed.
+        let restored = resize_pixbuf_to_rect(&base.image, x0, y0, nw, nh)?;
+        let ext = Vec2D::new(-x0 as f32, -y0 as f32);
+        // crop-local → restored space: + origin (to original) + ext (re-anchor).
+        let delta = origin + ext;
+        for s in self.drawables.iter_mut() {
+            s.drawable.translate(delta);
+        }
+        self.translate_history(delta);
+        self.original_rect = base.original_rect.translated(ext);
+        self.background_image = restored;
+        self.background_image_id = None;
+        self.reset_view_for_transition();
+        Some(((nw as f32, nh as f32), base.crop_rect.translated(ext)))
+    }
+
+    /// True iff a crop is currently materialized.
+    pub fn has_materialized_crop(&self) -> bool {
+        self.crop_base.is_some()
     }
 
     /// Replace the drawable with `id` in-place. Records a Modify undo action.
