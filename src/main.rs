@@ -1115,6 +1115,26 @@ impl Component for App {
                 let scaled_h = height as f64 / scale;
                 let monitor = Self::get_monitor_size(root);
                 let (w, h) = Self::window_size_for_content(scaled_w, scaled_h, monitor);
+                // Floor the width at the top bar's single-row width so a
+                // programmatic resize (e.g. committing a crop) never forces the
+                // bar to wrap to two rows — "the act of cropping sets the width
+                // too". Take the wider of the measured normal/crop bar widths
+                // so neither wraps, capped at 90% of the screen. The user can
+                // still drag the window narrower (a manual choice; GTK's
+                // natural min permits the wrap), and a tiling WM forcing a
+                // narrow width still wraps — we only set the floor for the
+                // resize WE perform.
+                let single_row = self
+                    .toolbar_single_row_min_width
+                    .into_iter()
+                    .chain(self.toolbar_single_row_min_width_crop)
+                    .max()
+                    .unwrap_or(TOP_BAR_SINGLE_ROW_FALLBACK_WIDTH);
+                let single_row = match monitor {
+                    Some(m) => single_row.min((m.width() as f64 * 0.90) as i32),
+                    None => single_row,
+                };
+                let w = w.max(single_row);
                 // Prefer Hyprland's own resize dispatch: because the compositor
                 // performs the resize it updates the window's STORED floating
                 // size, so the new size survives a later move. The portable
