@@ -538,11 +538,32 @@ impl App {
     /// side clusters are re-parented onto a second row, so the bar no
     /// longer measures its one-row width.
     fn measure_toolbar_single_row(&self) -> Option<i32> {
-        let (_, natural, _, _) = self
+        // The top bar's outer Box wraps a `CenterBox` (start | center | end).
+        // Measuring the outer/CenterBox NATURAL width gives `center +
+        // 2×max(start, end)` — it reserves symmetric side room to keep the
+        // tools dead-centered — which is wider than where the bar actually
+        // wraps. The bar fits on one row down to the PACKED width
+        // `start + center + end` (at which the center slot still equals the
+        // tools' one-row natural); below that the center FlowBox wraps. So sum
+        // the three slots. This value is used as BOTH the wrap threshold and
+        // the crop-resize width floor, so the window can shrink to where the
+        // bar is genuinely tight without wrapping it. A few px of slack keeps
+        // it off the exact wrap boundary.
+        let centerbox = self
             .tools_toolbar
             .widget()
-            .measure(gtk::Orientation::Horizontal, -1);
-        (natural > 0).then_some(natural)
+            .first_child()
+            .and_then(|c| c.downcast::<gtk::CenterBox>().ok())?;
+        let packed: i32 = [
+            centerbox.start_widget(),
+            centerbox.center_widget(),
+            centerbox.end_widget(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|slot| slot.measure(gtk::Orientation::Horizontal, -1).1)
+        .sum();
+        (packed > 0).then_some(packed + 8)
     }
 
     fn resize_window_initial(&self, root: &Window, sender: ComponentSender<Self>) {
