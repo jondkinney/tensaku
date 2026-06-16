@@ -1828,8 +1828,95 @@ fn install_loop_controller(
     key.connect_key_pressed(move |_, keyval, _, state| {
         use gtk::gdk::{Key, ModifierType};
 
-        if keyval == Key::Escape && !snap_check.get_visible() {
-            sketch.emit(SketchBoardInput::FocusCanvas);
+        if keyval == Key::Escape {
+            // Let an open popover (zoom menu, colour picker, …) swallow Esc
+            // to close itself rather than acting on the bar.
+            let in_popover = {
+                let mut node = this_for
+                    .root()
+                    .and_then(|r| relm4::gtk::prelude::RootExt::focus(&r));
+                let mut found = false;
+                while let Some(w) = node {
+                    if w.is::<gtk::Popover>() {
+                        found = true;
+                        break;
+                    }
+                    node = w.parent();
+                }
+                found
+            };
+            if in_popover {
+                return gtk::glib::Propagation::Proceed;
+            }
+            if snap_check.get_visible() {
+                // Crop mode: Esc cancels the crop from ANY focused control.
+                // The top bar's own controller already does this, but the
+                // bottom bar (reachable by Tab/arrows) had no Esc handler,
+                // so the crop — and its edit handles — never cleared.
+                sketch.emit(SketchBoardInput::ToolbarEvent(ToolbarEvent::CancelCrop));
+            } else {
+                sketch.emit(SketchBoardInput::FocusCanvas);
+            }
+            return gtk::glib::Propagation::Stop;
+        }
+
+        // Arrow-key navigation: Left/Up = previous control, Right/Down =
+        // next, behaving exactly like Tab/Shift+Tab — at a bar's edge they
+        // cross into the other bar (e.g. Right off the settings cog jumps to
+        // the bottom row). GTK gives the plain-box clusters this for free
+        // (directional focus), but the tool FlowBox swallows arrows for its
+        // own child nav — which our explicit grab-focus setup breaks.
+        // Driving arrows off `collect_focusable` makes every control, tools
+        // included, arrow-reachable and consistent. Only plain (unmodified)
+        // arrows, and skipped when focus is in a control that uses arrows
+        // itself (text entry, slider, dropdown) so those keep native arrows.
+        let mods = state
+            & (ModifierType::CONTROL_MASK
+                | ModifierType::SHIFT_MASK
+                | ModifierType::ALT_MASK
+                | ModifierType::SUPER_MASK);
+        let arrow_prev = matches!(keyval, Key::Left | Key::Up) && mods.is_empty();
+        let arrow_next = matches!(keyval, Key::Right | Key::Down) && mods.is_empty();
+        if arrow_prev || arrow_next {
+            let Some(focused) = this_for
+                .root()
+                .and_then(|r| relm4::gtk::prelude::RootExt::focus(&r))
+            else {
+                return gtk::glib::Propagation::Proceed;
+            };
+            let mut node = Some(focused.clone());
+            while let Some(w) = node {
+                if w.is::<gtk::Entry>()
+                    || w.is::<gtk::Text>()
+                    || w.is::<gtk::Scale>()
+                    || w.is::<gtk::SpinButton>()
+                    || w.is::<gtk::DropDown>()
+                {
+                    return gtk::glib::Propagation::Proceed;
+                }
+                node = w.parent();
+            }
+            let mut list = Vec::new();
+            collect_focusable(&this_for, &mut list);
+            let Some(pos) = list
+                .iter()
+                .position(|w| *w == focused || focused.is_ancestor(w))
+            else {
+                return gtk::glib::Propagation::Proceed;
+            };
+            // Same edge behaviour as Tab/Shift+Tab: cross into the other
+            // bar rather than cycling within this one.
+            if arrow_next {
+                if pos + 1 == list.len() {
+                    focus_first(&other);
+                } else {
+                    list[pos + 1].grab_focus();
+                }
+            } else if pos == 0 {
+                focus_last(&other);
+            } else {
+                list[pos - 1].grab_focus();
+            }
             return gtk::glib::Propagation::Stop;
         }
 
