@@ -1070,12 +1070,18 @@ impl CropTool {
             // the shape the user sees stays on-ratio. The axis with the
             // larger key delta is the "driver"; the other follows.
             let r = rw / rh; // width / height
-            let width_driven = dx.abs() >= dy.abs();
+            // The driven corner grows when the arrow points AWAY from the
+            // anchor: down/right (out of the bottom-right) for the plain
+            // arrows, up/left (out of the top-left) for Shift. Negate the
+            // size delta in the Shift case so the rect grows toward the
+            // arrow, matching the per-edge Freeform behaviour.
+            let (sdx, sdy) = if shift { (-dx, -dy) } else { (dx, dy) };
+            let width_driven = sdx.abs() >= sdy.abs();
             let (mut fw, mut fh) = if width_driven {
-                let w = (c.size.x + dx).max(MIN_SIDE);
+                let w = (c.size.x + sdx).max(MIN_SIDE);
                 (w, w / r)
             } else {
-                let h = (c.size.y + dy).max(MIN_SIDE);
+                let h = (c.size.y + sdy).max(MIN_SIDE);
                 (h * r, h)
             };
 
