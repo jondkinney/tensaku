@@ -3070,10 +3070,10 @@ impl Component for ToolsToolbar {
                             sender
                                 .output_sender()
                                 .emit(ToolbarEvent::CropAspectRatioChanged(ratio));
-                            // Hand focus back to the canvas so single-
-                            // key shortcuts (F = fill, etc.) keep
-                            // working without a manual tab-back.
-                            sender.output_sender().emit(ToolbarEvent::FocusCanvas);
+                            // Keep focus on the dropdown: a keyboard user
+                            // changing the ratio may want to keep adjusting
+                            // it. Esc / clicking the canvas returns focus
+                            // there.
                         },
                     },
 
@@ -3118,7 +3118,8 @@ impl Component for ToolsToolbar {
                         install_tooltip: "Swap width and height",
                         connect_clicked[sender] => move |_| {
                             sender.input(ToolsToolbarInput::CropDimensionsSwap);
-                            sender.output_sender().emit(ToolbarEvent::FocusCanvas);
+                            // Retain focus on the swap button (see aspect
+                            // dropdown note).
                         },
                     },
                     #[name(crop_height_entry)]
@@ -3191,7 +3192,8 @@ impl Component for ToolsToolbar {
                         install_tooltip: "Rotate 90° counter-clockwise",
                         connect_clicked[sender] => move |_| {
                             sender.output_sender().emit(ToolbarEvent::RotateImage);
-                            sender.output_sender().emit(ToolbarEvent::FocusCanvas);
+                            // Retain focus so repeated rotates (a common
+                            // case) work from the keyboard without re-Tab.
                         },
                     },
 
@@ -3209,7 +3211,7 @@ impl Component for ToolsToolbar {
                         install_tooltip: "Flip horizontal",
                         connect_clicked[sender] => move |_| {
                             sender.output_sender().emit(ToolbarEvent::FlipHorizontal);
-                            sender.output_sender().emit(ToolbarEvent::FocusCanvas);
+                            // Retain focus on the flip button (see rotate).
                         },
                     },
 

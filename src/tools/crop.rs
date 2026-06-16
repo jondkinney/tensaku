@@ -1044,43 +1044,100 @@ impl CropTool {
         let Some(bounds) = self.image_bounds else {
             return false;
         };
+        // Resolve the active ratio BEFORE borrowing `self.crop` mutably.
+        let aspect = self
+            .aspect_ratio
+            .ratio_components(self.image_bounds)
+            .filter(|&(_, rh)| rh > 0.0);
         let Some(c) = self.crop.as_mut() else {
             return false;
         };
         const MIN_SIDE: f32 = 1.0;
-        let mut left = c.pos.x;
-        let mut top = c.pos.y;
-        let mut right = c.pos.x + c.size.x;
-        let mut bottom = c.pos.y + c.size.y;
 
         let plus = |bit: u8| if held & bit != 0 { step } else { 0.0 };
-        if shift {
-            // Top-left corner. Left edge: Left out (−), Right in (+).
-            left += plus(ARROW_RIGHT) - plus(ARROW_LEFT);
-            // Top edge: Up out (−), Down in (+).
-            top += plus(ARROW_DOWN) - plus(ARROW_UP);
-            left = left.clamp(0.0, right - MIN_SIDE);
-            top = top.clamp(0.0, bottom - MIN_SIDE);
-        } else {
-            // Bottom-right corner. Right edge: Right out (+), Left in (−).
-            right += plus(ARROW_RIGHT) - plus(ARROW_LEFT);
-            // Bottom edge: Down out (+), Up in (−).
-            bottom += plus(ARROW_DOWN) - plus(ARROW_UP);
-            right = right.clamp(left + MIN_SIDE, bounds.x);
-            bottom = bottom.clamp(top + MIN_SIDE, bounds.y);
-        }
-
-        let new_pos = Vec2D::new(left, top);
-        let new_size = Vec2D::new(right - left, bottom - top);
-        if (new_pos.x - c.pos.x).abs() < f32::EPSILON
-            && (new_pos.y - c.pos.y).abs() < f32::EPSILON
-            && (new_size.x - c.size.x).abs() < f32::EPSILON
-            && (new_size.y - c.size.y).abs() < f32::EPSILON
-        {
+        // Net per-axis intent: Right/Down positive, Left/Up negative.
+        let dx = plus(ARROW_RIGHT) - plus(ARROW_LEFT);
+        let dy = plus(ARROW_DOWN) - plus(ARROW_UP);
+        if dx == 0.0 && dy == 0.0 {
             return false;
         }
-        c.pos = new_pos;
-        c.size = new_size;
+
+        let (old_pos, old_size) = (c.pos, c.size);
+
+        if let Some((rw, rh)) = aspect {
+            // Aspect-locked: drive ONE corner and derive the other
+            // dimension from the ratio, anchored at the opposite corner so
+            // the shape the user sees stays on-ratio. The axis with the
+            // larger key delta is the "driver"; the other follows.
+            let r = rw / rh; // width / height
+            let width_driven = dx.abs() >= dy.abs();
+            let (mut fw, mut fh) = if width_driven {
+                let w = (c.size.x + dx).max(MIN_SIDE);
+                (w, w / r)
+            } else {
+                let h = (c.size.y + dy).max(MIN_SIDE);
+                (h * r, h)
+            };
+
+            // Opposite-corner anchor + how far the rect may extend from it
+            // before it would leave the image.
+            let (anchor, max_w, max_h) = if shift {
+                // Top-left moves → anchor is the (fixed) bottom-right.
+                let br = c.pos + c.size;
+                (br, br.x, br.y)
+            } else {
+                // Bottom-right moves → anchor is the (fixed) top-left.
+                (c.pos, bounds.x - c.pos.x, bounds.y - c.pos.y)
+            };
+
+            // Clamp to the image while preserving the ratio (scale both
+            // dims by the tightest axis), never below MIN_SIDE.
+            let scale = (max_w / fw).min(max_h / fh).min(1.0);
+            if scale.is_finite() && scale < 1.0 {
+                fw *= scale;
+                fh *= scale;
+            }
+            fw = fw.max(MIN_SIDE);
+            fh = fh.max(MIN_SIDE);
+
+            if shift {
+                c.pos = Vec2D::new(anchor.x - fw, anchor.y - fh);
+            } else {
+                c.pos = anchor;
+            }
+            c.size = Vec2D::new(fw, fh);
+        } else {
+            // Freeform: independent per-edge moves (no ratio coupling).
+            let mut left = c.pos.x;
+            let mut top = c.pos.y;
+            let mut right = c.pos.x + c.size.x;
+            let mut bottom = c.pos.y + c.size.y;
+            if shift {
+                // Top-left corner.
+                left += dx;
+                top += dy;
+                left = left.clamp(0.0, right - MIN_SIDE);
+                top = top.clamp(0.0, bottom - MIN_SIDE);
+            } else {
+                // Bottom-right corner.
+                right += dx;
+                bottom += dy;
+                right = right.clamp(left + MIN_SIDE, bounds.x);
+                bottom = bottom.clamp(top + MIN_SIDE, bounds.y);
+            }
+            c.pos = Vec2D::new(left, top);
+            c.size = Vec2D::new(right - left, bottom - top);
+        }
+
+        if (c.pos.x - old_pos.x).abs() < f32::EPSILON
+            && (c.pos.y - old_pos.y).abs() < f32::EPSILON
+            && (c.size.x - old_size.x).abs() < f32::EPSILON
+            && (c.size.y - old_size.y).abs() < f32::EPSILON
+        {
+            c.pos = old_pos;
+            c.size = old_size;
+            return false;
+        }
         self.emit_crop_edit_dimensions();
         true
     }

@@ -166,7 +166,15 @@ struct App {
     /// single row; `None` until the first such measurement. This width
     /// is the wrap breakpoint: once the window is narrower, left and
     /// right drop to a row below (and the tool FlowBox itself wraps).
+    ///
+    /// Kept PER MODE: the crop-mode top bar (tiny indicator vs the wide
+    /// Cancel/Crop cluster) wants a very different width than the normal
+    /// tool bar, so a single shared cache made one view inherit the
+    /// other's breakpoint — e.g. visiting Crop then returning left the
+    /// main bar stacked at a width where it actually fits on one row.
     toolbar_single_row_min_width: Option<i32>,
+    /// Crop-mode counterpart of `toolbar_single_row_min_width`.
+    toolbar_single_row_min_width_crop: Option<i32>,
 }
 
 #[derive(Debug)]
@@ -319,8 +327,11 @@ enum AppCommandOutput {
 /// single-row width before a wrapped bar springs back to one row.
 /// The wrap-*down* point is the measured width itself (icons just
 /// touching); this gap only delays the wrap-*up* so a drag-resize
-/// hovering at the boundary doesn't flicker between layouts.
-const TOP_BAR_WRAP_HYSTERESIS: i32 = 60;
+/// hovering at the boundary doesn't flicker between layouts. Kept small
+/// so the bar pops back to one line almost as soon as it fits — the
+/// measurement is deterministic, so only a thin anti-jitter buffer is
+/// needed.
+const TOP_BAR_WRAP_HYSTERESIS: i32 = 16;
 
 /// Slack (CSS px) added to the measured single-row width when
 /// flooring the *initial* window size, so compositor rounding around
@@ -836,14 +847,24 @@ impl Component for App {
                 // touch (see `measure_toolbar_single_row`). Re-measure
                 // every Normal frame; in Wrap layout the bar can't be
                 // measured for this, so the last value stays cached.
+                // Crop and normal views measure into SEPARATE caches so
+                // neither inherits the other's (very different) breakpoint.
+                let is_crop = self.current_tool == Tools::Crop;
                 if self.tools_toolbar_layout == TopBarLayout::Normal
                     && let Some(single_row) = self.measure_toolbar_single_row()
                 {
-                    self.toolbar_single_row_min_width = Some(single_row);
+                    if is_crop {
+                        self.toolbar_single_row_min_width_crop = Some(single_row);
+                    } else {
+                        self.toolbar_single_row_min_width = Some(single_row);
+                    }
                 }
-                let wrap_at = self
-                    .toolbar_single_row_min_width
-                    .unwrap_or(TOP_BAR_SINGLE_ROW_FALLBACK_WIDTH);
+                let wrap_at = if is_crop {
+                    self.toolbar_single_row_min_width_crop
+                } else {
+                    self.toolbar_single_row_min_width
+                }
+                .unwrap_or(TOP_BAR_SINGLE_ROW_FALLBACK_WIDTH);
                 // Two-state hysteresis: drop to two rows the moment
                 // the window is narrower than that width; spring
                 // back only once it clears that width plus a margin.
@@ -1601,6 +1622,7 @@ impl Component for App {
             cycle_toast_timer,
             tools_toolbar_layout: ui::toolbars::TopBarLayout::Normal,
             toolbar_single_row_min_width: None,
+            toolbar_single_row_min_width_crop: None,
         };
 
         // Apply the initial tool's snap-control visibility — these

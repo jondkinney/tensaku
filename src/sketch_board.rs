@@ -4453,6 +4453,13 @@ impl Component for SketchBoard {
                 add_controller = gtk::GestureClick {
                     set_button: 0,
                     connect_pressed[sender] => move |controller, n_pressed, x, y| {
+                        // Clicking the canvas always returns keyboard focus
+                        // to it — toolbar controls now keep focus after a
+                        // keyboard activation, so this (and Esc) is how the
+                        // user hands focus back for single-key shortcuts.
+                        if let Some(w) = controller.widget() {
+                            w.grab_focus();
+                        }
                         sender.input(SketchBoardInput::new_mouse_event(
                             MouseEventType::Click,
                             controller.current_button(),
