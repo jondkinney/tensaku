@@ -37,6 +37,7 @@ mod display;
 mod doctor;
 mod femtovg_area;
 mod glyph_font;
+mod hypr;
 mod icons;
 mod ime;
 mod math;
@@ -1105,36 +1106,39 @@ impl Component for App {
                     .emit(StyleToolbarInput::SetCurrentSize(size));
             }
             AppInput::ContentSizeChanged { width, height } => {
-                // Fit the window around the new content — applied via
-                // `set_default_size`, which Wayland's compositor will
-                // generally honor as a resize request. Uses the same
-                // fractional `capture_scale` as the initial-resize
-                // path to convert capture-native pixels into the
-                // window's CSS-px coord system.
+                // Fit the window around the new content (crop commit / revert /
+                // auto-grow). Uses the same fractional `capture_scale` as the
+                // initial-resize path to convert capture-native pixels into the
+                // window's logical-px coord system.
                 let scale = Self::capture_scale(root) as f64;
                 let scaled_w = width as f64 / scale;
                 let scaled_h = height as f64 / scale;
                 let monitor = Self::get_monitor_size(root);
                 let (w, h) = Self::window_size_for_content(scaled_w, scaled_h, monitor);
-                root.set_default_size(w, h);
-                // GTK4's `set_default_size` reliably sizes a fresh
-                // window but is mostly a hint once the window is
-                // mapped — most compositors only honor the initial
-                // configure, not later default-size changes. Force a
-                // hard re-allocation by pinning the size via
-                // `set_size_request` so the compositor's next
-                // configure round-trip uses these dimensions, then
-                // clear the request once the resize has settled so
-                // the user can still drag the window's edges to
-                // resize manually afterwards.
-                root.set_size_request(w, h);
-                let root_clone = root.clone();
-                gtk::glib::timeout_add_local_once(
-                    std::time::Duration::from_millis(50),
-                    move || {
-                        root_clone.set_size_request(-1, -1);
-                    },
-                );
+                // Prefer Hyprland's own resize dispatch: because the compositor
+                // performs the resize it updates the window's STORED floating
+                // size, so the new size survives a later move. The portable
+                // path below (`set_default_size` + a transient `size_request`
+                // pin) is only a request — the compositor reverts it to the
+                // stored size on the next configure, which is the long-standing
+                // "window snaps back when you move it" problem. `resize_self`
+                // is best-effort and returns false off-Hyprland or on any IPC
+                // error, so we degrade cleanly to the portable behaviour.
+                if !hypr::resize_self(w, h) {
+                    root.set_default_size(w, h);
+                    // `set_default_size` is mostly a hint once mapped, so force
+                    // a configure round-trip by pinning the size, then clear it
+                    // after the resize settles so the user can still drag the
+                    // window edges.
+                    root.set_size_request(w, h);
+                    let root_clone = root.clone();
+                    gtk::glib::timeout_add_local_once(
+                        std::time::Duration::from_millis(50),
+                        move || {
+                            root_clone.set_size_request(-1, -1);
+                        },
+                    );
+                }
             }
             AppInput::ImageDimensionsChanged { width, height } => {
                 // Update the underlying image_dimensions field so the
