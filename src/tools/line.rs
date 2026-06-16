@@ -12,8 +12,8 @@ use crate::{
 };
 
 use super::{
-    Drawable, DrawableClone, GLOW_COLOR, Handle, HandleId, Tool, ToolUpdateResult, Tools,
-    halo_in_image_units,
+    CanvasTransform, Drawable, DrawableClone, GLOW_COLOR, Handle, HandleId, Tool, ToolUpdateResult,
+    Tools, halo_in_image_units,
 };
 
 #[derive(Default)]
@@ -97,6 +97,15 @@ impl Drawable for Line {
     fn translate(&mut self, delta: Vec2D) {
         // direction is a relative offset, so translating the line only moves start.
         self.start += delta;
+    }
+
+    fn apply_canvas_transform(&mut self, t: CanvasTransform, w: f32, h: f32) {
+        // `direction` is a relative offset, so it maps without the
+        // translation component; `start` maps as an absolute point.
+        if let Some(dir) = self.direction.as_mut() {
+            *dir = t.map_offset(*dir);
+        }
+        self.start = t.map_point(self.start, w, h);
     }
 
     fn handles(&self) -> Vec<Handle> {

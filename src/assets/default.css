@@ -27,6 +27,58 @@
     color: @headerbar_fg_color;
     background-color: @headerbar_bg_color;
 }
+
+/* The 12 tool buttons live in a FlowBox, which wraps each one in a
+ * GtkFlowBoxChild. Adwaita paints that wrapper its own hover/selection
+ * background and a focus outline that's larger than the button — reading
+ * as a double ring / extra outer colour around the active tool. Neutralise
+ * the wrapper entirely so ONLY the inner button paints, exactly like the
+ * plain buttons in the left (history) and right (colour/save) clusters. */
+.toolbar flowbox,
+.toolbar flowboxchild {
+    min-width: 0;
+    min-height: 0;
+    padding: 0;
+    margin: 0;
+    border: none;
+    background: none;
+    box-shadow: none;
+    outline: none;
+}
+.toolbar flowboxchild:focus,
+.toolbar flowboxchild:focus-within,
+.toolbar flowboxchild:focus-visible,
+.toolbar flowboxchild:hover,
+.toolbar flowboxchild:selected,
+.toolbar flowboxchild:active {
+    background: none;
+    box-shadow: none;
+    outline: none;
+}
+
+/* One uniform keyboard focus ring for every toolbar button — the history
+ * cluster, the tool buttons, the colour/save cluster, and the bottom bar —
+ * so all three groups match in outline style. `:focus-visible` keeps it
+ * keyboard-only (no ring on mouse click). Negative offset hugs the button
+ * so the ring sits just inside its edge like the tools' selected fill. */
+.toolbar-top button:focus-visible,
+.toolbar-bottom button:focus-visible {
+    outline: 2px solid alpha(#3584e4, 0.8);
+    outline-offset: -2px;
+}
+
+/* Square the top-bar icon buttons. Their clusters set `valign: center`
+ * (so the buttons take their natural size instead of stretching to fill the
+ * 42 px row), and symmetric padding around the square icon makes the
+ * hover / selected / focus fill square. The equal `min-width`/`min-height`
+ * floor keeps every icon button the same size regardless of glyph. Scoped
+ * to icon buttons: crop-mode text controls (.compact-control) and dropdown
+ * chips (.combo) keep their natural width. */
+.toolbar-top button:not(.compact-control):not(.combo) {
+    min-width: 28px;
+    min-height: 28px;
+    padding: 3px;
+}
 .toast {
     color: #f9f9f9;
     background-color: #00000099;
@@ -95,6 +147,25 @@
  * dropdown chip match the regular compact buttons in the same row. */
 dropdown.compact-control > button.combo {
     min-height: 32px;
+}
+/* The crop-mode aspect ("Freeform") and image-size ("600 × 400 px")
+ * dropdowns read cramped with the default 8 px compact-control padding
+ * around their label + chevron. Give them more horizontal breathing room.
+ * Scoped to the dropdown chips so the W/H entries (also .compact-control)
+ * keep their tight 2 px hug. NB: GtkDropDown's chip is a plain `button`
+ * (no `.combo` — that's the deprecated GtkComboBox), so we target the
+ * direct child button. */
+/* Adwaita pins the dropdown / menubutton button `padding` with a precedence
+ * we can't beat by specificity (and this GTK rejects `!important` — it
+ * parse-errors on it), so we can't widen the chip via button padding.
+ * Instead add margin around the LABEL text, which Adwaita doesn't lock
+ * down — same visual effect (more horizontal breathing room around the
+ * "Freeform" / "600 × 400 px" text). Scoped to the crop-mode aspect and
+ * image-size controls. */
+.toolbar-top dropdown.compact-control > button label,
+.toolbar-top .image-size-menubtn > button label {
+    margin-left: 6px;
+    margin-right: 6px;
 }
 .compact-control label,
 .compact-control button label {
@@ -184,10 +255,23 @@ dropdown.compact-control > button.combo {
  * has no effect on a `check` node, only on icons). */
 .snap-toggle {
     font-size: 0.9em;
+    /* Shape the keyboard focus ring to match the zoom indicator: padding
+     * on all sides so the ring sits off the checkbox/label rather than
+     * hugging them. `valign: center` keeps it from stretching the row. */
     min-height: 0;
+    /* Left padding matches the vertical padding so the focus ring sits
+     * the same distance above, below, and to the left of the check
+     * indicator. The right side keeps more room for the trailing text. */
+    padding: 6px 10px 6px 6px;
 }
 .snap-toggle > check {
     margin: 0 4px 0 0;
+    /* Shrink the indicator toward the label's text height — the default
+     * check is taller than the "100%" text, which made the focus ring
+     * read as tighter top/bottom than the zoom's. */
+    min-height: 16px;
+    min-width: 16px;
+    -gtk-icon-size: 14px;
 }
 .snap-toggle > label {
     margin: 0;

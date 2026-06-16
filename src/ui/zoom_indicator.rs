@@ -41,7 +41,7 @@ impl SimpleComponent for ZoomIndicator {
         gtk::MenuButton {
             add_css_class: "zoom-indicator",
             add_css_class: "flat",
-            set_focusable: false,
+            set_focusable: true,
             set_focus_on_click: false,
             set_halign: gtk::Align::Start,
             set_valign: gtk::Align::Center,

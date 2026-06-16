@@ -216,6 +216,14 @@ enum AppInput {
         width: i32,
         height: i32,
     },
+    /// Canvas Tab navigation. `FocusTopBarStart` focuses the first control
+    /// of the top toolbar (Tab from the canvas); `FocusBottomBarEnd` the
+    /// last control of the bottom bar (Shift+Tab). The bars' own seam
+    /// controllers carry the cycle the rest of the way. `FocusZoomIndicator`
+    /// is the legacy crop hand-off into the bottom bar's zoom control.
+    FocusTopBarStart,
+    FocusBottomBarEnd,
+    FocusZoomIndicator,
     /// Open the Preferences dialog (gear button or Ctrl+,).
     OpenPreferences,
     /// Re-launch the welcome dialog. Triggered by the "?" button
@@ -983,6 +991,15 @@ impl Component for App {
                     .sender()
                     .emit(ToolsToolbarInput::CropDimensionsChanged { width, height });
             }
+            AppInput::FocusTopBarStart => {
+                focus_first(&self.tools_toolbar.widget().clone().upcast::<gtk::Widget>());
+            }
+            AppInput::FocusBottomBarEnd => {
+                focus_last(&self.bottom_row.clone().upcast::<gtk::Widget>());
+            }
+            AppInput::FocusZoomIndicator => {
+                self.zoom_indicator.widget().grab_focus();
+            }
             AppInput::OpenPreferences => {
                 ui::preferences::open(
                     root,
@@ -1277,6 +1294,9 @@ impl Component for App {
                     SketchBoardOutput::CropEditDimensions { width, height } => {
                         AppInput::CropEditDimensions { width, height }
                     }
+                    SketchBoardOutput::FocusTopBarStart => AppInput::FocusTopBarStart,
+                    SketchBoardOutput::FocusBottomBarEnd => AppInput::FocusBottomBarEnd,
+                    SketchBoardOutput::FocusZoom => AppInput::FocusZoomIndicator,
                     SketchBoardOutput::OpenPreferences => AppInput::OpenPreferences,
                     SketchBoardOutput::OpenWelcomeDialog => AppInput::OpenWelcomeDialog,
                     SketchBoardOutput::AnnotationFactorChanged(v) => {
@@ -1407,7 +1427,12 @@ impl Component for App {
         let snap_to_edges_check = gtk::CheckButton::builder()
             .label("Snap to edges")
             .active(snap_initial)
-            .focusable(false)
+            .focusable(true)
+            // Center vertically (like the zoom indicator / revert button)
+            // so it keeps its natural height instead of stretching to the
+            // 58 px row — otherwise its keyboard focus ring spans the
+            // whole row height and reads as oversized.
+            .valign(gtk::Align::Center)
             .visible(false)
             .build();
         // Custom CSS class trims the indicator + label down to match the
@@ -1461,7 +1486,7 @@ impl Component for App {
         // the CenterBox's end-widget slot would expand it vertically.
         let revert_button = gtk::Button::builder()
             .label("Revert to Original")
-            .focusable(false)
+            .focusable(true)
             .hexpand(false)
             .visible(false)
             .valign(gtk::Align::Center)
@@ -1623,6 +1648,28 @@ impl Component for App {
 
         let widgets = view_output!();
 
+        // Keyboard focus loop: top bar → bottom bar → wrap, skipping the
+        // canvas. GTK already traverses *within* each bar for free (tree
+        // order) and wraps at the window's first/last focusable widget,
+        // but the canvas sits between the two bars in the tree, so plain
+        // Tab/Shift+Tab at a bar's edge lands on it. These two seam
+        // controllers detect when focus is at a bar's first/last focusable
+        // control and hop straight to the other bar, bypassing the canvas.
+        // Mode-agnostic: in Crop mode the bars expose the crop controls,
+        // in Normal mode the tool/colour controls — `collect_focusable`
+        // walks whatever is currently visible, so it follows the controls
+        // as they appear and disappear. The canvas itself routes its own
+        // Tab/Shift+Tab into the bars (see SketchBoard's key controller →
+        // FocusTopBarStart / FocusBottomBarEnd).
+        {
+            let top = model.tools_toolbar.widget().clone().upcast::<gtk::Widget>();
+            let bottom = model.bottom_row.clone().upcast::<gtk::Widget>();
+            let sketch = model.sketch_board.sender().clone();
+            let snap = model.snap_to_edges_check.clone();
+            install_loop_controller(&top, bottom.clone(), sketch.clone(), snap.clone());
+            install_loop_controller(&bottom, top, sketch, snap);
+        }
+
         if APP_CONFIG.read().focus_toggles_toolbars() {
             let motion_controller = gtk::EventControllerMotion::builder().build();
 
@@ -1689,6 +1736,122 @@ impl Component for App {
 
         ComponentParts { model, widgets }
     }
+}
+
+/// Depth-first collect every currently tab-reachable control under `w`, in
+/// tree (Tab) order. A focusable widget is treated as ATOMIC — we push it
+/// and do NOT descend into it (matching GTK: you tab to a control, not into
+/// its internals). Whole subtrees whose root is hidden are skipped, so the
+/// list tracks exactly what Tab can land on right now — controls that come
+/// and go (crop vs normal clusters, per-tool style pickers, the
+/// conditionally-shown Save/Revert buttons) are included or dropped
+/// automatically.
+fn collect_focusable(w: &gtk::Widget, out: &mut Vec<gtk::Widget>) {
+    if !w.get_visible() {
+        return;
+    }
+    // A GtkFlowBoxChild (the wrapper the tool FlowBox puts around each
+    // button) is focusable, but we want the inner button to be the stop —
+    // treat the wrapper as transparent and descend through it.
+    if w.is_focusable() && !w.is::<gtk::FlowBoxChild>() {
+        out.push(w.clone());
+        return;
+    }
+    let mut child = w.first_child();
+    while let Some(c) = child {
+        collect_focusable(&c, out);
+        child = c.next_sibling();
+    }
+}
+
+/// Focus the first / last currently tab-reachable control in `container`.
+fn focus_first(container: &gtk::Widget) {
+    let mut list = Vec::new();
+    collect_focusable(container, &mut list);
+    if let Some(w) = list.first() {
+        w.grab_focus();
+    }
+}
+fn focus_last(container: &gtk::Widget) {
+    let mut list = Vec::new();
+    collect_focusable(container, &mut list);
+    if let Some(w) = list.last() {
+        w.grab_focus();
+    }
+}
+
+/// Install a capture-phase keyboard handler that drives the focus loop for
+/// one bar (`this`) and wraps into the other (`other`), bypassing the
+/// canvas that sits between them in the widget tree.
+///
+/// Tab stepping is driven EXPLICITLY off `collect_focusable` rather than
+/// GTK's native traversal: `grab_focus` is called on the next/previous
+/// collected control. This is what makes each tool button a discrete stop
+/// even though they live in a FlowBox (whose native focus model treats the
+/// whole group as one Tab stop with arrow-key nav). At a bar's edge, focus
+/// wraps to the other bar's first/last control.
+///
+/// Esc refocuses the canvas, but only outside Crop mode (gated on the snap
+/// checkbox's visibility) — in Crop, Esc still cancels the crop via the
+/// toolbar's own handler.
+fn install_loop_controller(
+    this: &gtk::Widget,
+    other: gtk::Widget,
+    sketch: relm4::Sender<SketchBoardInput>,
+    snap_check: gtk::CheckButton,
+) {
+    let this_for = this.clone();
+    let key = gtk::EventControllerKey::new();
+    key.set_propagation_phase(gtk::PropagationPhase::Capture);
+    key.connect_key_pressed(move |_, keyval, _, state| {
+        use gtk::gdk::{Key, ModifierType};
+
+        if keyval == Key::Escape && !snap_check.get_visible() {
+            sketch.emit(SketchBoardInput::FocusCanvas);
+            return gtk::glib::Propagation::Stop;
+        }
+
+        let is_tab = keyval == Key::Tab || keyval == Key::ISO_Left_Tab;
+        if !is_tab {
+            return gtk::glib::Propagation::Proceed;
+        }
+        // Shift+Tab surfaces either as Tab+SHIFT or the ISO_Left_Tab keyval
+        // depending on the layout — accept both.
+        let shift = state.contains(ModifierType::SHIFT_MASK) || keyval == Key::ISO_Left_Tab;
+
+        let Some(focused) = this_for
+            .root()
+            .and_then(|r| relm4::gtk::prelude::RootExt::focus(&r))
+        else {
+            return gtk::glib::Propagation::Proceed;
+        };
+        let mut list = Vec::new();
+        collect_focusable(&this_for, &mut list);
+        // Match the focused widget to a collected control by identity OR
+        // ancestry: compound controls (MenuButton, DropDown) delegate focus
+        // to an inner child, so `root().focus()` returns that descendant
+        // rather than the outer widget we collected.
+        let Some(pos) = list
+            .iter()
+            .position(|w| *w == focused || focused.is_ancestor(w))
+        else {
+            return gtk::glib::Propagation::Proceed;
+        };
+
+        if shift {
+            if pos == 0 {
+                focus_last(&other); // wrap to end of the other bar
+            } else {
+                list[pos - 1].grab_focus();
+            }
+        } else if pos + 1 == list.len() {
+            focus_first(&other); // wrap to start of the other bar
+        } else {
+            list[pos + 1].grab_focus();
+        }
+        gtk::glib::Propagation::Stop
+    });
+    this.add_controller(key);
 }
 
 fn read_css_overrides() -> Option<String> {

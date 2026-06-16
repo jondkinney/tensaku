@@ -18,8 +18,8 @@ use crate::{
 use tensaku_cli::command_line;
 
 use super::{
-    Drawable, GLOW_COLOR, Handle, HandleId, Tool, ToolUpdateResult, Tools, bbox_handles,
-    bbox_resize, halo_in_image_units,
+    CanvasTransform, Drawable, GLOW_COLOR, Handle, HandleId, Tool, ToolUpdateResult, Tools,
+    bbox_handles, bbox_resize, halo_in_image_units,
 };
 
 /// Convert per-stroke opacity (`Style::highlighter_opacity`, set by the
@@ -258,6 +258,15 @@ impl Drawable for HighlightStroke {
 
     fn translate(&mut self, delta: Vec2D) {
         self.first += delta;
+    }
+
+    fn apply_canvas_transform(&mut self, t: CanvasTransform, w: f32, h: f32) {
+        // `first` is absolute; `rest` is offsets-from-`first`, so each
+        // remaps with only the linear part of the transform.
+        self.first = t.map_point(self.first, w, h);
+        for p in self.rest.iter_mut() {
+            *p = t.map_offset(*p);
+        }
     }
 
     fn handles(&self) -> Vec<Handle> {

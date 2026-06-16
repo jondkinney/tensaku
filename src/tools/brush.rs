@@ -11,8 +11,8 @@ use crate::{
 };
 
 use super::{
-    Drawable, DrawableClone, GLOW_COLOR, Handle, HandleId, Tool, ToolUpdateResult, Tools,
-    bbox_handles, bbox_resize, halo_in_image_units,
+    CanvasTransform, Drawable, DrawableClone, GLOW_COLOR, Handle, HandleId, Tool, ToolUpdateResult,
+    Tools, bbox_handles, bbox_resize, halo_in_image_units,
 };
 use relm4::Sender;
 
@@ -286,6 +286,21 @@ impl Drawable for BrushDrawable {
     fn translate(&mut self, delta: Vec2D) {
         if let Some(start) = self.start_point.as_mut() {
             *start += delta;
+        }
+    }
+
+    fn apply_canvas_transform(&mut self, t: CanvasTransform, w: f32, h: f32) {
+        // `start_point` is absolute; `points`/`raw_points` are offsets
+        // from it (see the struct doc), so they remap with the pure
+        // linear part of the transform — no translation component.
+        if let Some(start) = self.start_point.as_mut() {
+            *start = t.map_point(*start, w, h);
+        }
+        for p in self.points.iter_mut() {
+            *p = t.map_offset(*p);
+        }
+        for p in self.raw_points.iter_mut() {
+            *p = t.map_offset(*p);
         }
     }
 

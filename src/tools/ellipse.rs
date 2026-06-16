@@ -12,8 +12,8 @@ use crate::{
 };
 
 use super::{
-    Drawable, DrawableClone, GLOW_COLOR, Handle, HandleId, Tool, ToolUpdateResult, Tools,
-    bbox_handles, bbox_resize, halo_in_image_units,
+    CanvasTransform, Drawable, DrawableClone, GLOW_COLOR, Handle, HandleId, Tool, ToolUpdateResult,
+    Tools, bbox_handles, bbox_resize, halo_in_image_units,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -119,6 +119,27 @@ impl Drawable for Ellipse {
     fn translate(&mut self, delta: Vec2D) {
         self.middle += delta;
         self.origin += delta;
+    }
+
+    fn apply_canvas_transform(&mut self, t: CanvasTransform, w: f32, h: f32) {
+        match self.radii {
+            Some(r) => {
+                let rx = r.x.abs();
+                let ry = r.y.abs();
+                let bbox = Rect::new(
+                    Vec2D::new(self.middle.x - rx, self.middle.y - ry),
+                    Vec2D::new(rx * 2.0, ry * 2.0),
+                );
+                let m = t.map_rect(bbox, w, h);
+                self.middle = m.center();
+                self.radii = Some(Vec2D::new(m.size.x / 2.0, m.size.y / 2.0));
+                self.origin = m.pos;
+            }
+            None => {
+                self.middle = t.map_point(self.middle, w, h);
+                self.origin = t.map_point(self.origin, w, h);
+            }
+        }
     }
 
     fn handles(&self) -> Vec<Handle> {

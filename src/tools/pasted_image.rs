@@ -10,7 +10,8 @@ use std::rc::Rc;
 
 use crate::math::{Rect, Vec2D};
 use crate::tools::{
-    Drawable, GLOW_COLOR, Handle, HandleId, bbox_handles, bbox_resize, halo_in_image_units,
+    CanvasTransform, Drawable, GLOW_COLOR, Handle, HandleId, bbox_handles, bbox_resize,
+    halo_in_image_units,
 };
 
 /// Pre-converted RGBA pixel buffer, shared (cheaply cloneable) so the
@@ -180,6 +181,52 @@ impl Drawable for PastedImage {
 
     fn translate(&mut self, delta: Vec2D) {
         self.pos += delta;
+    }
+
+    fn apply_canvas_transform(&mut self, t: CanvasTransform, w: f32, h: f32) {
+        // Reposition (and, for a rotate, re-orient) the display rect…
+        let r = t.map_rect(Rect::new(self.pos, self.size), w, h);
+        self.pos = r.pos;
+        self.size = r.size;
+        // A scale (image resize) only changes the on-screen size, which
+        // the display rect above already captured — the source pixels are
+        // resampled at draw time, so there's nothing more to do. Only a
+        // flip/rotate re-orients the source pixels.
+        if matches!(t, CanvasTransform::Scale { .. }) {
+            return;
+        }
+        // …and transform the source pixels so the image content turns
+        // with the canvas, not just its bounding box.
+        let src = &self.data;
+        let (sw, sh) = (src.width as usize, src.height as usize);
+        let (nw, nh) = match t {
+            CanvasTransform::FlipHorizontal => (sw, sh),
+            CanvasTransform::RotateCcw | CanvasTransform::RotateCw => (sh, sw),
+            CanvasTransform::Scale { .. } => unreachable!(),
+        };
+        let mut rgba = vec![0u8; src.rgba.len()];
+        for sy in 0..sh {
+            for sx in 0..sw {
+                let si = (sy * sw + sx) * 4;
+                let (dx, dy) = match t {
+                    CanvasTransform::FlipHorizontal => (sw - 1 - sx, sy),
+                    // CCW: src (sx,sy) → dest (sy, sw−1−sx).
+                    CanvasTransform::RotateCcw => (sy, sw - 1 - sx),
+                    // CW: src (sx,sy) → dest (sh−1−sy, sx).
+                    CanvasTransform::RotateCw => (sh - 1 - sy, sx),
+                    CanvasTransform::Scale { .. } => unreachable!(),
+                };
+                let di = (dy * nw + dx) * 4;
+                rgba[di..di + 4].copy_from_slice(&src.rgba[si..si + 4]);
+            }
+        }
+        self.data = Rc::new(ImageData {
+            rgba,
+            width: nw as u32,
+            height: nh as u32,
+        });
+        // Force re-upload — the cached texture is the old orientation/size.
+        self.image_id.borrow_mut().take();
     }
 
     fn handles(&self) -> Vec<Handle> {

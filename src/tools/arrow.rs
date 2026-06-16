@@ -13,8 +13,8 @@ use crate::{
 };
 
 use super::{
-    Drawable, DrawableClone, GLOW_COLOR, Handle, HandleId, Tool, ToolUpdateResult, Tools,
-    halo_in_image_units,
+    CanvasTransform, Drawable, DrawableClone, GLOW_COLOR, Handle, HandleId, Tool, ToolUpdateResult,
+    Tools, halo_in_image_units,
 };
 
 /// Arrow geometry variants.
@@ -658,6 +658,16 @@ impl Drawable for Arrow {
         }
         if let Some(c) = self.curve_control.as_mut() {
             *c += delta;
+        }
+    }
+
+    fn apply_canvas_transform(&mut self, t: CanvasTransform, w: f32, h: f32) {
+        self.start = t.map_point(self.start, w, h);
+        if let Some(end) = self.end.as_mut() {
+            *end = t.map_point(*end, w, h);
+        }
+        if let Some(c) = self.curve_control.as_mut() {
+            *c = t.map_point(*c, w, h);
         }
     }
 

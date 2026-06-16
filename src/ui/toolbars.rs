@@ -234,6 +234,11 @@ pub struct ToolsToolbar {
     /// half-typed value every drag tick.
     crop_width_entry: Option<gtk::Entry>,
     crop_height_entry: Option<gtk::Entry>,
+    /// The aspect dropdown (first crop-toolbar control) + Crop apply
+    /// button (last), used to wire crop-mode tab navigation: canvas → the
+    /// dropdown, and the Crop button → the bottom bar.
+    crop_aspect_dropdown: Option<gtk::DropDown>,
+    crop_apply_button: Option<gtk::Button>,
     /// Current background image dimensions (in image-space pixels).
     /// Drives the "Image size: W × H px" MenuButton label and
     /// pre-fills the resize popover's W/H entries when it opens.
@@ -402,6 +407,15 @@ pub struct ToolsToolbar {
     /// Normal layout; the cluster is unparented from here on
     /// transition into Wrap.
     start_widget_box: Option<gtk::Box>,
+    /// The crop-mode controls cluster (aspect / W·H / rotate / flip /
+    /// image-size). `SetLayout` re-parents it between the CenterBox center
+    /// slot (`top_center_host`, Normal → centered) and the start slot
+    /// (`start_widget_box`, Wrap → left-aligned next to the crop indicator).
+    crop_center_box: Option<gtk::Box>,
+    /// The CenterBox's center slot Box (holds the 12-tool cluster, and the
+    /// crop controls while in Normal layout). Captured so `SetLayout` can
+    /// re-home `crop_center_box` here.
+    top_center_host: Option<gtk::Box>,
 }
 
 impl ToolsToolbar {
@@ -2145,6 +2159,10 @@ pub enum ToolbarEvent {
     /// behavior as Enter inside the Crop tool (apply the in-progress
     /// edit and exit Crop).
     ApplyCrop,
+    /// Tab off the crop toolbar's last control (Crop button) — hand focus
+    /// to the bottom bar's zoom indicator so the forward tab cycle flows
+    /// top bar → bottom bar (skipping the canvas, which is the home).
+    FocusZoom,
     /// User picked an aspect-ratio constraint from the crop-mode
     /// top toolbar's dropdown. Sketch_board forwards to
     /// `CropTool::set_aspect_ratio`, which both snaps the existing
@@ -2270,10 +2288,13 @@ pub enum ToolsToolbarInput {
         width: i32,
         height: i32,
     },
-    /// User pressed Enter in the W entry (or `None` if the typed
-    /// text didn't parse — we ignore it).
-    CropWidthEntered(Option<i32>),
-    CropHeightEntered(Option<i32>),
+    /// User committed the W entry — `None` if the typed text didn't
+    /// parse (we snap it back). The bool is `true` on Enter
+    /// (`connect_activate`), which sets the dimension AND applies the
+    /// crop (Enter = "done"); `false` on focus-out, which only sets the
+    /// dimension so tabbing W→H doesn't apply/jump mid-edit.
+    CropWidthEntered(Option<i32>, bool),
+    CropHeightEntered(Option<i32>, bool),
     /// User clicked the ↔ swap button between the W/H entries.
     /// Swaps the current dimensions and emits a fresh
     /// `CropDimensionsSet` so the crop rect resizes accordingly.
@@ -2899,18 +2920,30 @@ impl Component for ToolsToolbar {
             // window's left/center/right edges instead of clustering in
             // the middle with empty space on each side. The cluster
             // pattern matches a typical editor toolbar.
+            #[name(top_centerbox)]
             gtk::CenterBox {
+            // Pin a constant row height so the top bar doesn't visibly
+            // shrink in Crop mode. The main view's right cluster uses
+            // natural-height Adwaita buttons (taller than the compact
+            // crop controls); pinning here makes both views match. The
+            // crop clusters set `valign: Center` so their controls keep
+            // their own size and just gain padding, rather than stretching
+            // to fill this height.
+            set_height_request: 42,
 
             #[wrap(Some)]
             #[name(start_widget_box)]
             set_start_widget = &gtk::Box {
                 set_orientation: gtk::Orientation::Horizontal,
 
-                // Hidden in Wrap layout (the left cluster moves
-                // to the second row); visible in Normal where it
-                // sits in the CenterBox's natural start slot.
+                // Hidden in Wrap layout (the left cluster moves to the
+                // second row); visible in Normal where it sits in the
+                // CenterBox's natural start slot. Always visible in Crop
+                // mode, where it hosts the (left-aligned) crop controls —
+                // those don't wrap to a second row.
                 #[watch]
-                set_visible: matches!(model.layout, TopBarLayout::Normal),
+                set_visible: matches!(model.layout, TopBarLayout::Normal)
+                    || model.current_tool == Tools::Crop,
 
                 // Normal start cluster — view + history ops. Hidden
                 // when the Crop tool is active so the crop-mode top
@@ -2923,6 +2956,11 @@ impl Component for ToolsToolbar {
                 gtk::Box {
                     set_orientation: gtk::Orientation::Horizontal,
                     set_spacing: 2,
+                    // Center vertically so the icon buttons keep their
+                    // natural (square) size instead of stretching to fill
+                    // the pinned 42 px row — see the crop clusters, which do
+                    // the same.
+                    set_valign: gtk::Align::Center,
                     #[watch]
                     set_visible: model.current_tool != Tools::Crop,
 
@@ -2935,7 +2973,8 @@ impl Component for ToolsToolbar {
                     // tool row wrap right at its packed width instead
                     // of ~70 px early.
                     gtk::Button {
-                        set_focusable: false,
+                        set_focusable: true,
+                        set_focus_on_click: false,
                         set_hexpand: false,
 
                         set_icon_name: "recycling-bin",
@@ -2944,7 +2983,8 @@ impl Component for ToolsToolbar {
                     },
                     gtk::Separator {},
                     gtk::Button {
-                        set_focusable: false,
+                        set_focusable: true,
+                        set_focus_on_click: false,
                         set_hexpand: false,
 
                         set_icon_name: "arrow-undo-filled",
@@ -2952,7 +2992,8 @@ impl Component for ToolsToolbar {
                         connect_clicked[sender] => move |_| {sender.output_sender().emit(ToolbarEvent::Undo);},
                     },
                     gtk::Button {
-                        set_focusable: false,
+                        set_focusable: true,
+                        set_focus_on_click: false,
                         set_hexpand: false,
 
                         set_icon_name: "arrow-redo-filled",
@@ -2961,7 +3002,8 @@ impl Component for ToolsToolbar {
                     },
                     gtk::Separator {},
                     gtk::Button {
-                        set_focusable: false,
+                        set_focusable: true,
+                        set_focus_on_click: false,
                         set_hexpand: false,
 
                         set_icon_name: "layer-diagonal-regular",
@@ -2978,6 +3020,7 @@ impl Component for ToolsToolbar {
                 gtk::Box {
                     set_orientation: gtk::Orientation::Horizontal,
                     set_spacing: 2,
+                    set_valign: gtk::Align::Center,
                     #[watch]
                     set_visible: model.current_tool == Tools::Crop,
 
@@ -2987,146 +3030,6 @@ impl Component for ToolsToolbar {
                         set_margin_start: 4,
                         set_margin_end: 4,
                     },
-                },
-            },
-
-            #[wrap(Some)]
-            set_center_widget = &gtk::Box {
-                set_orientation: gtk::Orientation::Horizontal,
-
-                // Normal center cluster — the 12 tool toggle buttons.
-                // Hidden in Crop mode so the crop-options cluster
-                // (next sibling below) takes over the center slot.
-                // FlowBox (not a plain Box) so the 12 tool buttons can
-                // wrap onto a second row when the window is too narrow
-                // for all of them. That collapses the cluster's minimum
-                // width to ~6 buttons, which is what lets the whole
-                // window shrink past the single-row toolbar width —
-                // a plain Box would pin the window minimum at the full
-                // 12-button width. `min_children_per_line: 6` caps the
-                // wrap at two rows (12 buttons ÷ 6 = 2); `max: 12` keeps
-                // every tool on one row while there's room.
-                #[name(normal_center_box)]
-                gtk::FlowBox {
-                set_orientation: gtk::Orientation::Horizontal,
-                set_selection_mode: gtk::SelectionMode::None,
-                set_homogeneous: true,
-                set_min_children_per_line: 6,
-                set_max_children_per_line: 12,
-                set_row_spacing: 2,
-                set_column_spacing: 2,
-                set_can_focus: false,
-                #[watch]
-                set_visible: model.current_tool != Tools::Crop,
-
-                #[name(pointer_button)]
-                gtk::ToggleButton {
-                    set_focusable: false,
-                    set_hexpand: false,
-
-                    set_icon_name: "cursor-regular",
-                    // tooltip set programmatically
-                    ActionablePlus::set_action::<ToolsAction>: Tools::Pointer,
-                },
-                #[name(crop_button)]
-                gtk::ToggleButton {
-                    set_focusable: false,
-                    set_hexpand: false,
-
-                    set_icon_name: "crop-filled",
-                    // tooltip set programmatically
-                    ActionablePlus::set_action::<ToolsAction>: Tools::Crop,
-                },
-                #[name(brush_button)]
-                gtk::ToggleButton {
-                    set_focusable: false,
-                    set_hexpand: false,
-
-                    set_icon_name: "pen-regular",
-                    // tooltip set programmatically
-                    ActionablePlus::set_action::<ToolsAction>: Tools::Brush,
-                },
-                #[name(line_button)]
-                gtk::ToggleButton {
-                    set_focusable: false,
-                    set_hexpand: false,
-
-                    set_icon_name: "minus-large",
-                    // tooltip set programmatically
-                    ActionablePlus::set_action::<ToolsAction>: Tools::Line,
-                },
-                #[name(arrow_button)]
-                gtk::ToggleButton {
-                    set_focusable: false,
-                    set_hexpand: false,
-
-                    set_icon_name: "arrow-up-right-filled",
-                    // tooltip set programmatically
-                    ActionablePlus::set_action::<ToolsAction>: Tools::Arrow,
-                },
-                #[name(rectangle_button)]
-                gtk::ToggleButton {
-                    set_focusable: false,
-                    set_hexpand: false,
-
-                    set_icon_name: "checkbox-unchecked-regular",
-                    // tooltip set programmatically
-                    ActionablePlus::set_action::<ToolsAction>: Tools::Rectangle,
-                },
-                #[name(ellipse_button)]
-                gtk::ToggleButton {
-                    set_focusable: false,
-                    set_hexpand: false,
-
-                    set_icon_name: "circle-regular",
-                    // tooltip set programmatically
-                    ActionablePlus::set_action::<ToolsAction>: Tools::Ellipse,
-                },
-                #[name(text_button)]
-                gtk::ToggleButton {
-                    set_focusable: false,
-                    set_hexpand: false,
-
-                    set_icon_name: "text-case-title-regular",
-                    // tooltip set programmatically
-                    ActionablePlus::set_action::<ToolsAction>: Tools::Text,
-                },
-                #[name(marker_button)]
-                gtk::ToggleButton {
-                    set_focusable: false,
-                    set_hexpand: false,
-
-                    set_icon_name: "number-circle-1-regular",
-                    // tooltip set programmatically
-                    ActionablePlus::set_action::<ToolsAction>: Tools::Marker,
-                },
-                #[name(blur_button)]
-                gtk::ToggleButton {
-                    set_focusable: false,
-                    set_hexpand: false,
-
-                    set_icon_name: "drop-regular",
-                    // tooltip set programmatically
-                    ActionablePlus::set_action::<ToolsAction>: Tools::Blur,
-                },
-                #[name(highlight_button)]
-                gtk::ToggleButton {
-                    set_focusable: false,
-                    set_hexpand: false,
-
-                    set_icon_name: "highlight-regular",
-                    // tooltip set programmatically
-                    ActionablePlus::set_action::<ToolsAction>: Tools::Highlighter,
-                },
-                #[name(spotlight_button)]
-                gtk::ToggleButton {
-                    set_focusable: false,
-                    set_hexpand: false,
-
-                    set_icon_name: "flashlight-regular",
-                    // tooltip set programmatically
-                    ActionablePlus::set_action::<ToolsAction>: Tools::Spotlight,
-                },
                 },
 
                 // Crop-mode center cluster — aspect-ratio picker,
@@ -3138,6 +3041,9 @@ impl Component for ToolsToolbar {
                 gtk::Box {
                     set_orientation: gtk::Orientation::Horizontal,
                     set_spacing: 6,
+                    // Keep the compact controls their own height, centered
+                    // in the pinned row, rather than stretching to fill it.
+                    set_valign: gtk::Align::Center,
                     #[watch]
                     set_visible: model.current_tool == Tools::Crop,
 
@@ -3149,8 +3055,8 @@ impl Component for ToolsToolbar {
                     // drags (see `CropTool::set_aspect_ratio`).
                     #[name(crop_aspect_dropdown)]
                     gtk::DropDown {
-                        set_focusable: false,
-                        set_height_request: 34,
+                        set_focusable: true,
+                        set_height_request: 36,
                         add_css_class: "compact-control",
                         install_tooltip: "Aspect ratio",
                         set_model: Some(&gtk::StringList::new(
@@ -3190,7 +3096,7 @@ impl Component for ToolsToolbar {
                         add_css_class: "crop-dim-entry",
                         set_focusable: true,
                         set_hexpand: false,
-                        set_height_request: 34,
+                        set_height_request: 36,
                         set_width_request: 48,
                         set_width_chars: 3,
                         set_max_width_chars: 4,
@@ -3199,13 +3105,13 @@ impl Component for ToolsToolbar {
                         install_tooltip: "Crop width (px)",
                         connect_activate[sender] => move |e| {
                             let v = e.text().trim().parse::<i32>().ok();
-                            sender.input(ToolsToolbarInput::CropWidthEntered(v));
+                            sender.input(ToolsToolbarInput::CropWidthEntered(v, true));
                         },
                     },
                     gtk::Button {
-                        set_focusable: false,
+                        set_focusable: true,
                         set_hexpand: false,
-                        set_height_request: 34,
+                        set_height_request: 36,
                         add_css_class: "compact-control",
                         add_css_class: "flat",
                         set_icon_name: "arrow-swap-regular",
@@ -3221,7 +3127,7 @@ impl Component for ToolsToolbar {
                         add_css_class: "crop-dim-entry",
                         set_focusable: true,
                         set_hexpand: false,
-                        set_height_request: 34,
+                        set_height_request: 36,
                         set_width_request: 48,
                         set_width_chars: 3,
                         set_max_width_chars: 4,
@@ -3230,7 +3136,7 @@ impl Component for ToolsToolbar {
                         install_tooltip: "Crop height (px)",
                         connect_activate[sender] => move |e| {
                             let v = e.text().trim().parse::<i32>().ok();
-                            sender.input(ToolsToolbarInput::CropHeightEntered(v));
+                            sender.input(ToolsToolbarInput::CropHeightEntered(v, true));
                         },
                     },
 
@@ -3250,10 +3156,10 @@ impl Component for ToolsToolbar {
                     // swatch via `#[watch]` on `crop_bg_color`.
                     #[name(crop_bg_color_menu_btn)]
                     gtk::MenuButton {
-                        set_focusable: false,
+                        set_focusable: true,
                         set_focus_on_click: false,
                         set_hexpand: false,
-                        set_height_request: 34,
+                        set_height_request: 36,
                         add_css_class: "compact-control",
                         set_has_frame: true,
                         set_always_show_arrow: false,
@@ -3276,9 +3182,9 @@ impl Component for ToolsToolbar {
                     // window re-fits around the rotated image. Same
                     // drawable-positions-stay limitation as flip.
                     gtk::Button {
-                        set_focusable: false,
+                        set_focusable: true,
                         set_hexpand: false,
-                        set_height_request: 34,
+                        set_height_request: 36,
                         add_css_class: "compact-control",
                         add_css_class: "flat",
                         set_icon_name: "rotate-90-degrees-ccw",
@@ -3294,9 +3200,9 @@ impl Component for ToolsToolbar {
                     // keep their image-space positions (documented in
                     // FemtoVGArea::flip_image_horizontal).
                     gtk::Button {
-                        set_focusable: false,
+                        set_focusable: true,
                         set_hexpand: false,
-                        set_height_request: 34,
+                        set_height_request: 36,
                         add_css_class: "compact-control",
                         add_css_class: "flat",
                         set_icon_name: "flip-horizontal-regular",
@@ -3336,9 +3242,9 @@ impl Component for ToolsToolbar {
                     },
                     #[name(resize_menu_btn)]
                     gtk::MenuButton {
-                        set_focusable: false,
+                        set_focusable: true,
                         set_hexpand: false,
-                        set_height_request: 34,
+                        set_height_request: 36,
                         add_css_class: "compact-control",
                         // CSS class gives the button a gray background
                         // even before hover, matching the resize
@@ -3363,6 +3269,167 @@ impl Component for ToolsToolbar {
                         ),
                     },
                 },
+            },
+
+            #[wrap(Some)]
+            #[name(top_center_host)]
+            set_center_widget = &gtk::Box {
+                set_orientation: gtk::Orientation::Horizontal,
+
+                // Normal center cluster — the 12 tool toggle buttons.
+                // Hidden in Crop mode so the crop-options cluster
+                // (next sibling below) takes over the center slot.
+                // FlowBox (not a plain Box) so the 12 tool buttons can
+                // wrap onto a second row when the window is too narrow
+                // for all of them. That collapses the cluster's minimum
+                // width to ~6 buttons, which is what lets the whole
+                // window shrink past the single-row toolbar width —
+                // a plain Box would pin the window minimum at the full
+                // 12-button width. `min_children_per_line: 6` caps the
+                // wrap at two rows (12 buttons ÷ 6 = 2); `max: 12` keeps
+                // every tool on one row while there's room.
+                #[name(normal_center_box)]
+                gtk::FlowBox {
+                set_orientation: gtk::Orientation::Horizontal,
+                set_selection_mode: gtk::SelectionMode::None,
+                set_homogeneous: true,
+                set_min_children_per_line: 6,
+                set_max_children_per_line: 12,
+                set_row_spacing: 2,
+                set_column_spacing: 2,
+                // Center vertically so the tool buttons keep their natural
+                // square size rather than stretching to fill the 42 px row.
+                set_valign: gtk::Align::Center,
+                // Must allow focus to ENTER the FlowBox subtree, or none of
+                // the tool buttons inside it can be tab-focused (GTK4:
+                // can_focus=false blocks focus to the widget AND its
+                // children). The loop controller in main.rs then steps onto
+                // each tool button explicitly.
+                set_can_focus: true,
+                #[watch]
+                set_visible: model.current_tool != Tools::Crop,
+
+                #[name(pointer_button)]
+                gtk::ToggleButton {
+                    set_focusable: true,
+                    set_focus_on_click: false,
+                    set_hexpand: false,
+
+                    set_icon_name: "cursor-regular",
+                    // tooltip set programmatically
+                    ActionablePlus::set_action::<ToolsAction>: Tools::Pointer,
+                },
+                #[name(crop_button)]
+                gtk::ToggleButton {
+                    set_focusable: true,
+                    set_focus_on_click: false,
+                    set_hexpand: false,
+
+                    set_icon_name: "crop-filled",
+                    // tooltip set programmatically
+                    ActionablePlus::set_action::<ToolsAction>: Tools::Crop,
+                },
+                #[name(brush_button)]
+                gtk::ToggleButton {
+                    set_focusable: true,
+                    set_focus_on_click: false,
+                    set_hexpand: false,
+
+                    set_icon_name: "pen-regular",
+                    // tooltip set programmatically
+                    ActionablePlus::set_action::<ToolsAction>: Tools::Brush,
+                },
+                #[name(line_button)]
+                gtk::ToggleButton {
+                    set_focusable: true,
+                    set_focus_on_click: false,
+                    set_hexpand: false,
+
+                    set_icon_name: "minus-large",
+                    // tooltip set programmatically
+                    ActionablePlus::set_action::<ToolsAction>: Tools::Line,
+                },
+                #[name(arrow_button)]
+                gtk::ToggleButton {
+                    set_focusable: true,
+                    set_focus_on_click: false,
+                    set_hexpand: false,
+
+                    set_icon_name: "arrow-up-right-filled",
+                    // tooltip set programmatically
+                    ActionablePlus::set_action::<ToolsAction>: Tools::Arrow,
+                },
+                #[name(rectangle_button)]
+                gtk::ToggleButton {
+                    set_focusable: true,
+                    set_focus_on_click: false,
+                    set_hexpand: false,
+
+                    set_icon_name: "checkbox-unchecked-regular",
+                    // tooltip set programmatically
+                    ActionablePlus::set_action::<ToolsAction>: Tools::Rectangle,
+                },
+                #[name(ellipse_button)]
+                gtk::ToggleButton {
+                    set_focusable: true,
+                    set_focus_on_click: false,
+                    set_hexpand: false,
+
+                    set_icon_name: "circle-regular",
+                    // tooltip set programmatically
+                    ActionablePlus::set_action::<ToolsAction>: Tools::Ellipse,
+                },
+                #[name(text_button)]
+                gtk::ToggleButton {
+                    set_focusable: true,
+                    set_focus_on_click: false,
+                    set_hexpand: false,
+
+                    set_icon_name: "text-case-title-regular",
+                    // tooltip set programmatically
+                    ActionablePlus::set_action::<ToolsAction>: Tools::Text,
+                },
+                #[name(marker_button)]
+                gtk::ToggleButton {
+                    set_focusable: true,
+                    set_focus_on_click: false,
+                    set_hexpand: false,
+
+                    set_icon_name: "number-circle-1-regular",
+                    // tooltip set programmatically
+                    ActionablePlus::set_action::<ToolsAction>: Tools::Marker,
+                },
+                #[name(blur_button)]
+                gtk::ToggleButton {
+                    set_focusable: true,
+                    set_focus_on_click: false,
+                    set_hexpand: false,
+
+                    set_icon_name: "drop-regular",
+                    // tooltip set programmatically
+                    ActionablePlus::set_action::<ToolsAction>: Tools::Blur,
+                },
+                #[name(highlight_button)]
+                gtk::ToggleButton {
+                    set_focusable: true,
+                    set_focus_on_click: false,
+                    set_hexpand: false,
+
+                    set_icon_name: "highlight-regular",
+                    // tooltip set programmatically
+                    ActionablePlus::set_action::<ToolsAction>: Tools::Highlighter,
+                },
+                #[name(spotlight_button)]
+                gtk::ToggleButton {
+                    set_focusable: true,
+                    set_focus_on_click: false,
+                    set_hexpand: false,
+
+                    set_icon_name: "flashlight-regular",
+                    // tooltip set programmatically
+                    ActionablePlus::set_action::<ToolsAction>: Tools::Spotlight,
+                },
+                },
 
             },
 
@@ -3383,6 +3450,9 @@ impl Component for ToolsToolbar {
                 gtk::Box {
                     set_orientation: gtk::Orientation::Horizontal,
                     set_spacing: 2,
+                    // Center vertically so the icon buttons keep their
+                    // natural square size instead of filling the 42 px row.
+                    set_valign: gtk::Align::Center,
                     #[watch]
                     set_visible: model.current_tool != Tools::Crop,
 
@@ -3395,7 +3465,7 @@ impl Component for ToolsToolbar {
                     // the canvas.
                     #[name(color_button)]
                     gtk::MenuButton {
-                        set_focusable: false,
+                        set_focusable: true,
                         set_focus_on_click: false,
                         set_hexpand: false,
                         add_css_class: "color-picker-button",
@@ -3413,7 +3483,8 @@ impl Component for ToolsToolbar {
                     },
                     gtk::Separator {},
                     gtk::Button {
-                        set_focusable: false,
+                        set_focusable: true,
+                        set_focus_on_click: false,
                         set_hexpand: false,
 
                         set_icon_name: "copy-regular",
@@ -3421,7 +3492,8 @@ impl Component for ToolsToolbar {
                         connect_clicked[sender] => move |_| {sender.output_sender().emit(ToolbarEvent::CopyClipboard);},
                     },
                     gtk::Button {
-                        set_focusable: false,
+                        set_focusable: true,
+                        set_focus_on_click: false,
                         set_hexpand: false,
 
                         set_icon_name: "save-regular",
@@ -3431,7 +3503,8 @@ impl Component for ToolsToolbar {
                         set_visible: APP_CONFIG.read().output_filename().is_some()
                     },
                     gtk::Button {
-                        set_focusable: false,
+                        set_focusable: true,
+                        set_focus_on_click: false,
                         set_hexpand: false,
 
                         set_icon_name: "save-multiple-regular",
@@ -3442,7 +3515,8 @@ impl Component for ToolsToolbar {
                     // mirrors the left cluster's trailing layers button.
                     gtk::Separator {},
                     gtk::Button {
-                        set_focusable: false,
+                        set_focusable: true,
+                        set_focus_on_click: false,
                         set_hexpand: false,
 
                         set_icon_name: "settings-regular",
@@ -3460,13 +3534,14 @@ impl Component for ToolsToolbar {
                 gtk::Box {
                     set_orientation: gtk::Orientation::Horizontal,
                     set_spacing: 6,
+                    set_valign: gtk::Align::Center,
                     #[watch]
                     set_visible: model.current_tool == Tools::Crop,
 
                     gtk::Button {
-                        set_focusable: false,
+                        set_focusable: true,
                         set_hexpand: false,
-                        set_height_request: 34,
+                        set_height_request: 36,
                         set_label: "Cancel",
                         add_css_class: "compact-control",
                         install_tooltip: "Cancel crop (Esc)",
@@ -3475,10 +3550,11 @@ impl Component for ToolsToolbar {
                             sender.output_sender().emit(ToolbarEvent::FocusCanvas);
                         },
                     },
+                    #[name(crop_apply_button)]
                     gtk::Button {
-                        set_focusable: false,
+                        set_focusable: true,
                         set_hexpand: false,
-                        set_height_request: 34,
+                        set_height_request: 36,
                         set_label: "Crop",
                         add_css_class: "compact-control",
                         add_css_class: "suggested-action",
@@ -3504,8 +3580,14 @@ impl Component for ToolsToolbar {
                 set_orientation: gtk::Orientation::Horizontal,
                 set_halign: gtk::Align::Center,
                 set_spacing: 6,
+                // Only the normal tool view wraps to a second row. Crop mode
+                // keeps everything on the single pinned row (its controls
+                // left-align in the start slot), so the wrap row must stay
+                // hidden there — otherwise its (empty) height would push the
+                // crop controls off-center vertically.
                 #[watch]
-                set_visible: matches!(model.layout, TopBarLayout::Wrap),
+                set_visible: matches!(model.layout, TopBarLayout::Wrap)
+                    && model.current_tool != Tools::Crop,
             },
         },
     }
@@ -3890,7 +3972,7 @@ impl Component for ToolsToolbar {
                     e.set_text(&logical_px(height, s).to_string());
                 }
             }
-            ToolsToolbarInput::CropWidthEntered(value) => {
+            ToolsToolbarInput::CropWidthEntered(value, apply) => {
                 let s = self.display_scale;
                 if let Some(w_logical) = value
                     && w_logical > 0
@@ -3901,7 +3983,13 @@ impl Component for ToolsToolbar {
                             width: image_px(w_logical, s),
                             height: self.crop_height.max(1),
                         });
-                    sender.output_sender().emit(ToolbarEvent::FocusCanvas);
+                    // Enter = "done": apply the crop. `commit()` switches
+                    // back to the canvas and refocuses it (so single-key
+                    // shortcuts work). Focus-out just sets the value and
+                    // stays so the user can keep editing / Tab to height.
+                    if apply {
+                        sender.output_sender().emit(ToolbarEvent::ApplyCrop);
+                    }
                 } else if let Some(e) = &self.crop_width_entry {
                     // Snap back to the last known good value so the
                     // entry doesn't keep showing unparseable text
@@ -3909,7 +3997,7 @@ impl Component for ToolsToolbar {
                     e.set_text(&logical_px(self.crop_width, s).to_string());
                 }
             }
-            ToolsToolbarInput::CropHeightEntered(value) => {
+            ToolsToolbarInput::CropHeightEntered(value, apply) => {
                 let s = self.display_scale;
                 if let Some(h_logical) = value
                     && h_logical > 0
@@ -3920,7 +4008,9 @@ impl Component for ToolsToolbar {
                             width: self.crop_width.max(1),
                             height: image_px(h_logical, s),
                         });
-                    sender.output_sender().emit(ToolbarEvent::FocusCanvas);
+                    if apply {
+                        sender.output_sender().emit(ToolbarEvent::ApplyCrop);
+                    }
                 } else if let Some(e) = &self.crop_height_entry {
                     e.set_text(&logical_px(self.crop_height, s).to_string());
                 }
@@ -4010,13 +4100,24 @@ impl Component for ToolsToolbar {
                 if self.layout == target {
                     return;
                 }
-                let (Some(right), Some(end_host), Some(wrap_row), Some(left), Some(start_box)) = (
+                let (
+                    Some(right),
+                    Some(end_host),
+                    Some(wrap_row),
+                    Some(left),
+                    Some(start_box),
+                    Some(crop_box),
+                    Some(center_host),
+                ) = (
                     self.right_cluster.as_ref(),
                     self.normal_end_host.as_ref(),
                     self.top_wrap_row.as_ref(),
                     self.left_cluster.as_ref(),
                     self.start_widget_box.as_ref(),
-                ) else {
+                    self.crop_center_box.as_ref(),
+                    self.top_center_host.as_ref(),
+                )
+                else {
                     // Init hasn't run yet — stash the target and
                     // let the next post-init `SetLayout` (the
                     // resize handler fires every frame width
@@ -4035,6 +4136,12 @@ impl Component for ToolsToolbar {
                         // z-order between regular and crop
                         // content).
                         end_host.prepend(right);
+                        // Crop controls go back to the centered center
+                        // slot (after the 12-tool cluster). With room to
+                        // spare the CenterBox centers them between the
+                        // crop indicator (start) and Cancel/Crop (end).
+                        start_box.remove(crop_box);
+                        center_host.append(crop_box);
                     }
                     TopBarLayout::Wrap => {
                         start_box.remove(left);
@@ -4043,6 +4150,11 @@ impl Component for ToolsToolbar {
                         // left-to-right inside the centered group.
                         wrap_row.append(left);
                         wrap_row.append(right);
+                        // Crop controls move to the start slot (after the
+                        // crop indicator) so they left-align when the bar
+                        // is too tight to center them.
+                        center_host.remove(crop_box);
+                        start_box.append(crop_box);
                     }
                 }
                 self.layout = target;
@@ -4116,6 +4228,8 @@ impl Component for ToolsToolbar {
             crop_height: 0,
             crop_width_entry: None,
             crop_height_entry: None,
+            crop_aspect_dropdown: None,
+            crop_apply_button: None,
             image_width: 0,
             image_height: 0,
             resize_width_entry: None,
@@ -4151,13 +4265,144 @@ impl Component for ToolsToolbar {
             top_wrap_row: None,
             left_cluster: None,
             start_widget_box: None,
+            crop_center_box: None,
+            top_center_host: None,
         };
         let widgets = view_output!();
 
         // Stash the W/H entries so the `CropDimensionsChanged`
         // handler can has-focus-check before refreshing their text.
+        model.crop_aspect_dropdown = Some(widgets.crop_aspect_dropdown.clone());
+        model.crop_apply_button = Some(widgets.crop_apply_button.clone());
         model.crop_width_entry = Some(widgets.crop_width_entry.clone());
         model.crop_height_entry = Some(widgets.crop_height_entry.clone());
+
+        // Commit the crop W/H entries on focus-out too, not just on
+        // Enter (`connect_activate`). A user who types a new value and
+        // then clicks the canvas / another control expects it to apply,
+        // not silently revert on the next dimension refresh. Mirrors the
+        // `connect_activate` handlers exactly.
+        {
+            let s = sender.clone();
+            let entry = widgets.crop_width_entry.clone();
+            let entry_sel = widgets.crop_width_entry.clone();
+            let focus = gtk::EventControllerFocus::new();
+            // Select-all on focus-in so tabbing W↔H (or clicking in) lets
+            // the user immediately overtype the dimension. Deferred to
+            // idle: GTK places the caret as part of the focus event,
+            // which would clobber a selection set synchronously here.
+            focus.connect_enter(move |_| {
+                let e = entry_sel.clone();
+                gtk::glib::idle_add_local_once(move || {
+                    e.select_region(0, -1);
+                });
+            });
+            focus.connect_leave(move |_| {
+                let v = entry.text().trim().parse::<i32>().ok();
+                s.input(ToolsToolbarInput::CropWidthEntered(v, false));
+            });
+            widgets.crop_width_entry.add_controller(focus);
+        }
+        {
+            let s = sender.clone();
+            let entry = widgets.crop_height_entry.clone();
+            let entry_sel = widgets.crop_height_entry.clone();
+            let focus = gtk::EventControllerFocus::new();
+            focus.connect_enter(move |_| {
+                let e = entry_sel.clone();
+                gtk::glib::idle_add_local_once(move || {
+                    e.select_region(0, -1);
+                });
+            });
+            focus.connect_leave(move |_| {
+                let v = entry.text().trim().parse::<i32>().ok();
+                s.input(ToolsToolbarInput::CropHeightEntered(v, false));
+            });
+            widgets.crop_height_entry.add_controller(focus);
+        }
+
+        // Global crop-mode keys, handled no matter which crop-toolbar
+        // control has focus (aspect dropdown, W/H entries, swap,
+        // background-color, rotate/flip, image-size, Cancel/Crop):
+        //   • Esc  → exit Crop (Cancel)
+        //   • Enter / x → apply the crop ("done")
+        // Attached to the whole top CenterBox (capture phase, so it beats
+        // a focused button's default activation) and gated on Crop mode
+        // via the crop cluster's visibility. Text entries and open
+        // popovers are exceptions: they handle Enter/x themselves (typing,
+        // submitting the resize, picking a swatch), and Esc closes an open
+        // popover — so we let those through.
+        {
+            let sender_for_keys = sender.clone();
+            let cluster = widgets.crop_center_box.clone();
+            let apply_btn = widgets.crop_apply_button.clone();
+            let key = gtk::EventControllerKey::new();
+            key.set_propagation_phase(gtk::PropagationPhase::Capture);
+            key.connect_key_pressed(move |_, keyval, _, _| {
+                use gtk::gdk::Key;
+                if !cluster.get_visible() {
+                    return gtk::glib::Propagation::Proceed; // not in Crop mode
+                }
+                let focus_widget = cluster
+                    .root()
+                    .and_then(|r| relm4::gtk::prelude::RootExt::focus(&r));
+                // Forward Tab off the Crop button (last crop control) hands
+                // focus to the bottom bar so the cycle flows top → bottom
+                // (the canvas is the home, reached via Esc / on entry).
+                if keyval == Key::Tab
+                    && focus_widget
+                        .as_ref()
+                        .is_some_and(|w| w == apply_btn.upcast_ref::<gtk::Widget>())
+                {
+                    sender_for_keys
+                        .output_sender()
+                        .emit(ToolbarEvent::FocusZoom);
+                    return gtk::glib::Propagation::Stop;
+                }
+                // Walk the focus ancestry: is focus in a text entry (a
+                // focused Entry surfaces as its inner gtk::Text), and/or
+                // inside a popover?
+                let mut node = focus_widget.clone();
+                let (mut in_entry, mut in_popover) = (false, false);
+                while let Some(w) = node {
+                    if w.is::<gtk::Entry>() || w.is::<gtk::Text>() {
+                        in_entry = true;
+                    }
+                    if w.is::<gtk::Popover>() {
+                        in_popover = true;
+                    }
+                    node = w.parent();
+                }
+                match keyval {
+                    Key::Escape => {
+                        // Let an open popover swallow Esc (to close);
+                        // otherwise exit Crop.
+                        if in_popover {
+                            gtk::glib::Propagation::Proceed
+                        } else {
+                            sender_for_keys
+                                .output_sender()
+                                .emit(ToolbarEvent::CancelCrop);
+                            gtk::glib::Propagation::Stop
+                        }
+                    }
+                    Key::Return | Key::KP_Enter | Key::x | Key::X => {
+                        // Entries/popovers handle these themselves (typing
+                        // 'x', submitting, selecting); elsewhere apply.
+                        if in_entry || in_popover {
+                            gtk::glib::Propagation::Proceed
+                        } else {
+                            sender_for_keys
+                                .output_sender()
+                                .emit(ToolbarEvent::ApplyCrop);
+                            gtk::glib::Propagation::Stop
+                        }
+                    }
+                    _ => gtk::glib::Propagation::Proceed,
+                }
+            });
+            widgets.top_centerbox.add_controller(key);
+        }
 
         // Wrap-layout plumbing. We capture the host containers and
         // the two re-parentable cluster Boxes so `SetLayout` can
@@ -4168,6 +4413,16 @@ impl Component for ToolsToolbar {
         model.top_wrap_row = Some(widgets.top_wrap_row.clone());
         model.left_cluster = Some(widgets.left_cluster.clone());
         model.start_widget_box = Some(widgets.start_widget_box.clone());
+        model.crop_center_box = Some(widgets.crop_center_box.clone());
+        model.top_center_host = Some(widgets.top_center_host.clone());
+
+        // The crop controls are authored in the start slot (their Wrap home,
+        // so they're left-aligned at narrow widths), but the toolbar starts
+        // in Normal layout where they belong in the centered center slot.
+        // Re-home them now to match the initial layout; `SetLayout` moves
+        // them back to the start slot when the bar wraps.
+        widgets.start_widget_box.remove(&widgets.crop_center_box);
+        widgets.top_center_host.append(&widgets.crop_center_box);
 
         // Build the "Image size" popover imperatively and attach to
         // the MenuButton in the crop-mode center cluster. Built here
@@ -4453,6 +4708,42 @@ impl Component for ToolsToolbar {
             }
         });
 
+        // Reset the W/H entries to the CURRENT image dimensions every
+        // time the popover opens. Without this, typing a new value and
+        // then cancelling (or clicking out) leaves the stale text in the
+        // entries until the next actual resize — so a re-open would show
+        // the abandoned edit instead of the live size. Repopulating on
+        // show makes Cancel/dismiss reset cleanly, respecting the current
+        // units (pixels → logical dims, percent → 100).
+        let w_entry_show = w_entry.clone();
+        let h_entry_show = h_entry.clone();
+        let orig_for_show = resize_orig_dims.clone();
+        let scale_for_show = resize_display_scale_state.clone();
+        let units_for_show = resize_units.clone();
+        resize_popover.connect_show(move |_| {
+            let (ow, oh) = orig_for_show.get();
+            match units_for_show.get() {
+                ResizeUnits::Pixels => {
+                    let s = scale_for_show.get().max(1.0);
+                    w_entry_show.set_text(&logical_px(ow, s).to_string());
+                    h_entry_show.set_text(&logical_px(oh, s).to_string());
+                }
+                ResizeUnits::Percent => {
+                    w_entry_show.set_text("100");
+                    h_entry_show.set_text("100");
+                }
+            }
+            // Focus the width field and select its text so the user can
+            // immediately type a new size over it. Deferred to idle:
+            // the popover settles its own focus after this signal, which
+            // would otherwise clobber a synchronous grab/select.
+            let w = w_entry_show.clone();
+            gtk::glib::idle_add_local_once(move || {
+                w.grab_focus();
+                w.select_region(0, -1);
+            });
+        });
+
         // Enter in either entry submits the popover. `emit_clicked`
         // re-uses the same handler (with all its validation /
         // unit-conversion / popdown behavior) instead of duplicating
@@ -4465,6 +4756,20 @@ impl Component for ToolsToolbar {
         h_entry.connect_activate(move |_| {
             resize_btn_for_h.emit_clicked();
         });
+
+        // Select-all on focus-in (matches the crop W/H entries) so
+        // tabbing W↔H inside the popover lets the user overtype.
+        for entry in [&w_entry, &h_entry] {
+            let e_sel = entry.clone();
+            let focus = gtk::EventControllerFocus::new();
+            focus.connect_enter(move |_| {
+                let e = e_sel.clone();
+                gtk::glib::idle_add_local_once(move || {
+                    e.select_region(0, -1);
+                });
+            });
+            entry.add_controller(focus);
+        }
 
         // Stash everything for handler access.
         model.resize_width_entry = Some(w_entry);
@@ -4483,14 +4788,14 @@ impl Component for ToolsToolbar {
         // `CropBgColorChanged` for sketch_board.
         use crate::tools::CropBgColor;
         let bg_popover = gtk::Popover::builder().has_arrow(true).build();
-        let bg_box = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .margin_top(4)
-            .margin_bottom(4)
-            .margin_start(4)
-            .margin_end(4)
-            .spacing(0)
+        // A ListBox (not a Box of buttons) so the rows are keyboard-
+        // navigable: arrow up/down moves the selection, Enter/Space
+        // activates it. `Browse` keeps exactly one row highlighted as
+        // you arrow through.
+        let bg_list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::Browse)
             .build();
+        bg_list.add_css_class("menu");
         // Seed the Custom row's swatch from the live `crop_bg_color`
         // so the popover already reflects a previously-picked color
         // (or mid-gray as the default placeholder before the user
@@ -4504,21 +4809,31 @@ impl Component for ToolsToolbar {
             CropBgColor::Custom(custom_seed_rgb.0, custom_seed_rgb.1, custom_seed_rgb.2);
         let custom_rgb_cell = std::rc::Rc::new(std::cell::Cell::new(custom_seed_rgb));
         let mut custom_swatch_handle: Option<gtk::Image> = None;
-        for (bg, label_text) in [
-            (CropBgColor::Transparent, "Transparent"),
-            (CropBgColor::Auto, "Auto"),
-            (CropBgColor::White, "White"),
-            (CropBgColor::Gray, "Gray"),
-            (CropBgColor::Black, "Black"),
-            (custom_seed, "Custom Color\u{2026}"),
-        ] {
-            let row_btn = gtk::Button::builder()
-                .css_classes(["flat"])
-                .focusable(false)
-                .build();
+        // Parallel list of the row values so `row-activated` can map a
+        // row index back to its `CropBgColor`.
+        let bg_values: Vec<CropBgColor> = vec![
+            CropBgColor::Transparent,
+            CropBgColor::Auto,
+            CropBgColor::White,
+            CropBgColor::Gray,
+            CropBgColor::Black,
+            custom_seed,
+        ];
+        for (bg, label_text) in bg_values.iter().copied().zip([
+            "Transparent",
+            "Auto",
+            "White",
+            "Gray",
+            "Black",
+            "Custom Color\u{2026}",
+        ]) {
             let row_box = gtk::Box::builder()
                 .orientation(gtk::Orientation::Horizontal)
                 .spacing(8)
+                .margin_top(4)
+                .margin_bottom(4)
+                .margin_start(6)
+                .margin_end(6)
                 .build();
             let swatch = gtk::Image::from_pixbuf(Some(&crop_bg_swatch_pixbuf(bg)));
             swatch.set_pixel_size(SWATCH_DISPLAY_SIZE);
@@ -4527,55 +4842,60 @@ impl Component for ToolsToolbar {
             lbl.set_hexpand(true);
             row_box.append(&swatch);
             row_box.append(&lbl);
-            row_btn.set_child(Some(&row_box));
-
-            let popover_for_row = bg_popover.clone();
-            let sender_for_row = sender.clone();
-            let is_custom_row = matches!(bg, CropBgColor::Custom(..));
-            if is_custom_row {
+            if matches!(bg, CropBgColor::Custom(..)) {
                 custom_swatch_handle = Some(swatch.clone());
             }
-            // Cloned per-row so each closure owns its handle; only
-            // the custom row actually reads from it but every row
-            // captures one to keep the closure signatures uniform.
-            let custom_rgb_for_row = custom_rgb_cell.clone();
-            row_btn.connect_clicked(move |btn| {
-                popover_for_row.popdown();
-                if is_custom_row {
-                    // Open a modal color chooser so the user can pick
-                    // an arbitrary matte color. On OK, push back as a
-                    // `Custom(r, g, b)` selection (alpha is dropped —
-                    // the matte is always fully opaque, the named
-                    // "Auto" preset is the semi-transparent option).
-                    let top = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
-                    let mut builder = gtk::ColorChooserDialog::builder()
-                        .modal(true)
-                        .title("Pick crop background color");
-                    if let Some(w) = &top {
-                        builder = builder.transient_for(w);
-                    }
-                    let dialog = builder.build();
-                    let (r, g, b) = custom_rgb_for_row.get();
-                    dialog.set_rgba(&gtk::gdk::RGBA::new(r, g, b, 1.0));
-                    let sender_for_dialog = sender_for_row.clone();
-                    dialog.connect_response(move |dlg, response| {
-                        if response == gtk::ResponseType::Ok {
-                            let rgba = dlg.rgba();
-                            let picked = CropBgColor::Custom(rgba.red(), rgba.green(), rgba.blue());
-                            sender_for_dialog.input(ToolsToolbarInput::CropBgColorSelected(picked));
-                        }
-                        dlg.close();
-                    });
-                    dialog.show();
-                } else {
-                    sender_for_row.input(ToolsToolbarInput::CropBgColorSelected(bg));
-                }
-            });
-            bg_box.append(&row_btn);
+            let row = gtk::ListBoxRow::new();
+            row.set_child(Some(&row_box));
+            bg_list.append(&row);
         }
+        // Single activation handler: arrow to a row + Enter/Space (or a
+        // click) fires `row-activated`; map the index back to the value.
+        let popover_for_list = bg_popover.clone();
+        let sender_for_list = sender.clone();
+        let custom_rgb_for_list = custom_rgb_cell.clone();
+        bg_list.connect_row_activated(move |_, row| {
+            let idx = row.index();
+            if idx < 0 {
+                return;
+            }
+            let Some(&bg) = bg_values.get(idx as usize) else {
+                return;
+            };
+            popover_for_list.popdown();
+            if matches!(bg, CropBgColor::Custom(..)) {
+                // Open a modal color chooser so the user can pick an
+                // arbitrary matte color. On OK, push back as a
+                // `Custom(r, g, b)` selection (alpha is dropped — the
+                // matte is always fully opaque, "Auto" is the
+                // semi-transparent option).
+                let top = row.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+                let mut builder = gtk::ColorChooserDialog::builder()
+                    .modal(true)
+                    .title("Pick crop background color");
+                if let Some(w) = &top {
+                    builder = builder.transient_for(w);
+                }
+                let dialog = builder.build();
+                let (r, g, b) = custom_rgb_for_list.get();
+                dialog.set_rgba(&gtk::gdk::RGBA::new(r, g, b, 1.0));
+                let sender_for_dialog = sender_for_list.clone();
+                dialog.connect_response(move |dlg, response| {
+                    if response == gtk::ResponseType::Ok {
+                        let rgba = dlg.rgba();
+                        let picked = CropBgColor::Custom(rgba.red(), rgba.green(), rgba.blue());
+                        sender_for_dialog.input(ToolsToolbarInput::CropBgColorSelected(picked));
+                    }
+                    dlg.close();
+                });
+                dialog.show();
+            } else {
+                sender_for_list.input(ToolsToolbarInput::CropBgColorSelected(bg));
+            }
+        });
         model.crop_bg_custom_swatch = custom_swatch_handle;
         model.crop_bg_custom_rgb = Some(custom_rgb_cell);
-        bg_popover.set_child(Some(&bg_box));
+        bg_popover.set_child(Some(&bg_list));
         widgets
             .crop_bg_color_menu_btn
             .set_popover(Some(&bg_popover));
@@ -4880,7 +5200,8 @@ impl Component for StyleToolbar {
             gtk::Scale {
                 add_css_class: "compact-slider",
                 set_orientation: gtk::Orientation::Horizontal,
-                set_focusable: false,
+                set_focusable: true,
+                set_focus_on_click: false,
                 set_hexpand: false,
                 // Slimmer than the original 200 px so the whole
                 // bottom row fits on a single line down to
@@ -4982,7 +5303,7 @@ impl Component for StyleToolbar {
                 #[name = "highlighter_style_menu"]
                 gtk::MenuButton {
                     add_css_class: "compact-control",
-                    set_focusable: false,
+                    set_focusable: true,
                     set_focus_on_click: false,
                     set_hexpand: false,
                     set_valign: gtk::Align::Center,
@@ -5028,7 +5349,7 @@ impl Component for StyleToolbar {
                 #[name = "arrow_style_menu"]
                 gtk::MenuButton {
                     add_css_class: "compact-control",
-                    set_focusable: false,
+                    set_focusable: true,
                     set_focus_on_click: false,
                     set_hexpand: false,
                     set_valign: gtk::Align::Center,
@@ -5044,7 +5365,7 @@ impl Component for StyleToolbar {
                 #[name = "blur_style_menu"]
                 gtk::MenuButton {
                     add_css_class: "compact-control",
-                    set_focusable: false,
+                    set_focusable: true,
                     set_focus_on_click: false,
                     set_hexpand: false,
                     set_valign: gtk::Align::Center,
@@ -5062,7 +5383,7 @@ impl Component for StyleToolbar {
                 #[name = "text_background_dropdown"]
                 gtk::DropDown {
                     add_css_class: "compact-control",
-                    set_focusable: false,
+                    set_focusable: true,
                     set_focus_on_click: false,
                     set_hexpand: false,
                     set_valign: gtk::Align::Center,
@@ -5103,7 +5424,8 @@ impl Component for StyleToolbar {
                 #[name = "fill_button"]
                 gtk::Button {
                     add_css_class: "compact-control",
-                    set_focusable: false,
+                    set_focusable: true,
+                    set_focus_on_click: false,
                     set_hexpand: false,
                     set_valign: gtk::Align::Center,
                     set_height_request: 34,
@@ -5125,7 +5447,8 @@ impl Component for StyleToolbar {
                 gtk::Scale {
                     add_css_class: "compact-slider",
                     set_orientation: gtk::Orientation::Horizontal,
-                    set_focusable: false,
+                    set_focusable: true,
+                    set_focus_on_click: false,
                     set_hexpand: false,
                     set_width_request: CLUSTER_SLIDER_WIDTH,
                     set_valign: gtk::Align::Center,
@@ -5172,7 +5495,8 @@ impl Component for StyleToolbar {
                 gtk::Scale {
                     add_css_class: "compact-slider",
                     set_orientation: gtk::Orientation::Horizontal,
-                    set_focusable: false,
+                    set_focusable: true,
+                    set_focus_on_click: false,
                     set_hexpand: false,
                     set_width_request: CLUSTER_SLIDER_WIDTH,
                     set_valign: gtk::Align::Center,
@@ -5209,7 +5533,8 @@ impl Component for StyleToolbar {
                 gtk::Scale {
                     add_css_class: "compact-slider",
                     set_orientation: gtk::Orientation::Horizontal,
-                    set_focusable: false,
+                    set_focusable: true,
+                    set_focus_on_click: false,
                     set_hexpand: false,
                     set_width_request: CLUSTER_SLIDER_WIDTH,
                     set_valign: gtk::Align::Center,

@@ -13,7 +13,7 @@ use relm4::{
     gtk::gdk::{Key, ModifierType},
 };
 
-use super::{Drawable, Tool, ToolUpdateResult, Tools};
+use super::{CanvasTransform, Drawable, Tool, ToolUpdateResult, Tools};
 
 #[derive(Debug, Clone)]
 pub struct Crop {
@@ -104,27 +104,6 @@ fn arrow_bit(key: Key) -> Option<u8> {
         Key::Right | Key::rightarrow => Some(ARROW_RIGHT),
         _ => None,
     }
-}
-
-/// Combined translation delta in image coords (+y is down) for
-/// the held arrows at `step` per axis. Diagonal holds get one
-/// axis-step of motion on each axis rather than zero.
-fn move_delta(held: u8, step: f32) -> (f32, f32) {
-    let dx = if held & ARROW_RIGHT != 0 { step } else { 0.0 }
-        - if held & ARROW_LEFT != 0 { step } else { 0.0 };
-    let dy = if held & ARROW_DOWN != 0 { step } else { 0.0 }
-        - if held & ARROW_UP != 0 { step } else { 0.0 };
-    (dx, dy)
-}
-
-/// Combined symmetric-resize delta (dw, dh) for the held arrows
-/// at `step` per axis. Up/Right grow, Down/Left shrink.
-fn resize_delta(held: u8, step: f32) -> (f32, f32) {
-    let dw = if held & ARROW_RIGHT != 0 { step } else { 0.0 }
-        - if held & ARROW_LEFT != 0 { step } else { 0.0 };
-    let dh = if held & ARROW_UP != 0 { step } else { 0.0 }
-        - if held & ARROW_DOWN != 0 { step } else { 0.0 };
-    (dw, dh)
 }
 
 /// Color shown OUTSIDE the crop rectangle while the tool is active —
@@ -766,6 +745,56 @@ impl CropTool {
         Some((pos, size))
     }
 
+    /// Replace the committed crop rect (image coordinates) after an
+    /// auto-grow widened it — either an "un-crop" that revealed more of
+    /// the original, or an edge-extension past the original bounds. Keeps
+    /// `last_committed` in lockstep so re-entering the crop edit view and
+    /// leaving without re-applying reverts to the grown rect, not the
+    /// pre-grow one. No-op if there's no committed crop to grow.
+    pub fn set_committed_rect(&mut self, pos: Vec2D, size: Vec2D) {
+        if let Some(c) = &mut self.crop {
+            c.pos = pos;
+            c.size = size;
+            c.last_committed = Some((pos, size));
+        }
+    }
+
+    /// True when the crop is still the pristine full-image seed (covers
+    /// the whole image, untouched). Used by image-resize to decide
+    /// whether to snap the crop to the new full size or scale a
+    /// manually-adjusted crop proportionally. `None`/no-bounds counts as
+    /// pristine (resize will just reseed).
+    pub fn is_full_image_crop(&self) -> bool {
+        let (Some(c), Some(b)) = (&self.crop, self.image_bounds) else {
+            return true;
+        };
+        let (pos, size) = c.get_rectangle();
+        const EPS: f32 = 0.5;
+        pos.x.abs() < EPS
+            && pos.y.abs() < EPS
+            && (size.x - b.x).abs() < EPS
+            && (size.y - b.y).abs() < EPS
+    }
+
+    /// Remap the crop rect through a whole-canvas flip/rotate so the
+    /// overlay tracks the transformed image — works whether the crop is
+    /// committed OR being edited (so rotating mid-edit keeps the box on
+    /// the canvas). `old_w`/`old_h` are the PRE-transform image dims.
+    /// `last_committed` is remapped in lockstep. Refreshes the toolbar
+    /// W/H entries.
+    pub fn apply_canvas_transform(&mut self, t: CanvasTransform, old_w: f32, old_h: f32) {
+        if let Some(c) = &mut self.crop {
+            let r = t.map_rect(math::Rect::new(c.pos, c.size), old_w, old_h);
+            c.pos = r.pos;
+            c.size = r.size;
+            if let Some((lp, ls)) = c.last_committed {
+                let lr = t.map_rect(math::Rect::new(lp, ls), old_w, old_h);
+                c.last_committed = Some((lr.pos, lr.size));
+            }
+        }
+        self.emit_crop_edit_dimensions();
+    }
+
     /// Drop the crop entirely — used by the toolbar's "Revert to
     /// Original" button when the user ISN'T currently in the Crop
     /// tool. After this, the renderer renders the full image at
@@ -908,6 +937,13 @@ impl CropTool {
                     Tools::Pointer,
                 )))
                 .ok();
+            // Refocus the canvas AFTER the tool switch + window resize so
+            // single-key shortcuts (e.g. `x` to re-enter Crop) work right
+            // away. Sent after the ToolSelected above so it runs once the
+            // crop toolbar is gone; the FocusCanvas handler also re-grabs
+            // on idle to survive the resize's focus bounce. Applying from
+            // a toolbar entry/button leaves focus off-canvas otherwise.
+            sender.send(SketchBoardInput::FocusCanvas).ok();
         }
         ToolUpdateResult::Redraw
     }
@@ -943,37 +979,6 @@ impl CropTool {
     /// loaded screenshot's pixel dimensions.
     pub fn set_image_bounds(&mut self, bounds: Vec2D) {
         self.image_bounds = Some(bounds);
-    }
-
-    /// Nudge the crop frame by (dx, dy) image-space pixels and
-    /// clamp the result so the whole crop stays inside the image.
-    /// Returns true if anything actually moved — the caller should
-    /// only request a redraw on that signal so a no-op key (crop
-    /// already pinned against the edge, or as big as the image)
-    /// doesn't spam idle redraws. Used by the keyboard-arrow
-    /// shortcut in Crop mode.
-    pub fn nudge(&mut self, dx: f32, dy: f32) -> bool {
-        let Some(bounds) = self.image_bounds else {
-            return false;
-        };
-        let Some(c) = self.crop.as_mut() else {
-            return false;
-        };
-        // No room to move if the crop already fills the image on
-        // both axes.
-        if c.size.x >= bounds.x && c.size.y >= bounds.y {
-            return false;
-        }
-        let max_x = (bounds.x - c.size.x).max(0.0);
-        let max_y = (bounds.y - c.size.y).max(0.0);
-        let new_x = (c.pos.x + dx).clamp(0.0, max_x);
-        let new_y = (c.pos.y + dy).clamp(0.0, max_y);
-        if (new_x - c.pos.x).abs() < f32::EPSILON && (new_y - c.pos.y).abs() < f32::EPSILON {
-            return false;
-        }
-        c.pos = Vec2D::new(new_x, new_y);
-        self.emit_crop_edit_dimensions();
-        true
     }
 
     /// Resize the crop symmetrically by (dw, dh) image-space
@@ -1025,6 +1030,59 @@ impl CropTool {
             self.emit_crop_edit_dimensions();
         }
         changed
+    }
+
+    /// Resize the crop with the arrow keys, "corner handle" style: the
+    /// active edge always moves in the arrow's direction. Without Shift
+    /// the arrows drive the BOTTOM-RIGHT corner — Right/Left move the
+    /// RIGHT edge out/in, Down/Up move the BOTTOM edge down/up. With
+    /// `shift` they drive the TOP-LEFT corner — Left/Right move the LEFT
+    /// edge out/in, Up/Down move the TOP edge up/down. Growth clamps to
+    /// the image bounds (can't exceed the original canvas); each axis
+    /// keeps at least `MIN_SIDE`. Returns true if the rect changed.
+    pub fn resize_directional(&mut self, held: u8, step: f32, shift: bool) -> bool {
+        let Some(bounds) = self.image_bounds else {
+            return false;
+        };
+        let Some(c) = self.crop.as_mut() else {
+            return false;
+        };
+        const MIN_SIDE: f32 = 1.0;
+        let mut left = c.pos.x;
+        let mut top = c.pos.y;
+        let mut right = c.pos.x + c.size.x;
+        let mut bottom = c.pos.y + c.size.y;
+
+        let plus = |bit: u8| if held & bit != 0 { step } else { 0.0 };
+        if shift {
+            // Top-left corner. Left edge: Left out (−), Right in (+).
+            left += plus(ARROW_RIGHT) - plus(ARROW_LEFT);
+            // Top edge: Up out (−), Down in (+).
+            top += plus(ARROW_DOWN) - plus(ARROW_UP);
+            left = left.clamp(0.0, right - MIN_SIDE);
+            top = top.clamp(0.0, bottom - MIN_SIDE);
+        } else {
+            // Bottom-right corner. Right edge: Right out (+), Left in (−).
+            right += plus(ARROW_RIGHT) - plus(ARROW_LEFT);
+            // Bottom edge: Down out (+), Up in (−).
+            bottom += plus(ARROW_DOWN) - plus(ARROW_UP);
+            right = right.clamp(left + MIN_SIDE, bounds.x);
+            bottom = bottom.clamp(top + MIN_SIDE, bounds.y);
+        }
+
+        let new_pos = Vec2D::new(left, top);
+        let new_size = Vec2D::new(right - left, bottom - top);
+        if (new_pos.x - c.pos.x).abs() < f32::EPSILON
+            && (new_pos.y - c.pos.y).abs() < f32::EPSILON
+            && (new_size.x - c.size.x).abs() < f32::EPSILON
+            && (new_size.y - c.size.y).abs() < f32::EPSILON
+        {
+            return false;
+        }
+        c.pos = new_pos;
+        c.size = new_size;
+        self.emit_crop_edit_dimensions();
+        true
     }
 
     /// Scale the crop rect by `factor` around its geometric center,
@@ -1770,20 +1828,21 @@ impl Tool for CropTool {
     }
 
     fn handle_key_event(&mut self, event: KeyEventMsg) -> ToolUpdateResult {
-        // Arrow keys. Without Ctrl the crop MOVES; plain = 30 px
-        // (the fast default — most edit gestures want big steps),
-        // Shift = 1 px (the precision opt-in). With Ctrl the crop
-        // RESIZES symmetrically (both opposite edges move so the
-        // center holds steady); Ctrl alone = 30 px / 15 per edge,
-        // Ctrl+Shift = 5 px / 2.5 per edge for fine-tuning.
+        // Arrow keys resize the crop "corner-handle" style, and the
+        // active edge always moves in the arrow's direction. Plain arrows
+        // drive the BOTTOM-RIGHT corner: Right/Left grow/shrink the RIGHT
+        // edge, Down/Up grow/shrink the BOTTOM edge. Shift drives the
+        // TOP-LEFT corner: Left/Right grow/shrink the LEFT edge, Up/Down
+        // grow/shrink the TOP edge. Growth clamps to the image (can't
+        // exceed the original canvas). Ctrl switches the step from coarse
+        // (30 px) to fine (1 px).
         // Holding two arrows combines them into one diagonal step
-        // per event (e.g. holding Up+Right moves up-right) rather
-        // than alternating axis-aligned steps as the auto-repeats
+        // per event (e.g. holding Up+Right adjusts both those edges)
+        // rather than alternating axis-aligned steps as the auto-repeats
         // interleave. The held-arrow bitmask is updated on press
         // and cleared on release / tool-deactivate.
-        // RedrawAndStopPropagation in both branches keeps the
-        // global key chain (Alt+arrow pans the canvas) from also
-        // firing on the same event.
+        // RedrawAndStopPropagation keeps the global key chain (Alt+arrow
+        // pans the canvas) from also firing on the same event.
         let ctrl = event.modifier.contains(ModifierType::CONTROL_MASK);
         let shift = event.modifier.contains(ModifierType::SHIFT_MASK);
         let other_mods = event.modifier & !(ModifierType::SHIFT_MASK | ModifierType::CONTROL_MASK);
@@ -1791,27 +1850,18 @@ impl Tool for CropTool {
             && let Some(bit) = arrow_bit(event.key)
         {
             self.held_arrows |= bit;
-            return if ctrl {
-                let step = if shift { 5.0 } else { 30.0 };
-                let (dw, dh) = resize_delta(self.held_arrows, step);
-                if self.resize_symmetric(dw, dh) {
-                    ToolUpdateResult::RedrawAndStopPropagation
-                } else {
-                    ToolUpdateResult::StopPropagation
-                }
+            // Ctrl = fine (1 px) vs coarse (30 px); Shift = grow the edge
+            // back out (clamped to the image) instead of shrink.
+            let step = if ctrl { 1.0 } else { 30.0 };
+            let changed = self.resize_directional(self.held_arrows, step, shift);
+            return if changed {
+                ToolUpdateResult::RedrawAndStopPropagation
             } else {
-                let step = if shift { 1.0 } else { 30.0 };
-                let (dx, dy) = move_delta(self.held_arrows, step);
-                if self.nudge(dx, dy) {
-                    ToolUpdateResult::RedrawAndStopPropagation
-                } else {
-                    // Even a no-op nudge consumes the key — without
-                    // StopPropagation an at-edge arrow would fall
-                    // through to the global handler and pan the
-                    // canvas, which isn't what the user wants when
-                    // they meant "move the crop".
-                    ToolUpdateResult::StopPropagation
-                }
+                // Even a no-op (already at min size / image edge) consumes
+                // the key — without StopPropagation an at-limit arrow
+                // would fall through to the global handler and pan the
+                // canvas, which isn't what the user meant.
+                ToolUpdateResult::StopPropagation
             };
         }
         match event.key {
@@ -1892,6 +1942,12 @@ impl Tool for CropTool {
             // toolbar; re-asserting presence on every tool entry keeps
             // it in sync even if a prior path forgot to emit.
             self.emit_crop_presence(true);
+            // Push the CURRENT crop dimensions to the toolbar's W/H
+            // entries. The committed crop may have grown since we last
+            // edited it (drawing past its edge auto-extends it), and
+            // without this the entries — and the ↔ swap that reads them
+            // — would act on the stale, pre-growth size.
+            self.emit_crop_edit_dimensions();
             return ToolUpdateResult::Redraw;
         }
         // First time entering Crop with no prior crop on file — seed a
@@ -1912,6 +1968,9 @@ impl Tool for CropTool {
             // immediately so the user can bail out of crop mode
             // without first dragging.
             self.emit_crop_presence(true);
+            // Populate the toolbar W/H entries with the seed (full-image)
+            // dimensions so they don't sit at 0 until the first drag.
+            self.emit_crop_edit_dimensions();
             return ToolUpdateResult::Redraw;
         }
         ToolUpdateResult::Unmodified

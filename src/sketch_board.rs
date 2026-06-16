@@ -288,6 +288,16 @@ pub enum SketchBoardOutput {
         width: i32,
         height: i32,
     },
+    /// Tab from the canvas — focus the first control of the top bar.
+    /// App owns the toolbars, so it does the actual `child_focus`. Works
+    /// for both Crop and Normal modes (whichever controls are visible).
+    FocusTopBarStart,
+    /// Shift+Tab from the canvas — focus the last control of the bottom
+    /// bar (reverse entry into the focus loop). Routed up to App.
+    FocusBottomBarEnd,
+    /// Tab off the Crop button — focus the bottom-bar zoom indicator
+    /// (App owns it). Completes the crop tab cycle into the bottom bar.
+    FocusZoom,
     /// User wants to open the Preferences dialog (gear button or
     /// Ctrl+,). The dialog isn't a child of sketch_board, so we
     /// just forward the intent up to App.
@@ -802,24 +812,22 @@ impl SketchBoard {
         if self.active_tool_type() == Tools::Crop {
             return;
         }
-        // Once a crop is committed, the canvas is locked to that crop.
-        // Auto-growing here would union an off-canvas annotation's bounds
-        // into the image, translate the image + every drawable to the new
-        // origin, and leave the crop's absolute (un-translated) coords
-        // pointing at a different region — so the visible crop would jump
-        // to a new spot. Skip the grow: the annotation still commits and
-        // renders clipped to the locked crop until the user re-enters the
-        // crop view to adjust it.
-        if self
-            .tools
-            .get_crop_tool()
-            .borrow()
-            .get_committed_rect()
-            .is_some()
-        {
+        // With a committed crop, the canvas isn't "locked" — a freshly
+        // drawn annotation that spills past the crop grows the crop
+        // window to include it (revealing more of the original, then
+        // edge-extending past it). This is a separate flow from the
+        // normal full-image auto-extend below; route to it and stop.
+        // NOTE: bind the committed rect to a local so the `borrow()`
+        // temporary is dropped here — `auto_grow_crop` takes a
+        // `borrow_mut()` on the same RefCell, and an `if let` would
+        // otherwise hold the shared borrow across the whole block.
+        let committed_crop = self.tools.get_crop_tool().borrow().get_committed_rect();
+        if let Some((crop_pos, crop_size)) = committed_crop {
+            self.auto_grow_crop(ids_to_exclude, crop_pos, crop_size, sender);
             return;
         }
-        let Some((new_w, new_h)) = self.renderer.auto_resize_for_drawables(ids_to_exclude) else {
+        let Some((_offset, new_w, new_h)) = self.renderer.auto_resize_for_drawables(ids_to_exclude)
+        else {
             return;
         };
         let crop_tool = self.tools.get_crop_tool();
@@ -853,6 +861,96 @@ impl SketchBoard {
         // Pull it back so single-key shortcuts keep working after
         // (e.g.) committing a text annotation that pushed past the
         // edge and triggered auto-extend.
+        self.renderer.grab_focus();
+    }
+
+    /// While a crop is committed, a freshly drawn or edited annotation
+    /// that spills past the crop grows the crop *window* to include it
+    /// instead of leaving it clipped. Growth first reveals more of the
+    /// original image (an "un-crop"); once the crop reaches the original
+    /// bounds, `auto_resize_for_drawables` edge-extends the raster (no
+    /// original left to reveal) and the crop grows with it. Only the
+    /// just-touched `new_ids` drive the growth — pre-existing off-crop
+    /// annotations stay hidden as the un-crop "history".
+    fn auto_grow_crop(
+        &mut self,
+        new_ids: &[crate::tools::DrawableId],
+        crop_pos: crate::math::Vec2D,
+        crop_size: crate::math::Vec2D,
+        sender: &ComponentSender<Self>,
+    ) {
+        use crate::math::{Rect, Vec2D};
+        // Union the just-touched drawables' bounds (image coords, before
+        // any raster resize below shifts the coordinate origin).
+        let mut touched: Option<Rect> = None;
+        for id in new_ids {
+            if let Some(b) = self.renderer.clone_drawable(*id).and_then(|d| d.bounds()) {
+                touched = Some(match touched {
+                    Some(t) => t.union(b),
+                    None => b,
+                });
+            }
+        }
+        let Some(touched) = touched else {
+            return;
+        };
+        let crop_rect = Rect::new(crop_pos, crop_size);
+        // Fully inside the crop → nothing to reveal; it draws clipped as
+        // usual and the window stays put.
+        let crop_br = crop_rect.bottom_right();
+        let touched_br = touched.bottom_right();
+        let inside = touched.pos.x >= crop_rect.pos.x
+            && touched.pos.y >= crop_rect.pos.y
+            && touched_br.x <= crop_br.x
+            && touched_br.y <= crop_br.y;
+        if inside {
+            return;
+        }
+        // Edge-extend the raster if the annotation spilled past the
+        // current image (i.e. past the original). When top/left strips
+        // are prepended every drawable + the original rect shift by
+        // `offset`; the crop rect lives outside that list, so shift it
+        // by the same amount to stay aligned.
+        let (offset, img_w, img_h) = match self.renderer.auto_resize_for_drawables(new_ids) {
+            Some((off, w, h)) => (off, w, h),
+            None => {
+                let (w, h) = self.renderer.image_dimensions();
+                (Vec2D::zero(), w as f32, h as f32)
+            }
+        };
+        // Grow the crop in the (possibly shifted) post-resize space and
+        // clamp it to the raster — the union already fits, but clamping
+        // guards against rounding spilling a sub-pixel past the edge.
+        let grown = crop_rect
+            .translated(offset)
+            .union(touched.translated(offset));
+        let (gpos, gsize) = crate::math::rect_ensure_in_bounds(
+            (grown.pos, grown.size),
+            (Vec2D::zero(), Vec2D::new(img_w, img_h)),
+        );
+        {
+            let crop_tool = self.tools.get_crop_tool();
+            let mut ct = crop_tool.borrow_mut();
+            ct.set_committed_rect(gpos, gsize);
+            ct.set_image_bounds(Vec2D::new(img_w, img_h));
+        }
+        // The committed-crop render branch auto-fits the crop into the
+        // canvas, so we just announce the new sizes: the window re-fits
+        // around the grown crop and the toolbar readouts pick up the new
+        // image dims. (No `reset_size` — that routes through the crop's
+        // own zoom multiplier and would jump the view to 50 %.)
+        sender
+            .output_sender()
+            .emit(SketchBoardOutput::ImageDimensionsChanged {
+                width: img_w as i32,
+                height: img_h as i32,
+            });
+        sender
+            .output_sender()
+            .emit(SketchBoardOutput::ContentSizeChanged {
+                width: gsize.x,
+                height: gsize.y,
+            });
         self.renderer.grab_focus();
     }
 
@@ -1351,24 +1449,132 @@ impl SketchBoard {
         });
     }
 
-    fn handle_undo(&mut self) -> ToolUpdateResult {
+    fn handle_undo(&mut self, sender: &ComponentSender<Self>) -> ToolUpdateResult {
         if self.active_tool.borrow().active() {
             self.active_tool.borrow_mut().handle_undo()
-        } else if self.renderer.undo() {
-            ToolUpdateResult::Redraw
         } else {
-            ToolUpdateResult::Unmodified
+            let before = self.renderer.image_dimensions();
+            let (did, canvas_op) = self.renderer.undo();
+            if did {
+                self.after_history_step(before, canvas_op, sender);
+                ToolUpdateResult::Redraw
+            } else {
+                ToolUpdateResult::Unmodified
+            }
         }
     }
 
-    fn handle_redo(&mut self) -> ToolUpdateResult {
+    fn handle_redo(&mut self, sender: &ComponentSender<Self>) -> ToolUpdateResult {
         if self.active_tool.borrow().active() {
             self.active_tool.borrow_mut().handle_redo()
-        } else if self.renderer.redo() {
-            ToolUpdateResult::Redraw
         } else {
-            ToolUpdateResult::Unmodified
+            let before = self.renderer.image_dimensions();
+            let (did, canvas_op) = self.renderer.redo();
+            if did {
+                self.after_history_step(before, canvas_op, sender);
+                ToolUpdateResult::Redraw
+            } else {
+                ToolUpdateResult::Unmodified
+            }
         }
+    }
+
+    /// Post-undo/redo housekeeping: when the reversed step was a whole-
+    /// canvas op (flip/rotate/resize), apply the SAME transform to the
+    /// crop rect so it tracks the image (the crop isn't part of undo
+    /// history). If the image dimensions changed, refit the window/crop
+    /// bounds.
+    fn after_history_step(
+        &mut self,
+        before_dims: (i32, i32),
+        canvas_op: Option<(crate::tools::CanvasTransform, f32, f32)>,
+        sender: &ComponentSender<Self>,
+    ) {
+        if let Some((t, w, h)) = canvas_op {
+            self.tools
+                .get_crop_tool()
+                .borrow_mut()
+                .apply_canvas_transform(t, w, h);
+        }
+        if self.renderer.image_dimensions() != before_dims {
+            self.refit_after_dims_change(sender);
+        }
+    }
+
+    /// After an undo/redo changed the image dimensions — a rotate /
+    /// resize `CanvasOp`, or an auto-grow `ResizeCanvas`, was reversed —
+    /// refit everything to the restored size: update the crop snap
+    /// bounds, clamp a committed crop back inside the image (the crop
+    /// isn't an undo step, so it must follow), and emit the image +
+    /// content sizes so the window and toolbar track.
+    fn refit_after_dims_change(&mut self, sender: &ComponentSender<Self>) {
+        let (iw, ih) = self.renderer.image_dimensions();
+        let (iw, ih) = (iw as f32, ih as f32);
+        let committed = self.tools.get_crop_tool().borrow().get_committed_rect();
+        // Content size is the (clamped) committed crop when one is
+        // applied, else the full restored image.
+        let content = match committed {
+            Some((pos, size)) => {
+                let (cpos, csize) = crate::math::rect_ensure_in_bounds(
+                    (pos, size),
+                    (crate::math::Vec2D::zero(), crate::math::Vec2D::new(iw, ih)),
+                );
+                let crop_tool = self.tools.get_crop_tool();
+                let mut ct = crop_tool.borrow_mut();
+                ct.set_image_bounds(crate::math::Vec2D::new(iw, ih));
+                ct.set_committed_rect(cpos, csize);
+                csize
+            }
+            None => {
+                self.tools
+                    .get_crop_tool()
+                    .borrow_mut()
+                    .set_image_bounds(crate::math::Vec2D::new(iw, ih));
+                crate::math::Vec2D::new(iw, ih)
+            }
+        };
+        // Committed-crop view auto-fits via crop_zoom (1.0 = fit); the
+        // full image uses the normal auto-fit (0.0).
+        self.renderer
+            .reset_size(if committed.is_some() { 1.0 } else { 0.0 });
+        sender
+            .output_sender()
+            .emit(SketchBoardOutput::ImageDimensionsChanged {
+                width: iw as i32,
+                height: ih as i32,
+            });
+        sender
+            .output_sender()
+            .emit(SketchBoardOutput::ContentSizeChanged {
+                width: content.x,
+                height: content.y,
+            });
+    }
+
+    /// Map the crop rect through a whole-canvas flip/rotate so the
+    /// overlay tracks the transformed image, and refresh the crop tool's
+    /// snap bounds to the new image size. Handles BOTH a committed crop
+    /// and one being edited (so rotating mid-edit keeps the box on the
+    /// canvas). `old_*` are the PRE-transform dims, `new_*` the
+    /// post-transform dims. Returns the mapped crop rect when a crop was
+    /// *committed* (used to size the window to the crop), else `None`
+    /// (editing or no crop → the window fits the full image).
+    fn transform_crop(
+        &mut self,
+        t: crate::tools::CanvasTransform,
+        old_w: f32,
+        old_h: f32,
+        new_w: f32,
+        new_h: f32,
+    ) -> Option<crate::math::Rect> {
+        let committed = self.tools.get_crop_tool().borrow().get_committed_rect();
+        {
+            let crop_tool = self.tools.get_crop_tool();
+            let mut ct = crop_tool.borrow_mut();
+            ct.set_image_bounds(crate::math::Vec2D::new(new_w, new_h));
+            ct.apply_canvas_transform(t, old_w, old_h);
+        }
+        committed.map(|(pos, size)| t.map_rect(crate::math::Rect::new(pos, size), old_w, old_h))
     }
 
     /// Delete every currently-selected drawable. Same effect as the
@@ -1992,8 +2198,8 @@ impl SketchBoard {
             }
             ToolbarEvent::SaveFile => self.handle_action(&[Action::SaveToFile]),
             ToolbarEvent::CopyClipboard => self.handle_action(&[Action::SaveToClipboard]),
-            ToolbarEvent::Undo => self.handle_undo(),
-            ToolbarEvent::Redo => self.handle_redo(),
+            ToolbarEvent::Undo => self.handle_undo(&sender),
+            ToolbarEvent::Redo => self.handle_redo(&sender),
             ToolbarEvent::Reset => self.handle_reset(),
             ToolbarEvent::ToggleFill => {
                 // Pre-sync `self.style.fill` to the currently-selected
@@ -2341,6 +2547,12 @@ impl SketchBoard {
             }
             ToolbarEvent::CancelCrop => self.tools.get_crop_tool().borrow_mut().cancel(),
             ToolbarEvent::ApplyCrop => self.tools.get_crop_tool().borrow_mut().commit(),
+            ToolbarEvent::FocusZoom => {
+                // Crop tab navigation: forward to App, which owns the
+                // zoom indicator widget.
+                sender.output_sender().emit(SketchBoardOutput::FocusZoom);
+                ToolUpdateResult::Unmodified
+            }
             ToolbarEvent::CropAspectRatioChanged(ratio) => {
                 self.tools
                     .get_crop_tool()
@@ -2360,77 +2572,113 @@ impl SketchBoard {
                 ToolUpdateResult::Redraw
             }
             ToolbarEvent::FlipHorizontal => {
-                self.renderer.flip_image_horizontal();
+                // Flips the background AND every annotation (renderer
+                // remaps geometry — no rasterizing). Dimensions are
+                // unchanged, so no window resize: a committed crop just
+                // mirrors to the other side and the Redraw re-fits it.
+                let (ow, oh) = self.renderer.image_dimensions();
+                if let Some((new_w, new_h)) = self.renderer.flip_image_horizontal() {
+                    self.transform_crop(
+                        crate::tools::CanvasTransform::FlipHorizontal,
+                        ow as f32,
+                        oh as f32,
+                        new_w,
+                        new_h,
+                    );
+                }
                 ToolUpdateResult::Redraw
             }
             ToolbarEvent::RotateImage => {
-                // Snapshot the on-screen scale BEFORE the rotation
-                // so the post-rotation `reset_size` can restore it
-                // verbatim instead of dropping back to auto-fit.
-                // `current_render_scale` returns the same number
-                // the zoom indicator was showing, so the user's
-                // "22%" stays 22% across the turn.
+                // Rotates the background AND every annotation 90° CCW.
+                // Snapshot the on-screen scale first so a non-cropped
+                // rotate keeps the user's zoom (e.g. "22%") instead of
+                // snapping to auto-fit.
                 let preserved_zoom = self.renderer.current_render_scale();
+                let (ow, oh) = self.renderer.image_dimensions();
                 if let Some((new_w, new_h)) = self.renderer.rotate_image_ccw() {
-                    let crop_tool = self.tools.get_crop_tool();
-                    let mut ct = crop_tool.borrow_mut();
-                    // Update bounds the snap-to-edges + seed paths
-                    // read from, then reseed so the crop rect lands
-                    // fresh on the rotated image (the old rect's
-                    // (pos, size) refer to coordinates that no
-                    // longer exist in the new orientation).
-                    // `emit_resize: false` because we emit our own
-                    // zoom-scaled ContentSizeChanged below — the
-                    // seed path's native-pixel emit would otherwise
-                    // win the race and blow the window up to the
-                    // rotated image's full size.
-                    ct.set_image_bounds(crate::math::Vec2D::new(new_w, new_h));
-                    ct.revert_to_seed(false);
-                    drop(ct);
-                    // Drop the drag offset (the old offset points
-                    // at image-space coords that no longer exist
-                    // in the rotated orientation) but keep the
-                    // pre-rotation zoom so the on-screen scale
-                    // doesn't snap back to auto-fit mid-edit.
-                    self.renderer.reset_size(preserved_zoom);
+                    let mapped_crop = self.transform_crop(
+                        crate::tools::CanvasTransform::RotateCcw,
+                        ow as f32,
+                        oh as f32,
+                        new_w,
+                        new_h,
+                    );
                     sender
                         .output_sender()
                         .emit(SketchBoardOutput::ImageDimensionsChanged {
                             width: new_w as i32,
                             height: new_h as i32,
                         });
-                    // Re-fit the window around the rotated content
-                    // AT THE PRESERVED ZOOM, not at native pixels.
-                    // Otherwise a 22 % preview rotated from
-                    // portrait → landscape would blow the window
-                    // up to the full landscape pixel size and the
-                    // user would see a tiny image floating in a
-                    // huge canvas. Scaling by `preserved_zoom`
-                    // means the window only grows by the small
-                    // aspect-flip delta in on-screen pixels.
-                    sender
-                        .output_sender()
-                        .emit(SketchBoardOutput::ContentSizeChanged {
-                            width: new_w * preserved_zoom,
-                            height: new_h * preserved_zoom,
-                        });
+                    match mapped_crop {
+                        // Committed crop rotated with everything — re-fit
+                        // the crop into the window (crop_zoom = 1.0) and
+                        // size the window to the rotated crop.
+                        Some(r) => {
+                            self.renderer.reset_size(1.0);
+                            sender
+                                .output_sender()
+                                .emit(SketchBoardOutput::ContentSizeChanged {
+                                    width: r.size.x,
+                                    height: r.size.y,
+                                });
+                        }
+                        // No crop: keep the pre-rotation on-screen zoom and
+                        // re-fit the window around the rotated full image at
+                        // that zoom (not native pixels, which would blow a
+                        // zoomed-out preview up to full size).
+                        None => {
+                            self.renderer.reset_size(preserved_zoom);
+                            sender
+                                .output_sender()
+                                .emit(SketchBoardOutput::ContentSizeChanged {
+                                    width: new_w * preserved_zoom,
+                                    height: new_h * preserved_zoom,
+                                });
+                        }
+                    }
                 }
                 ToolUpdateResult::Redraw
             }
             ToolbarEvent::ResizeImage { width, height } => {
+                let (old_w, old_h) = self.renderer.image_dimensions();
                 if let Some((new_w, new_h)) = self.renderer.resize_image(width, height) {
-                    let crop_tool = self.tools.get_crop_tool();
-                    let mut ct = crop_tool.borrow_mut();
-                    ct.set_image_bounds(crate::math::Vec2D::new(new_w, new_h));
-                    ct.revert_to_seed(true);
-                    drop(ct);
+                    // A pristine full-image crop snaps to the new full
+                    // size; a manually-sized crop scales with the image so
+                    // it keeps framing the same content. Decide BEFORE
+                    // changing the bounds (is_full_image_crop reads them).
+                    let pristine = self.tools.get_crop_tool().borrow().is_full_image_crop();
+                    {
+                        let crop_tool = self.tools.get_crop_tool();
+                        let mut ct = crop_tool.borrow_mut();
+                        ct.set_image_bounds(crate::math::Vec2D::new(new_w, new_h));
+                        if pristine {
+                            // Reseed to the full new image (also emits the
+                            // new ContentSizeChanged for the window).
+                            ct.revert_to_seed(true);
+                        } else {
+                            let sx = if old_w > 0 { new_w / old_w as f32 } else { 1.0 };
+                            let sy = if old_h > 0 { new_h / old_h as f32 } else { 1.0 };
+                            ct.apply_canvas_transform(
+                                crate::tools::CanvasTransform::Scale { sx, sy },
+                                old_w as f32,
+                                old_h as f32,
+                            );
+                        }
+                    }
+                    if !pristine {
+                        // Crop-edit mode shows the full image, so fit the
+                        // window to the resized full image.
+                        sender
+                            .output_sender()
+                            .emit(SketchBoardOutput::ContentSizeChanged {
+                                width: new_w,
+                                height: new_h,
+                            });
+                    }
                     // Drop any prior user zoom so the renderer's
-                    // auto-fit-with-padding cascade re-engages for the
-                    // new image size — same fit-to-screen treatment a
-                    // fresh screenshot gets. `revert_to_seed` already
-                    // emitted ContentSizeChanged to grow the window to
-                    // 90 % viewport; auto-fit handles the case where
-                    // the resized image still exceeds the window.
+                    // auto-fit-with-padding cascade re-engages for the new
+                    // image size — same fit-to-screen treatment a fresh
+                    // screenshot gets.
                     self.renderer.reset_size(0.0);
                     sender
                         .output_sender()
@@ -2488,6 +2736,17 @@ impl SketchBoard {
                 } else if let Some(ch) = txt.chars().next()
                     && let Some(tool) = APP_CONFIG.read().keybinds().get_tool(ch)
                 {
+                    // Re-pressing the Crop shortcut (`x`) while already in
+                    // Crop APPLIES the crop — parity with Enter / the
+                    // Apply button — instead of re-selecting or cycling.
+                    // (Single letter keys arrive here via the IM-commit
+                    // path, not the EventControllerKey chain, so this is
+                    // the spot to special-case it.)
+                    if tool == Tools::Crop && self.active_tool_type() == Tools::Crop {
+                        self.last_tool_press = None;
+                        sender.input(SketchBoardInput::ToolbarEvent(ToolbarEvent::ApplyCrop));
+                        return ToolUpdateResult::Unmodified;
+                    }
                     // Double-press cycle: if the user presses the
                     // SAME tool key twice within TOOL_CYCLE_MS AND
                     // the tool was already active when the second
@@ -4438,7 +4697,29 @@ impl Component for SketchBoard {
                         | ToolUpdateResult::ModifyDrawablesCoalesce(_)
                         | ToolUpdateResult::Commit(_) => active_tool_result,
                         _ => {
-                            if self
+                            if ke.key == Key::Tab && ke.modifier.is_empty() {
+                                // Tab from the canvas → first control of the
+                                // top bar. GTK then traverses the bar; at the
+                                // bar's far edge the seam controllers hop to
+                                // the bottom bar and wrap back here, so the
+                                // forward cycle is top bar → bottom bar →
+                                // wrap, with the canvas as its home. Works the
+                                // same in Crop and Normal modes — the bar just
+                                // exposes whichever controls are visible.
+                                sender
+                                    .output_sender()
+                                    .emit(SketchBoardOutput::FocusTopBarStart);
+                                ToolUpdateResult::Unmodified
+                            } else if ke.key == Key::ISO_Left_Tab
+                                || (ke.key == Key::Tab && ke.modifier == ModifierType::SHIFT_MASK)
+                            {
+                                // Shift+Tab from the canvas → last control of
+                                // the bottom bar (reverse entry into the loop).
+                                sender
+                                    .output_sender()
+                                    .emit(SketchBoardOutput::FocusBottomBarEnd);
+                                ToolUpdateResult::Unmodified
+                            } else if self
                                 .layer_panel_shortcut
                                 .is_some_and(|(k, m)| ke.key == k && ke.modifier == m)
                             {
@@ -4453,11 +4734,11 @@ impl Component for SketchBoard {
                             } else if ke.is_one_of(Key::z, KeyMappingId::UsZ)
                                 && ke.modifier == ModifierType::CONTROL_MASK
                             {
-                                self.handle_undo()
+                                self.handle_undo(&sender)
                             } else if ke.is_one_of(Key::y, KeyMappingId::UsY)
                                 && ke.modifier == ModifierType::CONTROL_MASK
                             {
-                                self.handle_redo()
+                                self.handle_redo(&sender)
                             } else if ke.is_one_of(Key::v, KeyMappingId::UsV)
                                 && ke.modifier == ModifierType::CONTROL_MASK
                             {
