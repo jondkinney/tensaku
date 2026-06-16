@@ -2125,6 +2125,10 @@ impl FemtoVgAreaMut {
             self.drawables
                 .iter()
                 .find(|s| s.id == selected_ids[0])
+                // A hidden layer draws nothing, so it shouldn't show its
+                // selection handles either — pass None so `build_overlay`
+                // skips the handles (the marquee path is unaffected).
+                .filter(|s| s.visible)
                 .map(|s| s.drawable.as_ref())
         } else {
             None
