@@ -322,8 +322,12 @@ impl Arrow {
             return None;
         }
         let midpoint = (self.start + end) * 0.5;
-        // Perpendicular: rotate (dx, dy) by +90° → (-dy, dx).
-        let perp = Vec2D::new(-chord.y, chord.x) * (1.0 / len);
+        // Perpendicular: rotate (dx, dy) by −90° → (dy, −dx). With screen
+        // coordinates (y down) this puts the control point ABOVE a
+        // left-to-right chord, so the default curve arcs toward the top —
+        // matching the Style dropdown's preview icon. (A dragged middle
+        // handle overrides this via `curve_control`.)
+        let perp = Vec2D::new(chord.y, -chord.x) * (1.0 / len);
         Some(midpoint + perp * (len * CURVE_AMOUNT))
     }
 
