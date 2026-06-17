@@ -42,16 +42,30 @@ pub fn resize_self(w: i32, h: i32) -> bool {
     };
     let sig = sig.to_string_lossy();
     let pid = std::process::id();
-    // The `dispatch` IPC verb is evaluated as `return hl.dispatch(<text>)`, so
-    // we hand it a Lua dispatcher object rather than the legacy string form
-    // (which 0.55 removed). `relative = false` → absolute pixel size;
-    // `window = "pid:N"` targets our own toplevel.
-    let cmd = format!(
-        "dispatch hl.dsp.window.resize({{ x = {w}, y = {h}, relative = false, window = \"pid:{pid}\" }})"
-    );
-    socket_paths(&sig)
-        .into_iter()
-        .any(|path| dispatch_ok(&path, &cmd))
+    let paths = socket_paths(&sig);
+    // Two dispatch syntaxes, newest first, for resilience across Hyprland
+    // versions (the dispatch API changed under us mid-development):
+    //   * 0.50+ Lua object API — the `dispatch` verb is evaluated as
+    //     `return hl.dispatch(<text>)`, so we pass a dispatcher OBJECT.
+    //   * legacy string dispatcher (`resizewindowpixel exact W H,<window>`)
+    //     used by older builds.
+    // Both use `pid:N` to target our own toplevel and an absolute size. We try
+    // the modern form first (what current Hyprland uses); only if it isn't
+    // acknowledged do we try the legacy form — so older Hyprland ALSO gets the
+    // stored-size update (and thus the hold-across-move behaviour) instead of
+    // silently dropping to the portable fallback. On a version that honours
+    // neither, every attempt returns false and the caller's `set_default_size`
+    // path takes over. (On modern Hyprland the legacy line is never sent — the
+    // first form already succeeded.)
+    let commands = [
+        format!(
+            "dispatch hl.dsp.window.resize({{ x = {w}, y = {h}, relative = false, window = \"pid:{pid}\" }})"
+        ),
+        format!("dispatch resizewindowpixel exact {w} {h},pid:{pid}"),
+    ];
+    commands
+        .iter()
+        .any(|cmd| paths.iter().any(|path| dispatch_ok(path, cmd)))
 }
 
 /// Candidate IPC socket paths, newest layout first. Hyprland ≥ 0.40 keeps the
