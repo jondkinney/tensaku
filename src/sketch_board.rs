@@ -4989,12 +4989,14 @@ impl Component for SketchBoard {
                             // size slider).
                             self.scroll_resize_tool_size(me.pos.y, &outer_sender);
                             true
-                        } else if ctrl_held && self.active_tool_type() == Tools::Crop {
-                            // Ctrl+wheel in Crop edit → shrink / grow the
-                            // crop rect from all four sides, anchored on
-                            // its center and clamped to the image bounds.
-                            // Scroll up grows toward the canvas outsides;
-                            // scroll down shrinks toward the middle.
+                        } else if no_mods && self.active_tool_type() == Tools::Crop {
+                            // Plain wheel in Crop edit → shrink / grow the crop
+                            // rect from all four sides, anchored on its center
+                            // and clamped to the image bounds (scroll up grows
+                            // toward the canvas edges, down shrinks toward the
+                            // middle). Adjusting the crop is the primary gesture
+                            // while cropping, so it gets the unmodified wheel;
+                            // Ctrl+wheel falls through to the canvas zoom below.
                             let crop_tool = self.tools.get_crop_tool();
                             let in_edit = crop_tool.borrow().is_active_edit();
                             if in_edit {
@@ -5088,7 +5090,14 @@ impl Component for SketchBoard {
                     };
 
                     let pointer_consumed =
-                        if active_type != Tools::Pointer && !in_active_editing_body {
+                        // Crop is excluded: while cropping, mouse gestures
+                        // belong to the crop handles ONLY — never the implicit
+                        // pointer — so annotations can't be selected, moved or
+                        // resized until the crop is committed or cancelled.
+                        if active_type != Tools::Pointer
+                            && active_type != Tools::Crop
+                            && !in_active_editing_body
+                        {
                             // Hint to the pointer which drawing tool is active
                             // so it can pass body-grabs through on type-mismatch
                             // (letting the user place a new annotation on top
