@@ -563,7 +563,7 @@ impl App {
         .flatten()
         .map(|slot| slot.measure(gtk::Orientation::Horizontal, -1).1)
         .sum();
-        (packed > 0).then_some(packed + 8)
+        (packed > 0).then_some(packed)
     }
 
     fn resize_window_initial(&self, root: &Window, sender: ComponentSender<Self>) {
