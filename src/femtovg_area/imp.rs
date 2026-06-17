@@ -582,11 +582,27 @@ impl GLAreaImpl for FemtoVGArea {
             }
             let image_w = inner.background_image.width() as f32;
             let image_h = inner.background_image.height() as f32;
+            // A committed crop is a view-window — the user can only pan WITHIN
+            // the crop, so the scrollable content is the crop region, not the
+            // full image. Take the crop size when one is committed (else the
+            // full image), scaled by `effective_scale` (the real on-screen
+            // scale, which folds in crop_zoom). Using `scale_factor` × the full
+            // image was the bug: `scale_factor` is the full-image auto-fit, so
+            // after a crop / un-crop / grow sequence it left the scrollbars
+            // thinking the whole original was pannable and showed spurious
+            // bars. For the non-crop view `effective_scale == scale_factor`, so
+            // that case is unchanged.
+            let (content_w, content_h) = crop_tool
+                .borrow()
+                .get_committed_rect()
+                .filter(|(_, s)| s.x > 0.0 && s.y > 0.0)
+                .map(|(_, s)| (s.x, s.y))
+                .unwrap_or((image_w, image_h));
             let pan_info = crate::sketch_board::PanInfo {
                 drag_x: inner.drag_offset.x,
                 drag_y: inner.drag_offset.y,
-                image_w_scaled: image_w * inner.scale_factor,
-                image_h_scaled: image_h * inner.scale_factor,
+                image_w_scaled: content_w * inner.effective_scale,
+                image_h_scaled: content_h * inner.effective_scale,
                 canvas_w: canvas.width() as f32,
                 canvas_h: canvas.height() as f32,
             };
