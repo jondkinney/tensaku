@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.6](https://github.com/jondkinney/tensaku/compare/v0.26.5...v0.26.6) - 2026-06-17
+
+### Added
+
+- *(window)* also try the legacy Hyprland dispatcher for older versions
+- *(window)* floor crop-resize width to keep the top bar one row
+- *(window)* hold crop/grow window size across moves on Hyprland
+- *(a11y)* arrow-key toolbar nav + Esc cancels crop from any control
+- *(crop+ux)* aspect-locked arrow resize, sticky control focus, smarter top-bar wrap
+- *(crop+ux)* view-window crop model, non-destructive transforms, full keyboard nav
+- *(ux)* session batch — glyph tooltips, Pen/Counter, slider+cursor fixes, group move
+
+### Fixed
+
+- *(crop)* match the resize popover's units dropdown padding to the toolbar
+- *(window)* drop the single-row floor's +8px buffer to close the tool gap
+- *(crop)* scrollbars track the crop region, not the full image
+- *(crop)* plain wheel adjusts the crop; mouse only touches crop handles
+- *(window)* tighten the single-row floor to the packed toolbar width
+- *(selection)* don't show handles for a hidden layer
+- *(arrow)* curve to the top by default
+- *(crop)* un-invert Shift+arrow resize under a locked aspect ratio
+
+### Other
+
+- *(crop)* renderer core for materialized-crop model (not yet wired)
+
 ## [0.26.5](https://github.com/jondkinney/tensaku/compare/v0.26.4...v0.26.5) - 2026-06-12
 
 ### Fixed
