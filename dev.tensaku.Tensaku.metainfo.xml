@@ -36,6 +36,35 @@
        Version history section on the listing page; the latest
        release is the only one strictly required. -->
   <releases>
+    <release version="0.26.6" date="2026-06-17">
+      <description>
+        <p>Added:</p>
+        <ul>
+          <li>also try the legacy Hyprland dispatcher for older versions</li>
+          <li>floor crop-resize width to keep the top bar one row</li>
+          <li>hold crop/grow window size across moves on Hyprland</li>
+          <li>arrow-key toolbar nav + Esc cancels crop from any control</li>
+          <li>aspect-locked arrow resize, sticky control focus, smarter top-bar wrap</li>
+          <li>view-window crop model, non-destructive transforms, full keyboard nav</li>
+          <li>session batch — glyph tooltips, Pen/Counter, slider+cursor fixes, group move</li>
+        </ul>
+        <p>Fixed:</p>
+        <ul>
+          <li>match the resize popover&#x27;s units dropdown padding to the toolbar</li>
+          <li>drop the single-row floor&#x27;s +8px buffer to close the tool gap</li>
+          <li>scrollbars track the crop region, not the full image</li>
+          <li>plain wheel adjusts the crop; mouse only touches crop handles</li>
+          <li>tighten the single-row floor to the packed toolbar width</li>
+          <li>don&#x27;t show handles for a hidden layer</li>
+          <li>curve to the top by default</li>
+          <li>un-invert Shift+arrow resize under a locked aspect ratio</li>
+        </ul>
+        <p>Other:</p>
+        <ul>
+          <li>renderer core for materialized-crop model (not yet wired)</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.26.5" date="2026-06-12">
       <description>
         <p>Fixed:</p>
