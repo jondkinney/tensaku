@@ -12,8 +12,8 @@ use crate::{
 };
 
 use super::{
-    Drawable, DrawableClone, GLOW_COLOR, Handle, HandleId, Tool, ToolUpdateResult, Tools,
-    halo_in_image_units,
+    CanvasTransform, Drawable, DrawableClone, GLOW_COLOR, Handle, HandleId, Tool, ToolUpdateResult,
+    Tools, halo_in_image_units,
 };
 use relm4::Sender;
 
@@ -127,6 +127,12 @@ impl Drawable for Marker {
 
     fn translate(&mut self, delta: Vec2D) {
         self.pos += delta;
+    }
+
+    fn apply_canvas_transform(&mut self, t: CanvasTransform, w: f32, h: f32) {
+        // The badge is a circle — only its center moves; the radius is a
+        // scalar unaffected by a flip / 90° turn.
+        self.pos = t.map_point(self.pos, w, h);
     }
 
     /// Four corner handles around the marker's bounding box. Markers

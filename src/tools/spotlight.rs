@@ -30,8 +30,8 @@ use crate::{
 };
 
 use super::{
-    Drawable, GLOW_COLOR, Handle, HandleId, Tool, ToolUpdateResult, Tools, bbox_handles,
-    bbox_resize, halo_in_image_units,
+    CanvasTransform, Drawable, GLOW_COLOR, Handle, HandleId, Tool, ToolUpdateResult, Tools,
+    bbox_handles, bbox_resize, halo_in_image_units,
 };
 
 #[derive(Clone, Debug)]
@@ -265,6 +265,31 @@ impl Drawable for SpotlightKind {
             SpotlightKind::Freehand(s) => {
                 if let Some(first) = s.data.points.first_mut() {
                     *first += delta;
+                }
+            }
+        }
+    }
+
+    fn apply_canvas_transform(&mut self, t: CanvasTransform, w: f32, h: f32) {
+        match self {
+            SpotlightKind::Block(s) => {
+                if let Some(size) = s.data.size {
+                    let r = t.map_rect(Rect::new(s.data.top_left, size), w, h);
+                    s.data.top_left = r.pos;
+                    s.data.size = Some(r.size);
+                } else {
+                    s.data.top_left = t.map_point(s.data.top_left, w, h);
+                }
+            }
+            SpotlightKind::Freehand(s) => {
+                // First point absolute, rest offsets from it (mirrors the
+                // highlighter layout).
+                for (i, p) in s.data.points.iter_mut().enumerate() {
+                    *p = if i == 0 {
+                        t.map_point(*p, w, h)
+                    } else {
+                        t.map_offset(*p)
+                    };
                 }
             }
         }

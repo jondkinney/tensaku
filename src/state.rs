@@ -79,6 +79,11 @@ pub struct PersistedState {
     /// user can pick whichever direction feels right.
     #[serde(default)]
     pub invert_scrolling: Option<bool>,
+    /// Whether clicking any annotation selects it regardless of the
+    /// active tool. `None` means "use default" (true). Toggled from
+    /// the Preferences dialog.
+    #[serde(default)]
+    pub select_any_annotation: Option<bool>,
     /// Whether pressing Esc on the canvas closes satty. `None` means
     /// "use default" (false). Independent of `actions_on_escape` —
     /// this just gates the implicit Exit action so users with
@@ -361,6 +366,22 @@ pub fn load_invert_scrolling() -> bool {
 pub fn save_invert_scrolling(value: bool) {
     let mut state = load();
     state.invert_scrolling = Some(value);
+    save(&state);
+}
+
+/// Whether clicking any annotation selects it regardless of the active
+/// tool. Defaults to true (the more forgiving behavior) when the field
+/// has never been written.
+pub fn load_select_any_annotation() -> bool {
+    load().select_any_annotation.unwrap_or(true)
+}
+
+/// Persist the select-any-annotation preference. Called from the
+/// Preferences dialog's CheckButton toggle so the choice survives
+/// restarts.
+pub fn save_select_any_annotation(value: bool) {
+    let mut state = load();
+    state.select_any_annotation = Some(value);
     save(&state);
 }
 

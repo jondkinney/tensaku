@@ -19,8 +19,8 @@ use crate::{
 };
 
 use super::{
-    Drawable, DrawableClone, DrawableId, GLOW_COLOR, Handle, HandleId, HandleKind, InputContext,
-    SELECTION_BLUE, Tool, ToolUpdateResult, Tools,
+    CanvasTransform, Drawable, DrawableClone, DrawableId, GLOW_COLOR, Handle, HandleId, HandleKind,
+    InputContext, SELECTION_BLUE, Tool, ToolUpdateResult, Tools,
 };
 use crate::sketch_board::SketchBoardInput;
 use relm4::Sender;
@@ -1027,6 +1027,19 @@ impl Drawable for Text {
             r.height(),
         );
         layout.editing_rect.pos += delta;
+    }
+
+    fn apply_canvas_transform(&mut self, t: CanvasTransform, w: f32, h: f32) {
+        // Text stays upright and readable; only its position mirrors /
+        // rotates. Move the box so its CENTER lands where the transform
+        // maps it (for a flip, that swaps the annotation to the opposite
+        // side), then reuse `translate` to shift the cached layout too.
+        let center = match self.bounds() {
+            Some(b) => b.center(),
+            None => self.pos,
+        };
+        let delta = t.map_point(center, w, h) - center;
+        self.translate(delta);
     }
 
     fn handles(&self) -> Vec<Handle> {

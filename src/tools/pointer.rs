@@ -8,6 +8,7 @@ use relm4::Sender;
 use relm4::gtk::gdk::{Key, ModifierType};
 
 use crate::{
+    configuration::APP_CONFIG,
     math::{Rect, Vec2D},
     sketch_board::{KeyEventMsg, MouseButton, MouseEventMsg, MouseEventType, SketchBoardInput},
     style::Style,
@@ -82,12 +83,19 @@ pub struct PointerTool {
     last_nudge_at: Option<Instant>,
 }
 
+/// One member of a group/move drag: `(id, original, working copy)`.
+type GroupMember = (DrawableId, Box<dyn Drawable>, Box<dyn Drawable>);
+
 struct DragState {
     id: DrawableId,
     mode: DragMode,
     original: Box<dyn Drawable>,
     working: Box<dyn Drawable>,
     handle_anchor: Vec2D,
+    /// Other selected drawables moving together in a group body drag.
+    /// Empty for single-drawable drags and all handle (resize) drags —
+    /// group drags are always `Body`.
+    group: Vec<GroupMember>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -175,6 +183,13 @@ impl PointerTool {
         let Some(active) = self.implicit_other_tool else {
             return false;
         };
+        // When the user has opted in to selecting any annotation, the
+        // Pointer always grabs whatever was clicked — never pass the
+        // body-hit through to the active drawing tool on a type
+        // mismatch. (Default on; see `select_any_annotation`.)
+        if APP_CONFIG.read().select_any_annotation() {
+            return false;
+        }
         drawable.tool_type() != Some(active)
     }
 
@@ -275,6 +290,20 @@ impl Tool for PointerTool {
 
     fn dragging_drawable_id(&self) -> Option<DrawableId> {
         self.drag.as_ref().map(|d| d.id)
+    }
+
+    fn extra_dragging_drawables(&self) -> Vec<&dyn Drawable> {
+        self.drag
+            .as_ref()
+            .map(|d| d.group.iter().map(|(_, _, w)| w.as_ref()).collect())
+            .unwrap_or_default()
+    }
+
+    fn extra_dragging_ids(&self) -> Vec<DrawableId> {
+        self.drag
+            .as_ref()
+            .map(|d| d.group.iter().map(|(id, _, _)| *id).collect())
+            .unwrap_or_default()
     }
 
     fn is_resizing(&self) -> bool {
@@ -459,6 +488,11 @@ impl Tool for PointerTool {
         match event.type_ {
             MouseEventType::BeginDrag => {
                 // 1. Handle hit (single-selection only) takes priority.
+                //    `hit_handle` only matches handles of an
+                //    already-selected drawable, so a resize is only ever
+                //    possible after the shape has been selected — see the
+                //    body-hit branch below, which deliberately never
+                //    starts a handle drag on a freshly-clicked shape.
                 if let Some((id, drawable, handle)) = self.hit_handle(event.pos) {
                     self.drag = Some(DragState {
                         id,
@@ -466,24 +500,50 @@ impl Tool for PointerTool {
                         original: drawable.clone_box(),
                         working: drawable,
                         handle_anchor: handle.pos,
+                        group: Vec::new(),
                     });
                     return ToolUpdateResult::RedrawAndStopPropagation;
                 }
 
-                // 2. Body hit: replace selection with the clicked drawable
-                //    (multi-drag isn't supported yet; clicking a member of
-                //    a multi-selection collapses to single).
+                // 2. Body hit.
                 if let Some(id) = store.hit_test(event.pos, HIT_TOLERANCE)
                     && let Some(drawable) = store.clone_drawable(id)
                 {
-                    // Implicit mode + tool-type mismatch: yield so the
-                    // active drawing tool places a fresh annotation on
-                    // top instead of grabbing this one. (Pointer itself
-                    // never sets `implicit_other_tool`, so explicit
-                    // selection still works for any drawable.)
+                    // Implicit mode + tool-type mismatch (only when the
+                    // select-any-annotation preference is off): yield so
+                    // the active drawing tool places a fresh annotation
+                    // on top instead of grabbing this one. (Pointer
+                    // itself never sets `implicit_other_tool`, so
+                    // explicit selection still works for any drawable.)
                     if self.should_pass_through_body_hit(drawable.as_ref()) {
                         return ToolUpdateResult::Unmodified;
                     }
+
+                    // 2a. Group move: clicking any member of a
+                    //     multi-selection keeps the whole selection and
+                    //     drags the group together, rather than
+                    //     collapsing to single. No auto-raise (raising
+                    //     one member would reorder the group oddly).
+                    if self.selected.len() > 1 && self.selected.contains(&id) {
+                        let group = self
+                            .selected
+                            .iter()
+                            .filter(|&&sid| sid != id)
+                            .filter_map(|&sid| {
+                                store.clone_drawable(sid).map(|d| (sid, d.clone_box(), d))
+                            })
+                            .collect();
+                        self.drag = Some(DragState {
+                            id,
+                            mode: DragMode::Body,
+                            original: drawable.clone_box(),
+                            working: drawable,
+                            handle_anchor: Vec2D::zero(),
+                            group,
+                        });
+                        return ToolUpdateResult::RedrawAndStopPropagation;
+                    }
+
                     // Auto-raise: if some other visible drawable overlaps
                     // this one from above, the user expects the click to
                     // bring it forward. Hit_test already returned this id
@@ -493,35 +553,16 @@ impl Tool for PointerTool {
                     // performs the coalesced reorder in the result match.
                     let should_raise = store.has_visible_overlapper_above(id);
 
-                    // BEFORE setting up a body-drag, check whether the
-                    // click is on one of THIS drawable's handles. Lets
-                    // the user start a Handle drag on an unselected
-                    // drawable in a single click+drag gesture, instead
-                    // of needing one click to select and a second to
-                    // grab the handle. Without this, dragging a text's
-                    // resize handle would either body-drag the text
-                    // (wrong) or fall through to TextTool (creates a
-                    // ghost text box).
-                    if let Some(handle) = drawable
-                        .handles()
-                        .into_iter()
-                        .find(|h| h.pos.distance_to(&event.pos) <= h.hit_radius)
-                    {
-                        self.selected = vec![id];
-                        self.drag = Some(DragState {
-                            id,
-                            mode: DragMode::Handle(handle.id),
-                            original: drawable.clone_box(),
-                            working: drawable,
-                            handle_anchor: handle.pos,
-                        });
-                        return if should_raise {
-                            ToolUpdateResult::RaiseAndRedrawStop(id)
-                        } else {
-                            ToolUpdateResult::RedrawAndStopPropagation
-                        };
-                    }
-
+                    // 2b. Single select + body (move) drag. We do NOT
+                    //     start a handle (resize) drag here even if the
+                    //     click lands where a handle would sit: an
+                    //     unselected shape shows no handles, and resizing
+                    //     should require selecting it first (one click to
+                    //     select, then drag a handle — caught by the
+                    //     `hit_handle` branch above on the next gesture).
+                    //     This keeps a plain click+drag a pure nudge, so
+                    //     the user can't accidentally stretch a shape they
+                    //     only meant to move.
                     self.selected = vec![id];
                     self.drag = Some(DragState {
                         id,
@@ -529,6 +570,7 @@ impl Tool for PointerTool {
                         original: drawable.clone_box(),
                         working: drawable,
                         handle_anchor: Vec2D::zero(),
+                        group: Vec::new(),
                     });
                     return if should_raise {
                         ToolUpdateResult::RaiseAndRedrawStop(id)
@@ -598,6 +640,16 @@ impl Tool for PointerTool {
                     }
                 }
                 drag.working = working;
+                // Group body drag: translate every other member from its
+                // own original by the same delta so the whole selection
+                // moves rigidly together.
+                if matches!(drag.mode, DragMode::Body) {
+                    for (_, original, work) in drag.group.iter_mut() {
+                        let mut moved = original.clone_box();
+                        moved.translate(event.pos);
+                        *work = moved;
+                    }
+                }
                 ToolUpdateResult::RedrawAndStopPropagation
             }
             MouseEventType::EndDrag => {
@@ -616,11 +668,31 @@ impl Tool for PointerTool {
                 let Some(drag) = self.drag.take() else {
                     return ToolUpdateResult::Unmodified;
                 };
-                self.selected = vec![drag.id];
-                if event.pos.is_zero() {
-                    ToolUpdateResult::RedrawAndStopPropagation
+                if drag.group.is_empty() {
+                    // Single-drawable drag (move or resize).
+                    self.selected = vec![drag.id];
+                    if event.pos.is_zero() {
+                        ToolUpdateResult::RedrawAndStopPropagation
+                    } else {
+                        ToolUpdateResult::ModifyDrawable(drag.id, drag.working)
+                    }
                 } else {
-                    ToolUpdateResult::ModifyDrawable(drag.id, drag.working)
+                    // Group move: keep the whole selection and commit
+                    // every member atomically (one Batch undo).
+                    let mut ids = Vec::with_capacity(drag.group.len() + 1);
+                    let mut updates = Vec::with_capacity(drag.group.len() + 1);
+                    ids.push(drag.id);
+                    updates.push((drag.id, drag.working));
+                    for (gid, _, work) in drag.group {
+                        ids.push(gid);
+                        updates.push((gid, work));
+                    }
+                    self.selected = ids;
+                    if event.pos.is_zero() {
+                        ToolUpdateResult::RedrawAndStopPropagation
+                    } else {
+                        ToolUpdateResult::ModifyDrawables(updates)
+                    }
                 }
             }
             MouseEventType::Click => {

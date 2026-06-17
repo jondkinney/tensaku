@@ -13,8 +13,8 @@ use crate::{
 };
 
 use super::{
-    Drawable, DrawableClone, GLOW_COLOR, Handle, HandleId, Tool, ToolUpdateResult, Tools,
-    bbox_handles, bbox_resize, halo_in_image_units,
+    CanvasTransform, Drawable, DrawableClone, GLOW_COLOR, Handle, HandleId, Tool, ToolUpdateResult,
+    Tools, bbox_handles, bbox_resize, halo_in_image_units,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -117,6 +117,18 @@ impl Drawable for Rectangle {
     fn translate(&mut self, delta: Vec2D) {
         self.top_left += delta;
         self.origin += delta;
+    }
+
+    fn apply_canvas_transform(&mut self, t: CanvasTransform, w: f32, h: f32) {
+        if let Some(size) = self.size {
+            let r = t.map_rect(Rect::new(self.top_left, size), w, h);
+            self.top_left = r.pos;
+            self.size = Some(r.size);
+            self.origin = r.pos;
+        } else {
+            self.top_left = t.map_point(self.top_left, w, h);
+            self.origin = t.map_point(self.origin, w, h);
+        }
     }
 
     fn handles(&self) -> Vec<Handle> {

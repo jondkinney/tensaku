@@ -13,8 +13,8 @@ use crate::{
 };
 
 use super::{
-    Drawable, DrawableClone, GLOW_COLOR, Handle, HandleId, Tool, ToolUpdateResult, Tools,
-    halo_in_image_units,
+    CanvasTransform, Drawable, DrawableClone, GLOW_COLOR, Handle, HandleId, Tool, ToolUpdateResult,
+    Tools, halo_in_image_units,
 };
 
 /// Arrow geometry variants.
@@ -322,8 +322,12 @@ impl Arrow {
             return None;
         }
         let midpoint = (self.start + end) * 0.5;
-        // Perpendicular: rotate (dx, dy) by +90° → (-dy, dx).
-        let perp = Vec2D::new(-chord.y, chord.x) * (1.0 / len);
+        // Perpendicular: rotate (dx, dy) by −90° → (dy, −dx). With screen
+        // coordinates (y down) this puts the control point ABOVE a
+        // left-to-right chord, so the default curve arcs toward the top —
+        // matching the Style dropdown's preview icon. (A dragged middle
+        // handle overrides this via `curve_control`.)
+        let perp = Vec2D::new(chord.y, -chord.x) * (1.0 / len);
         Some(midpoint + perp * (len * CURVE_AMOUNT))
     }
 
@@ -658,6 +662,16 @@ impl Drawable for Arrow {
         }
         if let Some(c) = self.curve_control.as_mut() {
             *c += delta;
+        }
+    }
+
+    fn apply_canvas_transform(&mut self, t: CanvasTransform, w: f32, h: f32) {
+        self.start = t.map_point(self.start, w, h);
+        if let Some(end) = self.end.as_mut() {
+            *end = t.map_point(*end, w, h);
+        }
+        if let Some(c) = self.curve_control.as_mut() {
+            *c = t.map_point(*c, w, h);
         }
     }
 

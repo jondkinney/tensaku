@@ -160,6 +160,21 @@ pub trait Tool {
         None
     }
 
+    /// Extra in-flight drawables beyond `get_drawable()` — the *other*
+    /// members of a group/move drag, rendered as moved copies. Default
+    /// empty; the Pointer tool overrides it when dragging a
+    /// multi-selection as a group.
+    fn extra_dragging_drawables(&self) -> Vec<&dyn Drawable> {
+        Vec::new()
+    }
+
+    /// Ids of the extra group-drag members (paired with
+    /// `extra_dragging_drawables`). The renderer skips these from the
+    /// normal stack so only their moved copies show. Default empty.
+    fn extra_dragging_ids(&self) -> Vec<DrawableId> {
+        Vec::new()
+    }
+
     /// True when the tool is currently dragging a resize handle (vs a
     /// body / move drag). Sketch_board hides the cursor during a resize
     /// drag so the user can see exactly where the dragged edge or
@@ -301,6 +316,83 @@ where
     }
 }
 
+/// A whole-canvas geometry transform — a 90°-granularity flip/turn, or a
+/// non-uniform scale (image resize). Drives `Drawable::apply_canvas_transform`
+/// so annotations remap with the background instead of staying put. All
+/// maps use the PRE-transform image width `w` / height `h`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CanvasTransform {
+    /// Mirror left↔right about the vertical centerline (dims unchanged).
+    FlipHorizontal,
+    /// Rotate the image 90° counter-clockwise (width/height swap).
+    RotateCcw,
+    /// Rotate the image 90° clockwise (width/height swap). Not a
+    /// user-facing op — it's the inverse of `RotateCcw`, used by undo.
+    RotateCw,
+    /// Scale geometry about the origin by `(sx, sy)` — an image resize.
+    Scale { sx: f32, sy: f32 },
+}
+
+impl CanvasTransform {
+    /// Map an ABSOLUTE image-space point from pre- to post-transform
+    /// space. CCW: `(x,y) → (y, w−x)`; CW: `(x,y) → (h−y, x)`; flip:
+    /// `(x,y) → (w−x, y)`; scale: `(x,y) → (x·sx, y·sy)`.
+    pub fn map_point(self, p: Vec2D, w: f32, h: f32) -> Vec2D {
+        match self {
+            CanvasTransform::FlipHorizontal => Vec2D::new(w - p.x, p.y),
+            CanvasTransform::RotateCcw => Vec2D::new(p.y, w - p.x),
+            CanvasTransform::RotateCw => Vec2D::new(h - p.y, p.x),
+            CanvasTransform::Scale { sx, sy } => Vec2D::new(p.x * sx, p.y * sy),
+        }
+    }
+
+    /// Map a RELATIVE offset vector (the translation component cancels):
+    /// flip negates x; CCW sends `(dx,dy) → (dy, −dx)`; CW sends
+    /// `(dx,dy) → (−dy, dx)`; scale multiplies per axis. Used by the
+    /// offset-encoded freehand strokes (brush / highlighter / spotlight).
+    pub fn map_offset(self, d: Vec2D) -> Vec2D {
+        match self {
+            CanvasTransform::FlipHorizontal => Vec2D::new(-d.x, d.y),
+            CanvasTransform::RotateCcw => Vec2D::new(d.y, -d.x),
+            CanvasTransform::RotateCw => Vec2D::new(-d.y, d.x),
+            CanvasTransform::Scale { sx, sy } => Vec2D::new(d.x * sx, d.y * sy),
+        }
+    }
+
+    /// Map an axis-aligned rect by mapping opposite corners and
+    /// re-canonicalizing (flip/90°/scale all keep boxes axis-aligned).
+    pub fn map_rect(self, r: Rect, w: f32, h: f32) -> Rect {
+        Rect::from_corners(
+            self.map_point(r.top_left(), w, h),
+            self.map_point(r.bottom_right(), w, h),
+        )
+    }
+
+    /// New `(width, height)` after applying to a `w`×`h` image.
+    pub fn new_size(self, w: f32, h: f32) -> (f32, f32) {
+        match self {
+            CanvasTransform::FlipHorizontal => (w, h),
+            CanvasTransform::RotateCcw | CanvasTransform::RotateCw => (h, w),
+            CanvasTransform::Scale { sx, sy } => (w * sx, h * sy),
+        }
+    }
+
+    /// The transform that exactly undoes `self` (applied to the
+    /// POST-`self` geometry): flip is self-inverse, CCW↔CW, scale
+    /// reciprocates per axis.
+    pub fn inverse(self) -> CanvasTransform {
+        match self {
+            CanvasTransform::FlipHorizontal => CanvasTransform::FlipHorizontal,
+            CanvasTransform::RotateCcw => CanvasTransform::RotateCw,
+            CanvasTransform::RotateCw => CanvasTransform::RotateCcw,
+            CanvasTransform::Scale { sx, sy } => CanvasTransform::Scale {
+                sx: 1.0 / sx,
+                sy: 1.0 / sy,
+            },
+        }
+    }
+}
+
 pub trait Drawable: DrawableClone + Debug {
     fn draw(&self, canvas: &mut Canvas<OpenGl>, font: FontId, bounds: (Vec2D, Vec2D))
     -> Result<()>;
@@ -351,6 +443,14 @@ pub trait Drawable: DrawableClone + Debug {
     /// Default is a no-op so non-movable drawables (e.g. crop overlays) don't need
     /// to implement it.
     fn translate(&mut self, _delta: Vec2D) {}
+
+    /// Remap this drawable's geometry for a whole-canvas flip/rotate so
+    /// annotations move WITH the image (non-destructive — no
+    /// rasterizing). `w`/`h` are the PRE-transform image dimensions.
+    /// Vector shapes fully transform; text repositions but stays upright
+    /// and readable; pasted images also transform their pixels. Default
+    /// no-op for drawables with no image-space geometry.
+    fn apply_canvas_transform(&mut self, _t: CanvasTransform, _w: f32, _h: f32) {}
 
     /// Handles to expose for direct manipulation when this drawable is selected.
     /// Default is empty (move-only).
@@ -972,6 +1072,23 @@ pub enum UndoAction {
         applied_offset: Vec2D,
         translated_ids: Vec<DrawableId>,
     },
+    /// A whole-canvas geometry op (flip / rotate / image-resize). Holds
+    /// the background + protected-rect to swap back in, and the geometry
+    /// `transform` (with the dims `w`/`h` it maps in) to apply to every
+    /// live drawable. On apply-inverse it swaps the raster and remaps the
+    /// drawables, returning the opposite op (post-image + inverse
+    /// transform). The raster is restored from the stored snapshot, so a
+    /// resize undo is lossless even though the forward resample isn't.
+    /// No `translate_history` is needed: this op sits on the undo stack,
+    /// so LIFO ordering guarantees it's reversed before any older
+    /// annotation snapshot (captured in the prior space) is touched.
+    CanvasOp {
+        image: gtk::gdk_pixbuf::Pixbuf,
+        original_rect: Rect,
+        transform: CanvasTransform,
+        w: f32,
+        h: f32,
+    },
 }
 
 pub use arrow::{ArrowStyle, ArrowTool};
@@ -1015,13 +1132,13 @@ impl Tools {
         match self {
             Tools::Pointer => "Pointer",
             Tools::Crop => "Crop",
-            Tools::Brush => "Brush",
+            Tools::Brush => "Pen",
             Tools::Line => "Line",
             Tools::Arrow => "Arrow",
             Tools::Rectangle => "Rectangle",
             Tools::Ellipse => "Ellipse",
             Tools::Text => "Text",
-            Tools::Marker => "Numbered Marker",
+            Tools::Marker => "Counter",
             Tools::Blur => "Blur",
             Tools::Highlighter => "Highlighter",
             Tools::Spotlight => "Spotlight",
@@ -1030,7 +1147,7 @@ impl Tools {
 
     /// Starting annotation size for a tool when the user has saved no
     /// per-tool default. `None` means "use the global default"
-    /// (Medium); Numbered Markers read best at the small size.
+    /// (Medium); Counters read best at the small size.
     pub fn builtin_default_size(&self) -> Option<crate::style::Size> {
         match self {
             Tools::Marker => Some(crate::style::Size::Small),
@@ -1286,5 +1403,134 @@ mod resize_constraint_tests {
         // Final: top=30, bottom=70, height=40 — symmetric about y=50.
         approx(after_second.top_left(), vec(0.0, 30.0));
         approx(after_second.bottom_right(), vec(100.0, 70.0));
+    }
+}
+
+#[cfg(test)]
+mod canvas_transform_tests {
+    use super::*;
+
+    fn v(x: f32, y: f32) -> Vec2D {
+        Vec2D::new(x, y)
+    }
+
+    fn close(a: Vec2D, b: Vec2D) {
+        assert!(
+            (a.x - b.x).abs() < 1e-4 && (a.y - b.y).abs() < 1e-4,
+            "expected {b:?}, got {a:?}"
+        );
+    }
+
+    // Image is 100 wide × 60 tall.
+    const W: f32 = 100.0;
+    const H: f32 = 60.0;
+
+    #[test]
+    fn flip_maps_point_about_vertical_centerline() {
+        let t = CanvasTransform::FlipHorizontal;
+        close(t.map_point(v(0.0, 10.0), W, H), v(100.0, 10.0));
+        close(t.map_point(v(100.0, 10.0), W, H), v(0.0, 10.0));
+        close(t.map_point(v(30.0, 45.0), W, H), v(70.0, 45.0));
+        assert_eq!(t.new_size(W, H), (W, H));
+    }
+
+    #[test]
+    fn flip_is_its_own_inverse() {
+        let t = CanvasTransform::FlipHorizontal;
+        let p = v(37.0, 12.0);
+        close(t.map_point(t.map_point(p, W, H), W, H), p);
+    }
+
+    #[test]
+    fn rotate_ccw_maps_corners_and_swaps_size() {
+        let t = CanvasTransform::RotateCcw;
+        // (x,y) -> (y, W - x). Top-right -> top-left, etc.
+        close(t.map_point(v(0.0, 0.0), W, H), v(0.0, 100.0));
+        close(t.map_point(v(100.0, 0.0), W, H), v(0.0, 0.0));
+        close(t.map_point(v(0.0, 60.0), W, H), v(60.0, 100.0));
+        assert_eq!(t.new_size(W, H), (H, W));
+    }
+
+    #[test]
+    fn rotate_ccw_four_times_is_identity() {
+        let p = v(23.0, 41.0);
+        // Each turn swaps dims, so feed the current dims each time.
+        let t = CanvasTransform::RotateCcw;
+        let (mut w, mut h) = (W, H);
+        let mut q = p;
+        for _ in 0..4 {
+            q = t.map_point(q, w, h);
+            let (nw, nh) = t.new_size(w, h);
+            w = nw;
+            h = nh;
+        }
+        close(q, p);
+    }
+
+    #[test]
+    fn offset_has_no_translation_component() {
+        // An offset transforms like the difference of two mapped points.
+        let t = CanvasTransform::RotateCcw;
+        let a = v(10.0, 20.0);
+        let b = v(35.0, 50.0);
+        let off = b - a;
+        let mapped = t.map_point(b, W, H) - t.map_point(a, W, H);
+        close(t.map_offset(off), mapped);
+
+        let f = CanvasTransform::FlipHorizontal;
+        let mapped_f = f.map_point(b, W, H) - f.map_point(a, W, H);
+        close(f.map_offset(off), mapped_f);
+    }
+
+    #[test]
+    fn scale_multiplies_points_offsets_and_rects() {
+        let t = CanvasTransform::Scale { sx: 2.0, sy: 0.5 };
+        close(t.map_point(v(10.0, 20.0), W, H), v(20.0, 10.0));
+        // offsets scale like points (no translation component).
+        close(t.map_offset(v(4.0, 8.0)), v(8.0, 4.0));
+        let r = t.map_rect(Rect::new(v(5.0, 10.0), v(10.0, 20.0)), W, H);
+        close(r.pos, v(10.0, 5.0));
+        close(r.size, v(20.0, 10.0));
+        assert_eq!(t.new_size(W, H), (W * 2.0, H * 0.5));
+    }
+
+    #[test]
+    fn inverse_round_trips_a_point_for_each_op() {
+        // For each op T: applying T then T.inverse() (at the post-T dims)
+        // returns the original point — the invariant undo relies on.
+        let p = v(23.0, 41.0);
+        for t in [
+            CanvasTransform::FlipHorizontal,
+            CanvasTransform::RotateCcw,
+            CanvasTransform::RotateCw,
+            CanvasTransform::Scale { sx: 2.0, sy: 0.5 },
+        ] {
+            let fwd = t.map_point(p, W, H);
+            let (pw, ph) = t.new_size(W, H); // dims after T
+            let back = t.inverse().map_point(fwd, pw, ph);
+            close(back, p);
+        }
+    }
+
+    #[test]
+    fn rotate_cw_is_inverse_of_ccw() {
+        assert_eq!(
+            CanvasTransform::RotateCcw.inverse(),
+            CanvasTransform::RotateCw
+        );
+        assert_eq!(
+            CanvasTransform::RotateCw.inverse(),
+            CanvasTransform::RotateCcw
+        );
+    }
+
+    #[test]
+    fn map_rect_stays_axis_aligned_and_canonical() {
+        let t = CanvasTransform::RotateCcw;
+        let r = Rect::new(v(10.0, 5.0), v(20.0, 15.0));
+        let m = t.map_rect(r, W, H);
+        // size swaps under a quarter turn; result is canonical (non-negative).
+        close(m.size, v(15.0, 20.0));
+        assert!(m.size.x >= 0.0 && m.size.y >= 0.0);
     }
 }

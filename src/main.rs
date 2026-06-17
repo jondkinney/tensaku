@@ -36,6 +36,8 @@ mod desktop_install;
 mod display;
 mod doctor;
 mod femtovg_area;
+mod glyph_font;
+mod hypr;
 mod icons;
 mod ime;
 mod math;
@@ -165,7 +167,15 @@ struct App {
     /// single row; `None` until the first such measurement. This width
     /// is the wrap breakpoint: once the window is narrower, left and
     /// right drop to a row below (and the tool FlowBox itself wraps).
+    ///
+    /// Kept PER MODE: the crop-mode top bar (tiny indicator vs the wide
+    /// Cancel/Crop cluster) wants a very different width than the normal
+    /// tool bar, so a single shared cache made one view inherit the
+    /// other's breakpoint — e.g. visiting Crop then returning left the
+    /// main bar stacked at a width where it actually fits on one row.
     toolbar_single_row_min_width: Option<i32>,
+    /// Crop-mode counterpart of `toolbar_single_row_min_width`.
+    toolbar_single_row_min_width_crop: Option<i32>,
 }
 
 #[derive(Debug)]
@@ -215,6 +225,14 @@ enum AppInput {
         width: i32,
         height: i32,
     },
+    /// Canvas Tab navigation. `FocusTopBarStart` focuses the first control
+    /// of the top toolbar (Tab from the canvas); `FocusBottomBarEnd` the
+    /// last control of the bottom bar (Shift+Tab). The bars' own seam
+    /// controllers carry the cycle the rest of the way. `FocusZoomIndicator`
+    /// is the legacy crop hand-off into the bottom bar's zoom control.
+    FocusTopBarStart,
+    FocusBottomBarEnd,
+    FocusZoomIndicator,
     /// Open the Preferences dialog (gear button or Ctrl+,).
     OpenPreferences,
     /// Re-launch the welcome dialog. Triggered by the "?" button
@@ -310,8 +328,11 @@ enum AppCommandOutput {
 /// single-row width before a wrapped bar springs back to one row.
 /// The wrap-*down* point is the measured width itself (icons just
 /// touching); this gap only delays the wrap-*up* so a drag-resize
-/// hovering at the boundary doesn't flicker between layouts.
-const TOP_BAR_WRAP_HYSTERESIS: i32 = 60;
+/// hovering at the boundary doesn't flicker between layouts. Kept small
+/// so the bar pops back to one line almost as soon as it fits — the
+/// measurement is deterministic, so only a thin anti-jitter buffer is
+/// needed.
+const TOP_BAR_WRAP_HYSTERESIS: i32 = 16;
 
 /// Slack (CSS px) added to the measured single-row width when
 /// flooring the *initial* window size, so compositor rounding around
@@ -517,11 +538,32 @@ impl App {
     /// side clusters are re-parented onto a second row, so the bar no
     /// longer measures its one-row width.
     fn measure_toolbar_single_row(&self) -> Option<i32> {
-        let (_, natural, _, _) = self
+        // The top bar's outer Box wraps a `CenterBox` (start | center | end).
+        // Measuring the outer/CenterBox NATURAL width gives `center +
+        // 2×max(start, end)` — it reserves symmetric side room to keep the
+        // tools dead-centered — which is wider than where the bar actually
+        // wraps. The bar fits on one row down to the PACKED width
+        // `start + center + end` (at which the center slot still equals the
+        // tools' one-row natural); below that the center FlowBox wraps. So sum
+        // the three slots. This value is used as BOTH the wrap threshold and
+        // the crop-resize width floor, so the window can shrink to where the
+        // bar is genuinely tight without wrapping it. A few px of slack keeps
+        // it off the exact wrap boundary.
+        let centerbox = self
             .tools_toolbar
             .widget()
-            .measure(gtk::Orientation::Horizontal, -1);
-        (natural > 0).then_some(natural)
+            .first_child()
+            .and_then(|c| c.downcast::<gtk::CenterBox>().ok())?;
+        let packed: i32 = [
+            centerbox.start_widget(),
+            centerbox.center_widget(),
+            centerbox.end_widget(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|slot| slot.measure(gtk::Orientation::Horizontal, -1).1)
+        .sum();
+        (packed > 0).then_some(packed)
     }
 
     fn resize_window_initial(&self, root: &Window, sender: ComponentSender<Self>) {
@@ -827,14 +869,24 @@ impl Component for App {
                 // touch (see `measure_toolbar_single_row`). Re-measure
                 // every Normal frame; in Wrap layout the bar can't be
                 // measured for this, so the last value stays cached.
+                // Crop and normal views measure into SEPARATE caches so
+                // neither inherits the other's (very different) breakpoint.
+                let is_crop = self.current_tool == Tools::Crop;
                 if self.tools_toolbar_layout == TopBarLayout::Normal
                     && let Some(single_row) = self.measure_toolbar_single_row()
                 {
-                    self.toolbar_single_row_min_width = Some(single_row);
+                    if is_crop {
+                        self.toolbar_single_row_min_width_crop = Some(single_row);
+                    } else {
+                        self.toolbar_single_row_min_width = Some(single_row);
+                    }
                 }
-                let wrap_at = self
-                    .toolbar_single_row_min_width
-                    .unwrap_or(TOP_BAR_SINGLE_ROW_FALLBACK_WIDTH);
+                let wrap_at = if is_crop {
+                    self.toolbar_single_row_min_width_crop
+                } else {
+                    self.toolbar_single_row_min_width
+                }
+                .unwrap_or(TOP_BAR_SINGLE_ROW_FALLBACK_WIDTH);
                 // Two-state hysteresis: drop to two rows the moment
                 // the window is narrower than that width; spring
                 // back only once it clears that width plus a margin.
@@ -982,6 +1034,15 @@ impl Component for App {
                     .sender()
                     .emit(ToolsToolbarInput::CropDimensionsChanged { width, height });
             }
+            AppInput::FocusTopBarStart => {
+                focus_first(&self.tools_toolbar.widget().clone().upcast::<gtk::Widget>());
+            }
+            AppInput::FocusBottomBarEnd => {
+                focus_last(&self.bottom_row.clone().upcast::<gtk::Widget>());
+            }
+            AppInput::FocusZoomIndicator => {
+                self.zoom_indicator.widget().grab_focus();
+            }
             AppInput::OpenPreferences => {
                 ui::preferences::open(
                     root,
@@ -1066,36 +1127,59 @@ impl Component for App {
                     .emit(StyleToolbarInput::SetCurrentSize(size));
             }
             AppInput::ContentSizeChanged { width, height } => {
-                // Fit the window around the new content — applied via
-                // `set_default_size`, which Wayland's compositor will
-                // generally honor as a resize request. Uses the same
-                // fractional `capture_scale` as the initial-resize
-                // path to convert capture-native pixels into the
-                // window's CSS-px coord system.
+                // Fit the window around the new content (crop commit / revert /
+                // auto-grow). Uses the same fractional `capture_scale` as the
+                // initial-resize path to convert capture-native pixels into the
+                // window's logical-px coord system.
                 let scale = Self::capture_scale(root) as f64;
                 let scaled_w = width as f64 / scale;
                 let scaled_h = height as f64 / scale;
                 let monitor = Self::get_monitor_size(root);
                 let (w, h) = Self::window_size_for_content(scaled_w, scaled_h, monitor);
-                root.set_default_size(w, h);
-                // GTK4's `set_default_size` reliably sizes a fresh
-                // window but is mostly a hint once the window is
-                // mapped — most compositors only honor the initial
-                // configure, not later default-size changes. Force a
-                // hard re-allocation by pinning the size via
-                // `set_size_request` so the compositor's next
-                // configure round-trip uses these dimensions, then
-                // clear the request once the resize has settled so
-                // the user can still drag the window's edges to
-                // resize manually afterwards.
-                root.set_size_request(w, h);
-                let root_clone = root.clone();
-                gtk::glib::timeout_add_local_once(
-                    std::time::Duration::from_millis(50),
-                    move || {
-                        root_clone.set_size_request(-1, -1);
-                    },
-                );
+                // Floor the width at the top bar's single-row width so a
+                // programmatic resize (e.g. committing a crop) never forces the
+                // bar to wrap to two rows — "the act of cropping sets the width
+                // too". Take the wider of the measured normal/crop bar widths
+                // so neither wraps, capped at 90% of the screen. The user can
+                // still drag the window narrower (a manual choice; GTK's
+                // natural min permits the wrap), and a tiling WM forcing a
+                // narrow width still wraps — we only set the floor for the
+                // resize WE perform.
+                let single_row = self
+                    .toolbar_single_row_min_width
+                    .into_iter()
+                    .chain(self.toolbar_single_row_min_width_crop)
+                    .max()
+                    .unwrap_or(TOP_BAR_SINGLE_ROW_FALLBACK_WIDTH);
+                let single_row = match monitor {
+                    Some(m) => single_row.min((m.width() as f64 * 0.90) as i32),
+                    None => single_row,
+                };
+                let w = w.max(single_row);
+                // Prefer Hyprland's own resize dispatch: because the compositor
+                // performs the resize it updates the window's STORED floating
+                // size, so the new size survives a later move. The portable
+                // path below (`set_default_size` + a transient `size_request`
+                // pin) is only a request — the compositor reverts it to the
+                // stored size on the next configure, which is the long-standing
+                // "window snaps back when you move it" problem. `resize_self`
+                // is best-effort and returns false off-Hyprland or on any IPC
+                // error, so we degrade cleanly to the portable behaviour.
+                if !hypr::resize_self(w, h) {
+                    root.set_default_size(w, h);
+                    // `set_default_size` is mostly a hint once mapped, so force
+                    // a configure round-trip by pinning the size, then clear it
+                    // after the resize settles so the user can still drag the
+                    // window edges.
+                    root.set_size_request(w, h);
+                    let root_clone = root.clone();
+                    gtk::glib::timeout_add_local_once(
+                        std::time::Duration::from_millis(50),
+                        move || {
+                            root_clone.set_size_request(-1, -1);
+                        },
+                    );
+                }
             }
             AppInput::ImageDimensionsChanged { width, height } => {
                 // Update the underlying image_dimensions field so the
@@ -1276,6 +1360,9 @@ impl Component for App {
                     SketchBoardOutput::CropEditDimensions { width, height } => {
                         AppInput::CropEditDimensions { width, height }
                     }
+                    SketchBoardOutput::FocusTopBarStart => AppInput::FocusTopBarStart,
+                    SketchBoardOutput::FocusBottomBarEnd => AppInput::FocusBottomBarEnd,
+                    SketchBoardOutput::FocusZoom => AppInput::FocusZoomIndicator,
                     SketchBoardOutput::OpenPreferences => AppInput::OpenPreferences,
                     SketchBoardOutput::OpenWelcomeDialog => AppInput::OpenWelcomeDialog,
                     SketchBoardOutput::AnnotationFactorChanged(v) => {
@@ -1406,7 +1493,12 @@ impl Component for App {
         let snap_to_edges_check = gtk::CheckButton::builder()
             .label("Snap to edges")
             .active(snap_initial)
-            .focusable(false)
+            .focusable(true)
+            // Center vertically (like the zoom indicator / revert button)
+            // so it keeps its natural height instead of stretching to the
+            // 58 px row — otherwise its keyboard focus ring spans the
+            // whole row height and reads as oversized.
+            .valign(gtk::Align::Center)
             .visible(false)
             .build();
         // Custom CSS class trims the indicator + label down to match the
@@ -1460,7 +1552,7 @@ impl Component for App {
         // the CenterBox's end-widget slot would expand it vertically.
         let revert_button = gtk::Button::builder()
             .label("Revert to Original")
-            .focusable(false)
+            .focusable(true)
             .hexpand(false)
             .visible(false)
             .valign(gtk::Align::Center)
@@ -1575,6 +1667,7 @@ impl Component for App {
             cycle_toast_timer,
             tools_toolbar_layout: ui::toolbars::TopBarLayout::Normal,
             toolbar_single_row_min_width: None,
+            toolbar_single_row_min_width_crop: None,
         };
 
         // Apply the initial tool's snap-control visibility — these
@@ -1621,6 +1714,28 @@ impl Component for App {
             });
 
         let widgets = view_output!();
+
+        // Keyboard focus loop: top bar → bottom bar → wrap, skipping the
+        // canvas. GTK already traverses *within* each bar for free (tree
+        // order) and wraps at the window's first/last focusable widget,
+        // but the canvas sits between the two bars in the tree, so plain
+        // Tab/Shift+Tab at a bar's edge lands on it. These two seam
+        // controllers detect when focus is at a bar's first/last focusable
+        // control and hop straight to the other bar, bypassing the canvas.
+        // Mode-agnostic: in Crop mode the bars expose the crop controls,
+        // in Normal mode the tool/colour controls — `collect_focusable`
+        // walks whatever is currently visible, so it follows the controls
+        // as they appear and disappear. The canvas itself routes its own
+        // Tab/Shift+Tab into the bars (see SketchBoard's key controller →
+        // FocusTopBarStart / FocusBottomBarEnd).
+        {
+            let top = model.tools_toolbar.widget().clone().upcast::<gtk::Widget>();
+            let bottom = model.bottom_row.clone().upcast::<gtk::Widget>();
+            let sketch = model.sketch_board.sender().clone();
+            let snap = model.snap_to_edges_check.clone();
+            install_loop_controller(&top, bottom.clone(), sketch.clone(), snap.clone());
+            install_loop_controller(&bottom, top, sketch, snap);
+        }
 
         if APP_CONFIG.read().focus_toggles_toolbars() {
             let motion_controller = gtk::EventControllerMotion::builder().build();
@@ -1688,6 +1803,209 @@ impl Component for App {
 
         ComponentParts { model, widgets }
     }
+}
+
+/// Depth-first collect every currently tab-reachable control under `w`, in
+/// tree (Tab) order. A focusable widget is treated as ATOMIC — we push it
+/// and do NOT descend into it (matching GTK: you tab to a control, not into
+/// its internals). Whole subtrees whose root is hidden are skipped, so the
+/// list tracks exactly what Tab can land on right now — controls that come
+/// and go (crop vs normal clusters, per-tool style pickers, the
+/// conditionally-shown Save/Revert buttons) are included or dropped
+/// automatically.
+fn collect_focusable(w: &gtk::Widget, out: &mut Vec<gtk::Widget>) {
+    if !w.get_visible() {
+        return;
+    }
+    // A GtkFlowBoxChild (the wrapper the tool FlowBox puts around each
+    // button) is focusable, but we want the inner button to be the stop —
+    // treat the wrapper as transparent and descend through it.
+    if w.is_focusable() && !w.is::<gtk::FlowBoxChild>() {
+        out.push(w.clone());
+        return;
+    }
+    let mut child = w.first_child();
+    while let Some(c) = child {
+        collect_focusable(&c, out);
+        child = c.next_sibling();
+    }
+}
+
+/// Focus the first / last currently tab-reachable control in `container`.
+fn focus_first(container: &gtk::Widget) {
+    let mut list = Vec::new();
+    collect_focusable(container, &mut list);
+    if let Some(w) = list.first() {
+        w.grab_focus();
+    }
+}
+fn focus_last(container: &gtk::Widget) {
+    let mut list = Vec::new();
+    collect_focusable(container, &mut list);
+    if let Some(w) = list.last() {
+        w.grab_focus();
+    }
+}
+
+/// Install a capture-phase keyboard handler that drives the focus loop for
+/// one bar (`this`) and wraps into the other (`other`), bypassing the
+/// canvas that sits between them in the widget tree.
+///
+/// Tab stepping is driven EXPLICITLY off `collect_focusable` rather than
+/// GTK's native traversal: `grab_focus` is called on the next/previous
+/// collected control. This is what makes each tool button a discrete stop
+/// even though they live in a FlowBox (whose native focus model treats the
+/// whole group as one Tab stop with arrow-key nav). At a bar's edge, focus
+/// wraps to the other bar's first/last control.
+///
+/// Esc refocuses the canvas, but only outside Crop mode (gated on the snap
+/// checkbox's visibility) — in Crop, Esc still cancels the crop via the
+/// toolbar's own handler.
+fn install_loop_controller(
+    this: &gtk::Widget,
+    other: gtk::Widget,
+    sketch: relm4::Sender<SketchBoardInput>,
+    snap_check: gtk::CheckButton,
+) {
+    let this_for = this.clone();
+    let key = gtk::EventControllerKey::new();
+    key.set_propagation_phase(gtk::PropagationPhase::Capture);
+    key.connect_key_pressed(move |_, keyval, _, state| {
+        use gtk::gdk::{Key, ModifierType};
+
+        if keyval == Key::Escape {
+            // Let an open popover (zoom menu, colour picker, …) swallow Esc
+            // to close itself rather than acting on the bar.
+            let in_popover = {
+                let mut node = this_for
+                    .root()
+                    .and_then(|r| relm4::gtk::prelude::RootExt::focus(&r));
+                let mut found = false;
+                while let Some(w) = node {
+                    if w.is::<gtk::Popover>() {
+                        found = true;
+                        break;
+                    }
+                    node = w.parent();
+                }
+                found
+            };
+            if in_popover {
+                return gtk::glib::Propagation::Proceed;
+            }
+            if snap_check.get_visible() {
+                // Crop mode: Esc cancels the crop from ANY focused control.
+                // The top bar's own controller already does this, but the
+                // bottom bar (reachable by Tab/arrows) had no Esc handler,
+                // so the crop — and its edit handles — never cleared.
+                sketch.emit(SketchBoardInput::ToolbarEvent(ToolbarEvent::CancelCrop));
+            } else {
+                sketch.emit(SketchBoardInput::FocusCanvas);
+            }
+            return gtk::glib::Propagation::Stop;
+        }
+
+        // Arrow-key navigation: Left/Up = previous control, Right/Down =
+        // next, behaving exactly like Tab/Shift+Tab — at a bar's edge they
+        // cross into the other bar (e.g. Right off the settings cog jumps to
+        // the bottom row). GTK gives the plain-box clusters this for free
+        // (directional focus), but the tool FlowBox swallows arrows for its
+        // own child nav — which our explicit grab-focus setup breaks.
+        // Driving arrows off `collect_focusable` makes every control, tools
+        // included, arrow-reachable and consistent. Only plain (unmodified)
+        // arrows, and skipped when focus is in a control that uses arrows
+        // itself (text entry, slider, dropdown) so those keep native arrows.
+        let mods = state
+            & (ModifierType::CONTROL_MASK
+                | ModifierType::SHIFT_MASK
+                | ModifierType::ALT_MASK
+                | ModifierType::SUPER_MASK);
+        let arrow_prev = matches!(keyval, Key::Left | Key::Up) && mods.is_empty();
+        let arrow_next = matches!(keyval, Key::Right | Key::Down) && mods.is_empty();
+        if arrow_prev || arrow_next {
+            let Some(focused) = this_for
+                .root()
+                .and_then(|r| relm4::gtk::prelude::RootExt::focus(&r))
+            else {
+                return gtk::glib::Propagation::Proceed;
+            };
+            let mut node = Some(focused.clone());
+            while let Some(w) = node {
+                if w.is::<gtk::Entry>()
+                    || w.is::<gtk::Text>()
+                    || w.is::<gtk::Scale>()
+                    || w.is::<gtk::SpinButton>()
+                    || w.is::<gtk::DropDown>()
+                {
+                    return gtk::glib::Propagation::Proceed;
+                }
+                node = w.parent();
+            }
+            let mut list = Vec::new();
+            collect_focusable(&this_for, &mut list);
+            let Some(pos) = list
+                .iter()
+                .position(|w| *w == focused || focused.is_ancestor(w))
+            else {
+                return gtk::glib::Propagation::Proceed;
+            };
+            // Same edge behaviour as Tab/Shift+Tab: cross into the other
+            // bar rather than cycling within this one.
+            if arrow_next {
+                if pos + 1 == list.len() {
+                    focus_first(&other);
+                } else {
+                    list[pos + 1].grab_focus();
+                }
+            } else if pos == 0 {
+                focus_last(&other);
+            } else {
+                list[pos - 1].grab_focus();
+            }
+            return gtk::glib::Propagation::Stop;
+        }
+
+        let is_tab = keyval == Key::Tab || keyval == Key::ISO_Left_Tab;
+        if !is_tab {
+            return gtk::glib::Propagation::Proceed;
+        }
+        // Shift+Tab surfaces either as Tab+SHIFT or the ISO_Left_Tab keyval
+        // depending on the layout — accept both.
+        let shift = state.contains(ModifierType::SHIFT_MASK) || keyval == Key::ISO_Left_Tab;
+
+        let Some(focused) = this_for
+            .root()
+            .and_then(|r| relm4::gtk::prelude::RootExt::focus(&r))
+        else {
+            return gtk::glib::Propagation::Proceed;
+        };
+        let mut list = Vec::new();
+        collect_focusable(&this_for, &mut list);
+        // Match the focused widget to a collected control by identity OR
+        // ancestry: compound controls (MenuButton, DropDown) delegate focus
+        // to an inner child, so `root().focus()` returns that descendant
+        // rather than the outer widget we collected.
+        let Some(pos) = list
+            .iter()
+            .position(|w| *w == focused || focused.is_ancestor(w))
+        else {
+            return gtk::glib::Propagation::Proceed;
+        };
+
+        if shift {
+            if pos == 0 {
+                focus_last(&other); // wrap to end of the other bar
+            } else {
+                list[pos - 1].grab_focus();
+            }
+        } else if pos + 1 == list.len() {
+            focus_first(&other); // wrap to start of the other bar
+        } else {
+            list[pos + 1].grab_focus();
+        }
+        gtk::glib::Propagation::Stop
+    });
+    this.add_controller(key);
 }
 
 fn read_css_overrides() -> Option<String> {
@@ -1816,6 +2134,10 @@ fn start_gui(image: Pixbuf) -> Result<()> {
     };
     app.set_application_id(app_id);
     app.set_flags(ApplicationFlags::NON_UNIQUE);
+    // Register the bundled Adwaita Sans face with fontconfig before any
+    // text is laid out so the toolbar tooltips can render ⌃ ⇧ ⌥ modifier
+    // glyphs in the same face the cohort apps use.
+    glyph_font::install();
     let app = RelmApp::from_app(app).with_args(vec![]);
     relm4_icons::initialize_icons(
         icons::icon_names::GRESOURCE_BYTES,

@@ -271,14 +271,14 @@ impl FemtoVGArea {
             .drawable(id)
             .map(|d| d.clone_box())
     }
-    pub fn undo(&mut self) -> bool {
+    pub fn undo(&mut self) -> (bool, Option<(crate::tools::CanvasTransform, f32, f32)>) {
         self.imp()
             .inner()
             .as_mut()
             .expect("Did you call init before using FemtoVgArea?")
             .undo()
     }
-    pub fn redo(&mut self) -> bool {
+    pub fn redo(&mut self) -> (bool, Option<(crate::tools::CanvasTransform, f32, f32)>) {
         self.imp()
             .inner()
             .as_mut()
@@ -309,7 +309,7 @@ impl FemtoVGArea {
     pub fn auto_resize_for_drawables(
         &mut self,
         ids_to_exclude: &[DrawableId],
-    ) -> Option<(f32, f32)> {
+    ) -> Option<(crate::math::Vec2D, f32, f32)> {
         self.imp()
             .inner()
             .as_mut()
@@ -317,7 +317,7 @@ impl FemtoVGArea {
             .auto_resize_for_drawables(ids_to_exclude)
     }
 
-    pub fn flip_image_horizontal(&mut self) -> bool {
+    pub fn flip_image_horizontal(&mut self) -> Option<(f32, f32)> {
         self.imp()
             .inner()
             .as_mut()

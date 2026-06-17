@@ -26,7 +26,7 @@ use crate::{
     configuration::Action,
     math::{Vec2D, rect_ensure_in_bounds, rect_round},
     sketch_board::SketchBoardInput,
-    tools::{CropTool, Drawable, DrawableId, Stacked, Tool, UndoAction},
+    tools::{CanvasTransform, CropTool, Drawable, DrawableId, Stacked, Tool, UndoAction},
 };
 
 use super::{CANVAS_PADDING_CSS, font_stack, set_font_stack};
@@ -582,11 +582,27 @@ impl GLAreaImpl for FemtoVGArea {
             }
             let image_w = inner.background_image.width() as f32;
             let image_h = inner.background_image.height() as f32;
+            // A committed crop is a view-window — the user can only pan WITHIN
+            // the crop, so the scrollable content is the crop region, not the
+            // full image. Take the crop size when one is committed (else the
+            // full image), scaled by `effective_scale` (the real on-screen
+            // scale, which folds in crop_zoom). Using `scale_factor` × the full
+            // image was the bug: `scale_factor` is the full-image auto-fit, so
+            // after a crop / un-crop / grow sequence it left the scrollbars
+            // thinking the whole original was pannable and showed spurious
+            // bars. For the non-crop view `effective_scale == scale_factor`, so
+            // that case is unchanged.
+            let (content_w, content_h) = crop_tool
+                .borrow()
+                .get_committed_rect()
+                .filter(|(_, s)| s.x > 0.0 && s.y > 0.0)
+                .map(|(_, s)| (s.x, s.y))
+                .unwrap_or((image_w, image_h));
             let pan_info = crate::sketch_board::PanInfo {
                 drag_x: inner.drag_offset.x,
                 drag_y: inner.drag_offset.y,
-                image_w_scaled: image_w * inner.scale_factor,
-                image_h_scaled: image_h * inner.scale_factor,
+                image_w_scaled: content_w * inner.effective_scale,
+                image_h_scaled: content_h * inner.effective_scale,
                 canvas_w: canvas.width() as f32,
                 canvas_h: canvas.height() as f32,
             };
@@ -937,10 +953,16 @@ impl FemtoVgAreaMut {
     /// pre-resize state (translating them would double-apply on
     /// redo). Returns the new `(width, height)` if a resize happened,
     /// else `None`.
+    /// Returns `Some((applied_offset, new_w, new_h))` when a resize
+    /// happened. `applied_offset` is the translation added to every
+    /// drawable when top/left strips were prepended (zero for pure
+    /// right/bottom growth); callers that track image-space rects
+    /// outside the drawable list (e.g. a committed crop rect) must shift
+    /// them by it to stay aligned.
     pub fn auto_resize_for_drawables(
         &mut self,
         ids_to_exclude: &[DrawableId],
-    ) -> Option<(f32, f32)> {
+    ) -> Option<(Vec2D, f32, f32)> {
         if self.undo_stack.is_empty() {
             return None;
         }
@@ -992,7 +1014,7 @@ impl FemtoVgAreaMut {
             .pop()
             .expect("auto_resize called with empty undo stack");
         self.undo_stack.push(UndoAction::Batch(vec![resize, prior]));
-        Some((new_w as f32, new_h as f32))
+        Some((translation, new_w as f32, new_h as f32))
     }
 
     /// Replace the drawable with `id` in-place. Records a Modify undo action.
@@ -1395,22 +1417,38 @@ impl FemtoVgAreaMut {
         })
     }
 
-    pub fn undo(&mut self) -> bool {
+    /// Returns `(did_something, canvas_transform)`. The second element is
+    /// `Some((transform, w, h))` when the reversed action was a whole-
+    /// canvas op — the caller applies the same transform to the crop rect
+    /// (which isn't part of undo history) so it tracks the image.
+    pub fn undo(&mut self) -> (bool, Option<(CanvasTransform, f32, f32)>) {
         let Some(action) = self.undo_stack.pop() else {
-            return false;
+            return (false, None);
+        };
+        let applied = match &action {
+            UndoAction::CanvasOp {
+                transform, w, h, ..
+            } => Some((*transform, *w, *h)),
+            _ => None,
         };
         let inverse = self.apply_inverse(action);
         self.redo_stack.push(inverse);
-        true
+        (true, applied)
     }
 
-    pub fn redo(&mut self) -> bool {
+    pub fn redo(&mut self) -> (bool, Option<(CanvasTransform, f32, f32)>) {
         let Some(action) = self.redo_stack.pop() else {
-            return false;
+            return (false, None);
+        };
+        let applied = match &action {
+            UndoAction::CanvasOp {
+                transform, w, h, ..
+            } => Some((*transform, *w, *h)),
+            _ => None,
         };
         let inverse = self.apply_inverse(action);
         self.undo_stack.push(inverse);
-        true
+        (true, applied)
     }
 
     /// Apply the inverse of `action`, returning the action that should be pushed
@@ -1558,12 +1596,39 @@ impl FemtoVgAreaMut {
                     translated_ids,
                 }
             }
+            UndoAction::CanvasOp {
+                image,
+                original_rect,
+                transform,
+                w,
+                h,
+            } => {
+                // Swap the raster + protected rect back, and remap every
+                // live drawable by `transform` (the inverse of the op we
+                // recorded). The returned action redoes it: swap the
+                // post-op image back, apply the inverse-of-this (the
+                // forward op) at the resulting (pre-`transform`) dims.
+                let cur_image = std::mem::replace(&mut self.background_image, image);
+                self.background_image_id = None;
+                let cur_rect = std::mem::replace(&mut self.original_rect, original_rect);
+                for s in &mut self.drawables {
+                    s.drawable.apply_canvas_transform(transform, w, h);
+                }
+                let (rw, rh) = transform.new_size(w, h);
+                UndoAction::CanvasOp {
+                    image: cur_image,
+                    original_rect: cur_rect,
+                    transform: transform.inverse(),
+                    w: rw,
+                    h: rh,
+                }
+            }
         }
     }
 
     pub fn reset(&mut self) -> bool {
         let mut any = false;
-        while !self.drawables.is_empty() && self.undo() {
+        while !self.drawables.is_empty() && self.undo().0 {
             any = true;
         }
         any
@@ -1704,6 +1769,21 @@ impl FemtoVgAreaMut {
             && crop_size.x > 0.0
             && crop_size.y > 0.0
         {
+            // Defensive clamp: a committed crop rect can outlive the
+            // raster that backed its extended region — e.g. an auto-grow
+            // edge-extended the image, then an undo retracted the raster
+            // (a `ResizeCanvas` undo step) but the crop rect (NOT an undo
+            // step) stayed grown. Clamp the crop to the live image so the
+            // scissor/fit/shadow never frame pixels that no longer exist
+            // (those rendered as a black, drop-shadowed strip).
+            let img_w = self.background_image.width() as f32;
+            let img_h = self.background_image.height() as f32;
+            let cx0 = crop_pos.x.clamp(0.0, img_w);
+            let cy0 = crop_pos.y.clamp(0.0, img_h);
+            let cx1 = (crop_pos.x + crop_size.x).clamp(0.0, img_w);
+            let cy1 = (crop_pos.y + crop_size.y).clamp(0.0, img_h);
+            let crop_pos = Vec2D::new(cx0, cy0);
+            let crop_size = Vec2D::new((cx1 - cx0).max(0.0), (cy1 - cy0).max(0.0));
             // Render the committed crop at 1:1 when it fits in the
             // canvas with padding, with reduced padding when it just
             // fits the canvas, and scaled down only when it can't fit
@@ -1967,10 +2047,16 @@ impl FemtoVgAreaMut {
         // tool — the tool will render the moved/transformed copy below.
         let dragging_active = self.active_tool.borrow().dragging_drawable_id();
         let dragging_pointer = self.pointer_tool.borrow().dragging_drawable_id();
+        // Extra members of a group/move drag — skipped here so only their
+        // moved copies (drawn below) show.
+        let extra_dragging = self.pointer_tool.borrow().extra_dragging_ids();
         let selected_ids = self.pointer_tool.borrow().selected_drawables();
 
         for s in &mut self.drawables {
-            if dragging_active == Some(s.id) || dragging_pointer == Some(s.id) {
+            if dragging_active == Some(s.id)
+                || dragging_pointer == Some(s.id)
+                || extra_dragging.contains(&s.id)
+            {
                 continue;
             }
             // Layer-panel visibility: hidden drawables stay in the stack
@@ -2023,6 +2109,10 @@ impl FemtoVgAreaMut {
                 d.draw(canvas, font, bounds)?;
                 super::set_current_drawable_is_selected(false);
             }
+            // Other members of a group/move drag (Pointer as active tool).
+            for d in at.extra_dragging_drawables() {
+                d.draw(canvas, font, bounds)?;
+            }
         }
 
         // The pointer tool's working copy during an implicit-mode drag (active
@@ -2036,6 +2126,10 @@ impl FemtoVgAreaMut {
                 d.draw(canvas, font, bounds)?;
                 super::set_current_drawable_is_selected(false);
             }
+            // Other members of a group/move drag (implicit-mode pointer).
+            for d in pt.extra_dragging_drawables() {
+                d.draw(canvas, font, bounds)?;
+            }
         }
 
         // Selection overlay (marquee + handles for single selection).
@@ -2047,6 +2141,10 @@ impl FemtoVgAreaMut {
             self.drawables
                 .iter()
                 .find(|s| s.id == selected_ids[0])
+                // A hidden layer draws nothing, so it shouldn't show its
+                // selection handles either — pass None so `build_overlay`
+                // skips the handles (the marquee path is unaffected).
+                .filter(|s| s.visible)
                 .map(|s| s.drawable.as_ref())
         } else {
             None
@@ -2111,8 +2209,12 @@ impl FemtoVgAreaMut {
         let mut paths: Vec<Path> = Vec::new();
         let dragging_active = self.active_tool.borrow().dragging_drawable_id();
         let dragging_pointer = self.pointer_tool.borrow().dragging_drawable_id();
+        let extra_dragging = self.pointer_tool.borrow().extra_dragging_ids();
         for s in &self.drawables {
-            if dragging_active == Some(s.id) || dragging_pointer == Some(s.id) {
+            if dragging_active == Some(s.id)
+                || dragging_pointer == Some(s.id)
+                || extra_dragging.contains(&s.id)
+            {
                 continue;
             }
             if !s.visible {
@@ -2121,6 +2223,14 @@ impl FemtoVgAreaMut {
             if s.drawable.is_spotlight() {
                 let mut p = Path::new();
                 s.drawable.append_spotlight_path(&mut p);
+                paths.push(p);
+            }
+        }
+        // In-flight spotlight copies from a group/move drag.
+        for d in self.pointer_tool.borrow().extra_dragging_drawables() {
+            if d.is_spotlight() {
+                let mut p = Path::new();
+                d.append_spotlight_path(&mut p);
                 paths.push(p);
             }
         }
@@ -2242,34 +2352,56 @@ impl FemtoVgAreaMut {
     ///
     /// Returns `true` when the flip succeeded; `false` when the
     /// Pixbuf couldn't be flipped (out of memory).
-    pub fn flip_image_horizontal(&mut self) -> bool {
-        let Some(flipped) = self.background_image.flip(true) else {
-            return false;
+    /// Apply a whole-canvas flip/rotate to the background raster AND
+    /// every drawable (plus the undo/redo snapshots and the protected
+    /// `original_rect`), so annotations move with the image instead of
+    /// staying put — non-destructively, by remapping geometry rather
+    /// than rasterizing. Returns the NEW `(width, height)` (swapped for a
+    /// rotate), or `None` if the pixbuf transform failed.
+    fn apply_canvas_transform_all(&mut self, t: CanvasTransform) -> Option<(f32, f32)> {
+        let old_w = self.background_image.width() as f32;
+        let old_h = self.background_image.height() as f32;
+        // Transform the background pixels first (this can fail / alloc).
+        // Only flip/rotate route through here; a `Scale` (image resize)
+        // is handled by `resize_image` with `scale_simple`.
+        let new_bg = match t {
+            CanvasTransform::FlipHorizontal => self.background_image.flip(true)?,
+            CanvasTransform::RotateCcw => self
+                .background_image
+                .rotate_simple(gtk::gdk_pixbuf::PixbufRotation::Counterclockwise)?,
+            // RotateCw (undo of a rotate) and Scale (resize) restore the
+            // raster from the stored snapshot, not by re-deriving it here.
+            CanvasTransform::RotateCw | CanvasTransform::Scale { .. } => return None,
         };
-        self.background_image = flipped;
+        // Swap in the transformed raster (keeping the old one for undo),
+        // remap the live drawables + the protected rect, and record the
+        // undoable op. No history remap needed: the op sits on the undo
+        // stack, so LIFO reverses it before any older snapshot is used.
+        let prev_image = std::mem::replace(&mut self.background_image, new_bg);
         self.background_image_id = None;
-        true
+        let prev_rect = self.original_rect;
+        for s in self.drawables.iter_mut() {
+            s.drawable.apply_canvas_transform(t, old_w, old_h);
+        }
+        self.original_rect = t.map_rect(self.original_rect, old_w, old_h);
+        let new_w = self.background_image.width() as f32;
+        let new_h = self.background_image.height() as f32;
+        self.record_canvas_op(prev_image, prev_rect, t, new_w, new_h);
+        Some((new_w, new_h))
     }
 
-    /// Rotate the background image 90° counter-clockwise and
-    /// invalidate the uploaded GL texture. Returns the NEW
-    /// `(width, height)` in image-space pixels (width and height
-    /// swap) so the caller can update the crop tool's bounds and
-    /// emit a `ContentSizeChanged` to resize the window around
-    /// the rotated image.
-    ///
-    /// Drawables don't rotate with the image (same limitation as
-    /// `flip_image_horizontal`). Typical workflow is "rotate first,
-    /// annotate after".
+    /// Flip the whole canvas (background + annotations) left↔right.
+    /// Returns the new `(width, height)` (unchanged for a flip) or
+    /// `None` if the pixbuf flip failed.
+    pub fn flip_image_horizontal(&mut self) -> Option<(f32, f32)> {
+        self.apply_canvas_transform_all(CanvasTransform::FlipHorizontal)
+    }
+
+    /// Rotate the whole canvas (background + annotations) 90°
+    /// counter-clockwise. Returns the NEW `(width, height)` (swapped) so
+    /// the caller can resize the window / update crop bounds.
     pub fn rotate_image_ccw(&mut self) -> Option<(f32, f32)> {
-        let rotated = self
-            .background_image
-            .rotate_simple(gtk::gdk_pixbuf::PixbufRotation::Counterclockwise)?;
-        let new_w = rotated.width() as f32;
-        let new_h = rotated.height() as f32;
-        self.background_image = rotated;
-        self.background_image_id = None;
-        Some((new_w, new_h))
+        self.apply_canvas_transform_all(CanvasTransform::RotateCcw)
     }
 
     /// Resample the background image to the target pixel dimensions
@@ -2287,6 +2419,8 @@ impl FemtoVgAreaMut {
         if new_w <= 0 || new_h <= 0 {
             return None;
         }
+        let old_w = self.background_image.width() as f32;
+        let old_h = self.background_image.height() as f32;
         let resized = self.background_image.scale_simple(
             new_w,
             new_h,
@@ -2294,9 +2428,50 @@ impl FemtoVgAreaMut {
         )?;
         let w = resized.width() as f32;
         let h = resized.height() as f32;
+        // Scale every annotation (and the protected original rect) by the
+        // same factor so they stay aligned to the resampled background — a
+        // circle keeps circling what it circled. (Stroke widths / font
+        // sizes are styles, not geometry, so they're left as-is, matching
+        // handle-resize.) Recorded as an undoable canvas op.
+        if old_w > 0.0 && old_h > 0.0 {
+            let prev_image = self.background_image.clone();
+            let prev_rect = self.original_rect;
+            let t = CanvasTransform::Scale {
+                sx: w / old_w,
+                sy: h / old_h,
+            };
+            for s in self.drawables.iter_mut() {
+                s.drawable.apply_canvas_transform(t, old_w, old_h);
+            }
+            self.original_rect = t.map_rect(self.original_rect, old_w, old_h);
+            self.record_canvas_op(prev_image, prev_rect, t, w, h);
+        }
         self.background_image = resized;
         self.background_image_id = None;
         Some((w, h))
+    }
+
+    /// Push an undoable `CanvasOp` for a just-applied whole-canvas
+    /// transform: store the pre-op raster + protected rect and the
+    /// *inverse* transform (with the post-op dims it maps in), and clear
+    /// the redo stack. `forward` is the transform that was applied to the
+    /// live drawables; `new_w`/`new_h` are the post-op image dimensions.
+    fn record_canvas_op(
+        &mut self,
+        prev_image: Pixbuf,
+        prev_rect: crate::math::Rect,
+        forward: CanvasTransform,
+        new_w: f32,
+        new_h: f32,
+    ) {
+        self.undo_stack.push(UndoAction::CanvasOp {
+            image: prev_image,
+            original_rect: prev_rect,
+            transform: forward.inverse(),
+            w: new_w,
+            h: new_h,
+        });
+        self.redo_stack.clear();
     }
 
     /// Current image-space dimensions of the background. Used by

@@ -41,7 +41,7 @@ impl SimpleComponent for ZoomIndicator {
         gtk::MenuButton {
             add_css_class: "zoom-indicator",
             add_css_class: "flat",
-            set_focusable: false,
+            set_focusable: true,
             set_focus_on_click: false,
             set_halign: gtk::Align::Start,
             set_valign: gtk::Align::Center,
@@ -52,7 +52,7 @@ impl SimpleComponent for ZoomIndicator {
             // as the rest of the toolbar buttons — GTK's built-in
             // tooltip takes too long to surface and doesn't match the
             // chrome.
-            install_tooltip_above: "Zoom · click for presets, Super + scroll to zoom",
+            install_tooltip_above_markup: "Zoom (<span face=\"Adwaita Sans\">⌃</span> Scroll)",
 
             #[watch]
             set_label: &format_zoom(model.current_scale),

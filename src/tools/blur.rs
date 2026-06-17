@@ -14,8 +14,8 @@ use crate::{
 };
 
 use super::{
-    Drawable, DrawableClone, GLOW_COLOR, Handle, HandleId, Tool, ToolUpdateResult, Tools,
-    bbox_handles, bbox_resize, halo_in_image_units,
+    CanvasTransform, Drawable, DrawableClone, GLOW_COLOR, Handle, HandleId, Tool, ToolUpdateResult,
+    Tools, bbox_handles, bbox_resize, halo_in_image_units,
 };
 
 /// Algorithm used to obscure the region covered by a Blur drawable.
@@ -481,6 +481,19 @@ impl Drawable for Blur {
     fn translate(&mut self, delta: Vec2D) {
         self.top_left += delta;
         // Invalidate the cached blurred image — its sample location changed.
+        self.cached_image.borrow_mut().take();
+    }
+
+    fn apply_canvas_transform(&mut self, t: CanvasTransform, w: f32, h: f32) {
+        if let Some(size) = self.size {
+            let r = t.map_rect(Rect::new(self.top_left, size), w, h);
+            self.top_left = r.pos;
+            self.size = Some(r.size);
+        } else {
+            self.top_left = t.map_point(self.top_left, w, h);
+        }
+        // Sample location changed — drop the cached blur so it re-samples
+        // the transformed background.
         self.cached_image.borrow_mut().take();
     }
 
