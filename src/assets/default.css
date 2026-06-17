@@ -163,7 +163,11 @@ dropdown.compact-control > button.combo {
  * "Freeform" / "600 × 400 px" text). Scoped to the crop-mode aspect and
  * image-size controls. */
 .toolbar-top dropdown.compact-control > button label,
-.toolbar-top .image-size-menubtn > button label {
+.toolbar-top .image-size-menubtn > button label,
+/* The "pixels/percent" dropdown lives in the resize popover (a separate
+ * surface), so the `.toolbar-top` selectors above don't reach it — match it
+ * via the popover's own class so its label gets the same breathing room. */
+.resize-popover dropdown > button label {
     margin-left: 6px;
     margin-right: 6px;
 }

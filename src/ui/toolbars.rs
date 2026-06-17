@@ -4450,6 +4450,10 @@ impl Component for ToolsToolbar {
         let resize_units = StdRc::new(StdCell::new(ResizeUnits::Pixels));
 
         let resize_popover = gtk::Popover::builder().has_arrow(true).build();
+        // Tagged so CSS can give the inner "pixels/percent" dropdown the same
+        // label padding as the in-toolbar dropdowns (the toolbar-scoped rule
+        // can't reach into a popover surface). See `.resize-popover` in CSS.
+        resize_popover.add_css_class("resize-popover");
         let popover_box = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(8)
