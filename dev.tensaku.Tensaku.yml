@@ -39,11 +39,14 @@ finish-args:
 modules:
   # gtk4-layer-shell isn't part of the GNOME runtime; build it into /app
   # so the `gtk4-layer-shell` crate (scroll-capture overlay) can link it.
+  # skip the optional vapi/examples/docs outputs we don't need
   - name: gtk4-layer-shell
     buildsystem: meson
     config-opts:
       - -Dintrospection=false
       - -Dvapi=false
+      - -Dexamples=false
+      - -Ddocs=false
     sources:
       # Match the release.yml:73 workflow's pinned gtk4 version
       - type: archive
