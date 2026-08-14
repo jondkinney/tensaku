@@ -611,7 +611,7 @@ Made with [contrib.rocks](https://contrib.rocks).
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=jondkinney/tensaku&type=date&legend=top-left)](https://www.star-history.com/#jondkinney/tensaku&type=date&legend=top-left)
+[![Tensaku star history](assets/star-history.svg)](https://github.com/jondkinney/tensaku/stargazers)
 
 ## License
 
