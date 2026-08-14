@@ -769,10 +769,13 @@ impl Component for App {
             set_decorated: !APP_CONFIG.read().no_window_decoration(),
             set_default_size: (500, 500),
             add_css_class: "root",
-            set_title: match APP_CONFIG.read().title() {
-                Some(s) => Some(s.as_ref()),
-                None => None
-            },
+            set_title: Some(
+                APP_CONFIG
+                    .read()
+                    .title()
+                    .map(String::as_str)
+                    .unwrap_or("Tensaku"),
+            ),
 
             #[local_ref]
             outer_box_clone -> gtk::Box {
