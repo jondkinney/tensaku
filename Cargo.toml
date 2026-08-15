@@ -37,6 +37,7 @@ clap.workspace = true
 # configuration file
 xdg = "^3.0"
 toml = "1.1.0"
+toml_edit = "0.25.11"
 serde.workspace = true
 serde_derive = "1.0"
 hex_color = {version = "3", features = ["serde"]}
@@ -50,6 +51,14 @@ glow = "0.17.0"
 resource = "0.6.1"  # font emedding
 fontconfig = "0.10.2"  # font loading
 keycode = "1.0.0"
+
+# scroll-capture shortcut recorder: read the chord directly from evdev
+# (the WM grabs Super before GTK sees it) and resolve keysyms/modifiers
+# via the system keymap with xkbcommon — the same mechanism the cohort
+# apps (vernier / hyprcorrect) use. `evdev` is pure-Rust; `xkbcommon`
+# links libxkbcommon, which GTK/Pango already pull in.
+evdev = "0.13"
+xkbcommon = "0.8"
 
 # wayland capture (scrolling screenshots)
 wayland-client = "0.31"

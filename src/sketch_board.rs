@@ -211,6 +211,15 @@ pub struct PanInfo {
     pub canvas_h: f32,
 }
 
+/// Why the canvas's intrinsic content size changed. Main uses this to
+/// distinguish crop-view transitions (which the user can opt out of
+/// applying to the editor window) from general canvas/image resizes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentSizeChangeSource {
+    Canvas,
+    Crop,
+}
+
 #[derive(Debug, Clone)]
 pub enum SketchBoardOutput {
     ToggleToolbarsDisplay,
@@ -262,6 +271,7 @@ pub enum SketchBoardOutput {
     ContentSizeChanged {
         width: f32,
         height: f32,
+        source: ContentSizeChangeSource,
     },
     /// Underlying background-image dimensions changed (startup
     /// seed + every rotate / resize action from the crop-mode top
@@ -854,6 +864,7 @@ impl SketchBoard {
             .emit(SketchBoardOutput::ContentSizeChanged {
                 width: new_w,
                 height: new_h,
+                source: ContentSizeChangeSource::Canvas,
             });
         // The window resize triggered by `ContentSizeChanged` can
         // bounce focus off the canvas — GTK may reassign focus to
@@ -950,6 +961,7 @@ impl SketchBoard {
             .emit(SketchBoardOutput::ContentSizeChanged {
                 width: gsize.x,
                 height: gsize.y,
+                source: ContentSizeChangeSource::Crop,
             });
         self.renderer.grab_focus();
     }
@@ -1215,7 +1227,7 @@ impl SketchBoard {
                 // Store the filepath for copy-filepath action
                 *self.last_saved_filepath.borrow_mut() = Some(output_filename.clone());
                 log_result(
-                    &format!("File saved to '{}'.", &output_filename),
+                    &format!("File saved to '{}'.", output_filename),
                     !APP_CONFIG.read().disable_notifications(),
                 )
             }
@@ -1295,7 +1307,7 @@ impl SketchBoard {
                             filename = Some(output_filename.clone());
                             Self::remember_save_as_dir(Path::new(&output_filename));
                             log_result(
-                                &format!("File saved to '{}'.", &output_filename),
+                                &format!("File saved to '{}'.", output_filename),
                                 !APP_CONFIG.read().disable_notifications(),
                             )
                         }
@@ -1516,6 +1528,11 @@ impl SketchBoard {
         let (iw, ih) = self.renderer.image_dimensions();
         let (iw, ih) = (iw as f32, ih as f32);
         let committed = self.tools.get_crop_tool().borrow().get_committed_rect();
+        let source = if committed.is_some() {
+            ContentSizeChangeSource::Crop
+        } else {
+            ContentSizeChangeSource::Canvas
+        };
         // Content size is the (clamped) committed crop when one is
         // applied, else the full restored image.
         let content = match committed {
@@ -1553,6 +1570,7 @@ impl SketchBoard {
             .emit(SketchBoardOutput::ContentSizeChanged {
                 width: content.x,
                 height: content.y,
+                source,
             });
     }
 
@@ -2625,6 +2643,7 @@ impl SketchBoard {
                                 .emit(SketchBoardOutput::ContentSizeChanged {
                                     width: r.size.x,
                                     height: r.size.y,
+                                    source: ContentSizeChangeSource::Crop,
                                 });
                         }
                         // No crop: keep the pre-rotation on-screen zoom and
@@ -2638,6 +2657,7 @@ impl SketchBoard {
                                 .emit(SketchBoardOutput::ContentSizeChanged {
                                     width: new_w * preserved_zoom,
                                     height: new_h * preserved_zoom,
+                                    source: ContentSizeChangeSource::Canvas,
                                 });
                         }
                     }
@@ -2678,6 +2698,7 @@ impl SketchBoard {
                             .emit(SketchBoardOutput::ContentSizeChanged {
                                 width: new_w,
                                 height: new_h,
+                                source: ContentSizeChangeSource::Canvas,
                             });
                     }
                     // Drop any prior user zoom so the renderer's
@@ -3346,11 +3367,11 @@ impl SketchBoard {
 
     /// Bump the annotation multiplier (`style.annotation_size_factor`)
     /// by `dy`-derived steps. Applies the new factor to every selected
-    /// drawable, to the active tool's next-stroke style, and persists
-    /// it to state.toml (the multiplier no longer has a toolbar surface,
-    /// so persistence on every adjust keeps a fresh launch picking up
-    /// the user's last in-session value). A toast announces the new
-    /// value since there's no pill to read it off of anymore.
+    /// drawable, to the active tool's next-stroke style, and persists it
+    /// through the active config file. The multiplier no longer has a
+    /// toolbar surface, so persistence on every adjustment keeps a fresh
+    /// launch picking up the user's last in-session value. A toast announces
+    /// the new value since there's no pill to read it off of anymore.
     fn scroll_annotation_multiplier(&mut self, dy: f32, outer_sender: &ComponentSender<Self>) {
         let steps = self.drain_scroll_resize_steps(dy);
         if steps == 0 {
@@ -3368,6 +3389,18 @@ impl SketchBoard {
         // park between detents.
         let new_val = (new_val / ANNOTATION_STEP).round() * ANNOTATION_STEP;
         if (new_val - cur).abs() < f32::EPSILON {
+            return;
+        }
+        // Persist first so a read-only or malformed config cannot leave the
+        // canvas using a value that APP_CONFIG rejected. The typed backend
+        // updates APP_CONFIG only after the atomic write succeeds.
+        if let Err(error) = APP_CONFIG.write().save_annotation_size_factor(new_val) {
+            eprintln!("Warning: could not save annotation-size-factor: {error}");
+            outer_sender
+                .output_sender()
+                .emit(SketchBoardOutput::ShowCycleToast(
+                    "Could not save annotation size".to_string(),
+                ));
             return;
         }
         self.style.annotation_size_factor = new_val;
@@ -3407,11 +3440,6 @@ impl SketchBoard {
         self.active_tool
             .borrow_mut()
             .handle_event(ToolEvent::StyleChanged(self.style));
-        // Persist + update APP_CONFIG so the value survives a
-        // restart and any subsequent welcome-dialog logic sees the
-        // current live value.
-        crate::state::save_annotation_size_factor(new_val);
-        APP_CONFIG.write().set_annotation_size_factor(new_val);
         // The user has no on-screen value indicator now that the pill
         // is gone — surface a transient toast announcing the new
         // factor so the bump isn't silent.
@@ -4317,7 +4345,7 @@ fn build_layer_panel_footer(sender: relm4::Sender<SketchBoardInput>) -> gtk::Box
 /// fires whether or not Shift is held by mistake). Returns `None` on a
 /// malformed string so the layer-panel toggle silently disables rather
 /// than panicking on a typo.
-fn parse_shortcut(s: &str) -> Option<(gtk::gdk::Key, ModifierType)> {
+pub(crate) fn parse_shortcut(s: &str) -> Option<(gtk::gdk::Key, ModifierType)> {
     use gtk::gdk::Key;
     let mut mods = ModifierType::empty();
     let mut key: Option<Key> = None;

@@ -85,9 +85,8 @@ pub enum WelcomeDialogOutput {
     /// and applied as the live annotation factor.
     Saved(f32),
     /// User edited the spin without (yet) saving. Emitted on every
-    /// change so the Preferences dialog can mirror the value live —
-    /// the welcome modal isn't isolated from APP_CONFIG, and we don't
-    /// want the two surfaces to drift while both are open.
+    /// change so the canvas and an open Preferences dialog can preview
+    /// the value. It is not persisted until `Saved`.
     ValueChanged(f32),
 }
 

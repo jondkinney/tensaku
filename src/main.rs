@@ -21,7 +21,7 @@ use relm4::{
 use anyhow::{Context, Result, anyhow};
 use tensaku_cli::command_line::{Fullscreen, Resize, ScrollCaptureTest};
 
-use sketch_board::SketchBoardOutput;
+use sketch_board::{ContentSizeChangeSource, SketchBoardOutput};
 use ui::toolbars::{
     RobustTooltipExt, StyleToolbar, StyleToolbarInput, ToolbarEvent, ToolsToolbar,
     ToolsToolbarInput,
@@ -31,6 +31,7 @@ use ui::zoom_indicator::{ZoomIndicator, ZoomIndicatorInput, ZoomIndicatorOutput}
 use xdg::BaseDirectories;
 
 mod capture;
+mod chord_capture;
 mod configuration;
 mod desktop_install;
 mod display;
@@ -38,6 +39,7 @@ mod doctor;
 mod femtovg_area;
 mod glyph_font;
 mod hypr;
+mod hypr_bind;
 mod icons;
 mod ime;
 mod math;
@@ -69,6 +71,11 @@ macro_rules! generate_profile_output {
     };
 }
 
+struct AppInit {
+    image: Pixbuf,
+    initial_toast: Option<String>,
+}
+
 struct App {
     image_dimensions: (i32, i32),
     sketch_board: Controller<SketchBoard>,
@@ -78,9 +85,10 @@ struct App {
     outer_box: gtk::Box,
     overlay: gtk::Overlay,
     bottom_row: gtk::CenterBox,
-    /// Set when state has no persisted `annotation_size_factor` and the
-    /// welcome dialog still needs to run. Consumed by the `Realized`
-    /// handler so the dialog appears once the main window is on-screen
+    /// Set when neither config.toml nor the CLI supplied an explicit
+    /// `annotation_size_factor` and the welcome dialog still needs to run.
+    /// Consumed by the `Realized` handler so the dialog appears once the
+    /// main window is on-screen
     /// (and clears so it doesn't relaunch on subsequent realizes).
     welcome_pending: bool,
     /// Detected display scale to pre-fill the welcome dialog with.
@@ -205,6 +213,7 @@ enum AppInput {
     ContentSizeChanged {
         width: f32,
         height: f32,
+        source: ContentSizeChangeSource,
     },
     /// Background-image dimensions changed (startup, rotate, resize).
     /// Forwarded to ToolsToolbar so the "Image size: W × H px"
@@ -241,14 +250,19 @@ enum AppInput {
     /// first-run.
     OpenWelcomeDialog,
     /// First-run welcome dialog Save handler. Persists the chosen
-    /// `annotation_size_factor`, pushes it into `APP_CONFIG`, and
+    /// `annotation_size_factor` through the active config file and
     /// notifies the style toolbar so its display matches.
     WelcomeDialogSaved(f32),
     /// Centralized annotation-factor change. Either the Preferences
     /// spin or the welcome dialog's spin emits this on every value
-    /// change; App persists once and pushes the value into whichever
-    /// surface didn't originate the change so both stay in sync.
+    /// change; App persists it through the active config file and pushes the
+    /// value into whichever surface didn't originate the change so both stay
+    /// in sync.
     AnnotationFactorChanged(f32),
+    /// Live preview from the welcome guide. This updates the canvas and an
+    /// open Preferences spin, but deliberately does not persist: the guide's
+    /// "Save and continue" action is the commit point.
+    AnnotationFactorPreviewChanged(f32),
     /// "Snap to edges" checkbox toggled. Forwards as a toolbar event
     /// so sketch_board can route it into `CropTool::set_snap_to_edges`
     /// and persist via `state::save_snap_to_edges`.
@@ -298,6 +312,9 @@ enum AppInput {
     /// timer. Independent of the structured `*Cycled` events so
     /// other UI surfaces don't have to know about presentation.
     ShowCycleToast(String),
+    /// Longer-lived warning for a scroll-capture seam the user explicitly
+    /// chose to keep even though its alignment was not uniquely verifiable.
+    ShowWarningToast(String),
     /// Selected text drawable's background style — forwarded into
     /// the StyleToolbar so its dropdown re-seeds. Distinct from
     /// `TextBackgroundCycled` (which fires a toast + reapplies)
@@ -346,7 +363,32 @@ const TOP_BAR_LAUNCH_SLACK: i32 = 16;
 /// so even a fallback launch still opens on a single row.
 const TOP_BAR_SINGLE_ROW_FALLBACK_WIDTH: i32 = 900;
 
+fn should_resize_editor_window(
+    source: ContentSizeChangeSource,
+    resize_window_to_content_on_crop: bool,
+) -> bool {
+    source != ContentSizeChangeSource::Crop || resize_window_to_content_on_crop
+}
+
 impl App {
+    fn show_toast(&mut self, text: &str, duration_ms: u64) {
+        self.cycle_toast_label.set_text(text);
+        self.cycle_toast_revealer.set_reveal_child(true);
+        if let Some(id) = self.cycle_toast_timer.borrow_mut().take() {
+            id.remove();
+        }
+        let revealer = self.cycle_toast_revealer.clone();
+        let timer_slot = self.cycle_toast_timer.clone();
+        let id = gtk::glib::timeout_add_local_once(
+            std::time::Duration::from_millis(duration_ms),
+            move || {
+                revealer.set_reveal_child(false);
+                *timer_slot.borrow_mut() = None;
+            },
+        );
+        *self.cycle_toast_timer.borrow_mut() = Some(id);
+    }
+
     /// Inline "Hold Alt to disable snapping." hint visibility. It
     /// only ever shows in Crop mode AND when the top bar still
     /// fits in its 3-section Normal layout — once the window
@@ -375,21 +417,27 @@ impl App {
         let controller = connector.forward(sender.input_sender(), |out| match out {
             WelcomeDialogOutput::Saved(value) => AppInput::WelcomeDialogSaved(value),
             WelcomeDialogOutput::ValueChanged(value) => {
-                // Live-mirror into Preferences. Same handler as the
-                // Preferences spin change so persistence + push-back
-                // happens exactly once regardless of which surface
-                // the user is interacting with.
-                AppInput::AnnotationFactorChanged(value)
+                // Preview and mirror while the guide is open, but don't make
+                // first-run onboarding count as completed until Save.
+                AppInput::AnnotationFactorPreviewChanged(value)
             }
         });
-        // If the Preferences dialog is open with the current factor in
-        // its spin, the welcome modal's pre-fill (detected_scale, not
-        // necessarily what the user previously saved) would otherwise
-        // visibly disagree on launch. Push the just-rendered value back
-        // out to keep them in lockstep.
-        let _ = controller.sender().send(WelcomeDialogInput::SetValue(
-            APP_CONFIG.read().annotation_size_factor(),
-        ));
+        // Re-opening the guide after a factor has been configured should
+        // start from that effective value. On a genuine first run, leave the
+        // dialog's detected-scale prefill alone; replacing it with the 1.0
+        // built-in default would defeat the display probe that prompted the
+        // guide in the first place.
+        let configured_factor = {
+            let config = APP_CONFIG.read();
+            config
+                .annotation_size_factor_is_explicit()
+                .then(|| config.annotation_size_factor())
+        };
+        if let Some(value) = configured_factor {
+            let _ = controller
+                .sender()
+                .send(WelcomeDialogInput::SetValue(value));
+        }
         self.welcome_controller = Some(controller);
     }
 
@@ -450,13 +498,33 @@ impl App {
         self.applying_scrollbar.set(false);
     }
 
+    /// Logical geometry of the monitor the window should be sized
+    /// against. The direct GTK probe only works once the compositor
+    /// has told GTK which output the surface entered — which on
+    /// Wayland is routinely AFTER the initial-show sizing code runs,
+    /// so a `None` here used to silently skip the 90%-of-screen cap
+    /// and let a tall capture stretch the window past the desktop.
+    /// Fall back to the focused Hyprland monitor, then to any monitor
+    /// GTK knows, so a cap is effectively always available.
     fn get_monitor_size(root: &Window) -> Option<Rectangle> {
-        root.surface().and_then(|surface| {
-            DisplayManager::get()
-                .default_display()
-                .and_then(|display| display.monitor_at_surface(&surface))
-                .map(|monitor| monitor.geometry())
-        })
+        root.surface()
+            .and_then(|surface| {
+                DisplayManager::get()
+                    .default_display()
+                    .and_then(|display| display.monitor_at_surface(&surface))
+                    .map(|monitor| monitor.geometry())
+            })
+            .or_else(|| {
+                display::hyprland_focused_logical_size().map(|(w, h)| Rectangle::new(0, 0, w, h))
+            })
+            .or_else(|| {
+                let display = WidgetExt::display(root);
+                display
+                    .monitors()
+                    .item(0)
+                    .and_then(|obj| obj.downcast::<gtk::gdk::Monitor>().ok())
+                    .map(|monitor| monitor.geometry())
+            })
     }
 
     /// Integer scale factor reported by GTK — the larger of the
@@ -759,7 +827,7 @@ impl App {
 
 #[relm4::component]
 impl Component for App {
-    type Init = Pixbuf;
+    type Init = AppInit;
     type Input = AppInput;
     type Output = ();
     type CommandOutput = AppCommandOutput;
@@ -842,15 +910,21 @@ impl Component for App {
                 self.show_welcome_dialog(root, sender.clone());
             }
             AppInput::WelcomeDialogSaved(value) => {
-                state::save_annotation_size_factor(value);
-                APP_CONFIG.write().set_annotation_size_factor(value);
-                // Push directly to sketch_board so `self.style` and the
-                // active tool's preview pick up the new factor. The
-                // toolbar no longer hosts a multiplier widget — the
-                // value lives in Preferences and APP_CONFIG only.
-                self.sketch_board
-                    .sender()
-                    .emit(SketchBoardInput::SetAnnotationFactor(value));
+                let save_result = APP_CONFIG.write().save_annotation_size_factor(value);
+                match save_result {
+                    Ok(()) => {
+                        // Push directly to sketch_board so `self.style` and the
+                        // active tool's preview pick up the new factor. The
+                        // toolbar no longer hosts a multiplier widget — the
+                        // value lives in Preferences and APP_CONFIG only.
+                        self.sketch_board
+                            .sender()
+                            .emit(SketchBoardInput::SetAnnotationFactor(value));
+                    }
+                    Err(error) => {
+                        eprintln!("Warning: could not save annotation-size-factor: {error}");
+                    }
+                }
                 self.welcome_controller = None;
             }
             AppInput::SnapToEdgesToggled(value) => {
@@ -1057,11 +1131,17 @@ impl Component for App {
                 // Persist + broadcast — same effect as the
                 // WelcomeDialogSaved path but driven by either
                 // surface's live edits.
-                state::save_annotation_size_factor(value);
-                APP_CONFIG.write().set_annotation_size_factor(value);
+                let save_result = APP_CONFIG.write().save_annotation_size_factor(value);
+                let effective_value = match save_result {
+                    Ok(()) => value,
+                    Err(error) => {
+                        eprintln!("Warning: could not save annotation-size-factor: {error}");
+                        APP_CONFIG.read().annotation_size_factor()
+                    }
+                };
                 self.sketch_board
                     .sender()
-                    .emit(SketchBoardInput::SetAnnotationFactor(value));
+                    .emit(SketchBoardInput::SetAnnotationFactor(effective_value));
                 // Mirror into the OTHER surface so both stay in sync.
                 // Block the prefs spin's `value-changed` while we
                 // programmatically set it; otherwise this handler
@@ -1072,13 +1152,23 @@ impl Component for App {
                 // robust way to prove the loop can't close.
                 if let Some((spin, handler)) = self.prefs_factor_spin.borrow().as_ref() {
                     spin.block_signal(handler);
-                    spin.set_value(value as f64);
+                    spin.set_value(effective_value as f64);
                     spin.unblock_signal(handler);
                 }
                 if let Some(controller) = self.welcome_controller.as_ref() {
                     let _ = controller
                         .sender()
-                        .send(WelcomeDialogInput::SetValue(value));
+                        .send(WelcomeDialogInput::SetValue(effective_value));
+                }
+            }
+            AppInput::AnnotationFactorPreviewChanged(value) => {
+                self.sketch_board
+                    .sender()
+                    .emit(SketchBoardInput::SetAnnotationFactor(value));
+                if let Some((spin, handler)) = self.prefs_factor_spin.borrow().as_ref() {
+                    spin.block_signal(handler);
+                    spin.set_value(value as f64);
+                    spin.unblock_signal(handler);
                 }
             }
             AppInput::ZoomChanged(scale) => {
@@ -1129,7 +1219,21 @@ impl Component for App {
                     .sender()
                     .emit(StyleToolbarInput::SetCurrentSize(size));
             }
-            AppInput::ContentSizeChanged { width, height } => {
+            AppInput::ContentSizeChanged {
+                width,
+                height,
+                source,
+            } => {
+                // A crop has already updated the renderer/canvas before
+                // this notification arrives. The preference suppresses only
+                // the outer editor-window resize; the cropped image still
+                // re-fits within the existing canvas.
+                if !should_resize_editor_window(
+                    source,
+                    APP_CONFIG.read().resize_window_to_content_on_crop(),
+                ) {
+                    return;
+                }
                 // Fit the window around the new content (crop commit / revert /
                 // auto-grow). Uses the same fractional `capture_scale` as the
                 // initial-resize path to convert capture-native pixels into the
@@ -1283,26 +1387,10 @@ impl Component for App {
                     .emit(StyleToolbarInput::SetBrushPostSmooth(value));
             }
             AppInput::ShowCycleToast(text) => {
-                // Refresh the label, reveal, and reset the hide timer
-                // so rapid-fire cycles slide the deadline forward
-                // instead of stacking callbacks. `timeout_add_local_once`
-                // returns a `SourceId` that's `Drop`-cancelled on
-                // remove, so the new timer cleanly replaces the old.
-                self.cycle_toast_label.set_text(&text);
-                self.cycle_toast_revealer.set_reveal_child(true);
-                if let Some(id) = self.cycle_toast_timer.borrow_mut().take() {
-                    id.remove();
-                }
-                let revealer = self.cycle_toast_revealer.clone();
-                let timer_slot = self.cycle_toast_timer.clone();
-                let id = gtk::glib::timeout_add_local_once(
-                    std::time::Duration::from_millis(1200),
-                    move || {
-                        revealer.set_reveal_child(false);
-                        *timer_slot.borrow_mut() = None;
-                    },
-                );
-                *self.cycle_toast_timer.borrow_mut() = Some(id);
+                self.show_toast(&text, 1200);
+            }
+            AppInput::ShowWarningToast(text) => {
+                self.show_toast(&text, 4000);
             }
         }
     }
@@ -1319,11 +1407,15 @@ impl Component for App {
     }
 
     fn init(
-        image: Self::Init,
+        init: Self::Init,
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         Self::apply_style();
+        let AppInit {
+            image,
+            initial_toast,
+        } = init;
         let image_dimensions = (image.width(), image.height());
 
         // SketchBoard
@@ -1353,9 +1445,15 @@ impl Component for App {
                         AppInput::SelectionMultiAgreement { size, smooth }
                     }
                     SketchBoardOutput::ToolSizeChanged(size) => AppInput::ToolSizeChanged(size),
-                    SketchBoardOutput::ContentSizeChanged { width, height } => {
-                        AppInput::ContentSizeChanged { width, height }
-                    }
+                    SketchBoardOutput::ContentSizeChanged {
+                        width,
+                        height,
+                        source,
+                    } => AppInput::ContentSizeChanged {
+                        width,
+                        height,
+                        source,
+                    },
                     SketchBoardOutput::ImageDimensionsChanged { width, height } => {
                         AppInput::ImageDimensionsChanged { width, height }
                     }
@@ -1601,14 +1699,14 @@ impl Component for App {
             });
         }
 
-        // Determine whether the user has already committed an
-        // annotation_size_factor. If not, we'll surface the welcome
+        // Determine whether config.toml or the CLI supplied an explicit
+        // annotation_size_factor. If neither did, we'll surface the welcome
         // dialog on Realized. The detected scale is captured here so
         // the dialog can pre-fill its SpinButton — we look at Hyprland
         // first since it's the only Wayland compositor exposing
         // fractional scales reliably; everything else falls back to
         // 1.0× and the user picks their own value.
-        let welcome_pending = state::load_annotation_size_factor().is_none();
+        let welcome_pending = !APP_CONFIG.read().annotation_size_factor_is_explicit();
         let detected = display::detect_hyprland_scale();
         let detected_scale = detected.unwrap_or(1.0);
         let scale_detected = detected.is_some();
@@ -1797,6 +1895,13 @@ impl Component for App {
             }
             gtk::glib::ControlFlow::Continue
         });
+
+        if let Some(message) = initial_toast {
+            let sender = sender.clone();
+            gtk::glib::idle_add_local_once(move || {
+                sender.input(AppInput::ShowWarningToast(message));
+            });
+        }
 
         generate_profile_output!("app init end");
 
@@ -2018,7 +2123,7 @@ fn read_css_overrides() -> Option<String> {
     if !path.exists() {
         eprintln!(
             "CSS overrides file {} does not exist, using builtin CSS only.",
-            &path.display()
+            path.display()
         );
         return None;
     }
@@ -2028,7 +2133,7 @@ fn read_css_overrides() -> Option<String> {
         Err(e) => {
             eprintln!(
                 "failed to read CSS overrides from {} with error: {}",
-                &path.display(),
+                path.display(),
                 e
             );
             None
@@ -2059,15 +2164,6 @@ fn run_satty() -> Result<()> {
     // load OpenGL
     load_gl()?;
     generate_profile_output!("loaded gl");
-
-    // Fold the persisted annotation_size_factor (if any) into
-    // APP_CONFIG before launching the GUI so toolbar / sketch_board
-    // components see the saved value at init time. When nothing is
-    // persisted the welcome dialog runs on first realize and the
-    // user's chosen value flows back here through the same path.
-    if let Some(saved) = state::load_annotation_size_factor() {
-        APP_CONFIG.write().set_annotation_size_factor(saved);
-    }
 
     let image = load_input_image()?;
     start_gui(image)
@@ -2116,6 +2212,10 @@ fn load_input_image() -> Result<Pixbuf> {
 }
 
 fn start_gui(image: Pixbuf) -> Result<()> {
+    start_gui_with_toast(image, None)
+}
+
+fn start_gui_with_toast(image: Pixbuf, initial_toast: Option<String>) -> Result<()> {
     let app_id_pref = APP_CONFIG.read().app_id().map(|s| s.to_string());
     generate_profile_output!("image loaded, starting gui");
     // Pre-compute the text-band detection once on the loaded image.
@@ -2146,12 +2246,39 @@ fn start_gui(image: Pixbuf) -> Result<()> {
         icons::icon_names::GRESOURCE_BYTES,
         icons::icon_names::RESOURCE_PREFIX,
     );
-    app.run::<App>(image);
+    app.run::<App>(AppInit {
+        image,
+        initial_toast,
+    });
     Ok(())
 }
 
 fn main() -> Result<()> {
     let _ = *START_TIME;
+    // TEMP DIAGNOSTIC: TENSAKU_CAPTURE_PROBE="x,y,w,h:/out.png" captures that
+    // output-logical region via the screencopy backend and exits, bypassing
+    // GTK entirely. Used to isolate blank-capture reports to backend vs overlay.
+    if let Ok(spec) = std::env::var("TENSAKU_CAPTURE_PROBE") {
+        let (rect_s, path) = spec.split_once(':').expect("probe spec: x,y,w,h:/out.png");
+        let v: Vec<i32> = rect_s
+            .split(',')
+            .map(|s| s.trim().parse().unwrap())
+            .collect();
+        let rect = capture::Rect {
+            x: v[0],
+            y: v[1],
+            width: v[2],
+            height: v[3],
+        };
+        let pixbuf = capture::capture_region(rect)?;
+        pixbuf.savev(path, "png", &[])?;
+        eprintln!(
+            "probe: saved {}x{} to {path}",
+            pixbuf.width(),
+            pixbuf.height()
+        );
+        exit(0);
+    }
     // populate the APP_CONFIG from commandline and
     // config file. this might exit, if an error occurred.
     Configuration::load();
@@ -2189,22 +2316,29 @@ fn main() -> Result<()> {
     // blocks startup. --install-desktop stays the explicit, verbose path.
     desktop_install::ensure_first_launch();
 
-    // First-launch Omarchy wrapper: on an Omarchy session, place
-    // ~/.local/bin/tensaku-edit so the screenshot keybinds open captures
-    // in Tensaku. Silent, one-shot, best-effort; --install-omarchy-wrapper
-    // stays the explicit, verbose path.
+    // Manual/cargo-install recovery: if an Omarchy session has no packaged
+    // tensaku-edit adapter, place a user-local copy once. Current Omarchy
+    // package installs already provide and select the wrapper by default.
     omarchy_wrapper::ensure_first_launch();
 
+    // Keep an already-recorded system shortcut pointed at the stable capture
+    // launcher. In particular, migrate bindings that were recorded while a
+    // local `target/debug` build happened to be running.
+    hypr_bind::reconcile_saved_shortcut();
+
     if APP_CONFIG.read().scroll_capture() {
-        return match scroll_capture::run() {
+        let park_pointer = APP_CONFIG
+            .read()
+            .park_pointer_during_manual_scroll_capture();
+        return match scroll_capture::run(park_pointer) {
             Err(e) => {
                 eprintln!("Error: {e}");
                 Err(e)
             }
             Ok(None) => Ok(()),
-            Ok(Some(image)) => {
+            Ok(Some(outcome)) => {
                 load_gl()?;
-                start_gui(image)
+                start_gui_with_toast(outcome.image, outcome.warning)
             }
         };
     }
@@ -2226,5 +2360,34 @@ fn main() -> Result<()> {
             Err(e)
         }
         Ok(v) => Ok(v),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crop_resize_follows_positive_preference() {
+        assert!(should_resize_editor_window(
+            ContentSizeChangeSource::Crop,
+            true
+        ));
+        assert!(!should_resize_editor_window(
+            ContentSizeChangeSource::Crop,
+            false
+        ));
+    }
+
+    #[test]
+    fn canvas_resize_is_never_suppressed_by_crop_preference() {
+        assert!(should_resize_editor_window(
+            ContentSizeChangeSource::Canvas,
+            false
+        ));
+        assert!(should_resize_editor_window(
+            ContentSizeChangeSource::Canvas,
+            true
+        ));
     }
 }

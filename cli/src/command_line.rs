@@ -26,16 +26,15 @@ pub struct CommandLine {
     #[arg(long, exclusive = true)]
     pub doctor: bool,
 
-    /// Install the Omarchy screenshot wrapper (~/.local/bin/tensaku-edit)
-    /// so Omarchy's screenshot keybinds open captures in Tensaku, then
-    /// exit. Also checks that OMARCHY_SCREENSHOT_EDITOR points at it.
+    /// Reinstall the Omarchy screenshot wrapper (~/.local/bin/tensaku-edit),
+    /// then exit. Intended for cargo/manual installs and legacy recovery;
+    /// current Omarchy package installs need no setup.
     #[arg(long, exclusive = true)]
     pub install_omarchy_wrapper: bool,
 
-    /// Point Omarchy's screenshot editor at the tensaku-edit wrapper (sets
-    /// OMARCHY_SCREENSHOT_EDITOR in ~/.config/hypr/envs.conf and the running
-    /// session) and add float + center window rules for Tensaku, then exit.
-    /// Installs the wrapper first if needed; does not edit keybinds.
+    /// Legacy/custom Omarchy override: point its screenshot editor at the
+    /// tensaku-edit wrapper and add old-style float + center rules, then exit.
+    /// Current Omarchy already supplies these defaults and needs no wiring.
     #[arg(long, exclusive = true)]
     pub wire_omarchy: bool,
 
@@ -51,9 +50,8 @@ pub struct CommandLine {
     )]
     pub filename: Option<String>,
 
-    /// Dev-only smoke test for the xdg-desktop-portal RemoteDesktop / libei
-    /// handshake used by Auto-Scroll. Opens a portal session, requests pointer
-    /// capability, reads back the EIS file descriptor, and exits.
+    /// Dev-only smoke test for real mouse-wheel injection used by Auto-Scroll.
+    /// Sends three wheel notches beneath the current pointer.
     #[arg(long)]
     pub auto_scroll_test: bool,
 

@@ -3,6 +3,9 @@
 //! Tensaku degrades gracefully without them; this just makes a missing
 //! piece easy to spot.
 
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+
 use anyhow::Result;
 
 /// Is `bin` an executable file somewhere on `$PATH`?
@@ -70,71 +73,171 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-/// On Omarchy, report whether the screenshot wrapper is installed and
-/// whether `$OMARCHY_SCREENSHOT_EDITOR` is wired to it.
+/// On Omarchy, report whether the screenshot wrapper is available. Current
+/// Omarchy defaults to `tensaku-edit`; only legacy versions require an
+/// `$OMARCHY_SCREENSHOT_EDITOR` override.
 fn report_omarchy_wrapper() {
     use crate::omarchy_wrapper::{
-        Wiring, classify_wiring, configured_editor, installed_wrapper, wrapper_path,
+        Wiring, classify_wiring, configured_editor, installed_wrapper,
+        omarchy_capture_defaults_to_tensaku,
     };
 
     println!();
     println!("Omarchy detected — screenshot integration:");
 
-    // A packaged /usr/bin/tensaku-edit counts as installed, not just the
-    // per-user copy; wiring is classified against whichever exists (or the
-    // path we'd install to), so this matches what --wire-omarchy does.
-    let wrapper = installed_wrapper();
-    let mut needs_setup = false;
+    let Some(target) = installed_wrapper() else {
+        println!("  [miss]  tensaku-edit wrapper not installed");
+        println!("          → run: tensaku --install-omarchy-wrapper");
+        return;
+    };
+    println!("  [ ok ]  wrapper installed: {}", target.display());
 
-    match &wrapper {
-        Some(p) => println!("  [ ok ]  wrapper installed: {}", p.display()),
-        None => {
-            println!("  [miss]  wrapper not installed");
+    if omarchy_capture_defaults_to_tensaku() {
+        match classify_default_omarchy_integration(
+            configured_editor(),
+            std::env::var_os("OMARCHY_SCREENSHOT_EDITOR"),
+            &target,
+        ) {
+            DefaultOmarchyIntegration::Default => {
+                println!("  [ ok ]  Omarchy defaults to tensaku-edit (no override needed)");
+            }
+            DefaultOmarchyIntegration::Explicit => {
+                println!("  [ ok ]  explicit OMARCHY_SCREENSHOT_EDITOR override uses Tensaku");
+            }
+            DefaultOmarchyIntegration::PersistentOverride(other) => {
+                println!(
+                    "  [miss]  envs.conf overrides Omarchy's Tensaku default with {}",
+                    other.display()
+                );
+                println!(
+                    "          → remove that OMARCHY_SCREENSHOT_EDITOR override to use the default"
+                );
+            }
+            DefaultOmarchyIntegration::ActiveOverride(other) => {
+                println!(
+                    "  [miss]  this session overrides Omarchy's Tensaku default with {}",
+                    other.display()
+                );
+                println!("          → unset OMARCHY_SCREENSHOT_EDITOR to use the default");
+            }
+        }
+        return;
+    }
+
+    // Legacy Omarchy needs persistent envs.conf wiring. Keep the old report
+    // and recovery command only when its capture script has no Tensaku default.
+    let active_correct = matches!(
+        classify_wiring(std::env::var_os("OMARCHY_SCREENSHOT_EDITOR"), &target),
+        Wiring::Correct
+    );
+    let mut needs_setup = false;
+    match classify_wiring(configured_editor(), &target) {
+        Wiring::Correct => {
+            println!("  [ ok ]  OMARCHY_SCREENSHOT_EDITOR wired in envs.conf");
+            if !active_correct {
+                println!("          (active after next login)");
+            }
+        }
+        Wiring::Elsewhere(other) => {
+            println!(
+                "  [miss]  envs.conf wires OMARCHY_SCREENSHOT_EDITOR at {}",
+                other.display()
+            );
+            needs_setup = true;
+        }
+        Wiring::Unset => {
+            if active_correct {
+                println!(
+                    "  [miss]  OMARCHY_SCREENSHOT_EDITOR is set this session but \
+                     not in envs.conf — it won't persist"
+                );
+            } else {
+                println!("  [miss]  OMARCHY_SCREENSHOT_EDITOR is not wired in envs.conf");
+            }
             needs_setup = true;
         }
     }
-
-    if let Some(target) = wrapper.or_else(|| wrapper_path().ok()) {
-        // envs.conf is the persistent wiring — what screenshots will use
-        // going forward, so it (not the live env) drives the verdict. The
-        // live $OMARCHY_SCREENSHOT_EDITOR only reflects the running session
-        // and goes stale after --wire-omarchy until the next login; we read
-        // it only to flag a wiring that isn't active in this session yet, or
-        // a session-only value that won't survive a relogin.
-        let active_correct = matches!(
-            classify_wiring(std::env::var_os("OMARCHY_SCREENSHOT_EDITOR"), &target),
-            Wiring::Correct
-        );
-
-        match classify_wiring(configured_editor(), &target) {
-            Wiring::Correct => {
-                println!("  [ ok ]  OMARCHY_SCREENSHOT_EDITOR wired in envs.conf");
-                if !active_correct {
-                    println!("          (active after next login)");
-                }
-            }
-            Wiring::Elsewhere(other) => {
-                println!(
-                    "  [miss]  envs.conf wires OMARCHY_SCREENSHOT_EDITOR at {}",
-                    other.display()
-                );
-                needs_setup = true;
-            }
-            Wiring::Unset => {
-                if active_correct {
-                    println!(
-                        "  [miss]  OMARCHY_SCREENSHOT_EDITOR is set this session but \
-                         not in envs.conf — it won't persist"
-                    );
-                } else {
-                    println!("  [miss]  OMARCHY_SCREENSHOT_EDITOR is not wired in envs.conf");
-                }
-                needs_setup = true;
-            }
-        }
-    }
-
     if needs_setup {
         println!("          → run: tensaku --wire-omarchy");
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DefaultOmarchyIntegration {
+    Default,
+    Explicit,
+    PersistentOverride(PathBuf),
+    ActiveOverride(PathBuf),
+}
+
+fn classify_default_omarchy_integration(
+    configured: Option<OsString>,
+    active: Option<OsString>,
+    wrapper: &Path,
+) -> DefaultOmarchyIntegration {
+    use crate::omarchy_wrapper::{Wiring, classify_wiring};
+
+    match classify_wiring(configured, wrapper) {
+        Wiring::Elsewhere(other) => DefaultOmarchyIntegration::PersistentOverride(other),
+        Wiring::Correct => match classify_wiring(active, wrapper) {
+            Wiring::Elsewhere(other) => DefaultOmarchyIntegration::ActiveOverride(other),
+            Wiring::Correct | Wiring::Unset => DefaultOmarchyIntegration::Explicit,
+        },
+        Wiring::Unset => match classify_wiring(active, wrapper) {
+            Wiring::Elsewhere(other) => DefaultOmarchyIntegration::ActiveOverride(other),
+            Wiring::Correct => DefaultOmarchyIntegration::Explicit,
+            Wiring::Unset => DefaultOmarchyIntegration::Default,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wrapper() -> PathBuf {
+        PathBuf::from("/zzz/tensaku-edit")
+    }
+
+    #[test]
+    fn modern_omarchy_needs_no_override() {
+        assert_eq!(
+            classify_default_omarchy_integration(None, None, &wrapper()),
+            DefaultOmarchyIntegration::Default
+        );
+    }
+
+    #[test]
+    fn modern_omarchy_accepts_an_explicit_tensaku_override() {
+        let wrapper = wrapper();
+        assert_eq!(
+            classify_default_omarchy_integration(
+                Some(wrapper.clone().into_os_string()),
+                None,
+                &wrapper,
+            ),
+            DefaultOmarchyIntegration::Explicit
+        );
+    }
+
+    #[test]
+    fn modern_omarchy_reports_other_editor_overrides() {
+        let wrapper = wrapper();
+        assert_eq!(
+            classify_default_omarchy_integration(
+                Some(OsString::from("/usr/bin/other")),
+                None,
+                &wrapper,
+            ),
+            DefaultOmarchyIntegration::PersistentOverride(PathBuf::from("/usr/bin/other"))
+        );
+        assert_eq!(
+            classify_default_omarchy_integration(
+                None,
+                Some(OsString::from("/usr/bin/other")),
+                &wrapper,
+            ),
+            DefaultOmarchyIntegration::ActiveOverride(PathBuf::from("/usr/bin/other"))
+        );
     }
 }

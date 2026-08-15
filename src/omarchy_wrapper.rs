@@ -1,21 +1,19 @@
 //! Omarchy screenshot-wrapper integration.
 //!
-//! Omarchy's screenshot keybinds run `omarchy-capture-screenshot`, which
-//! hands the captured image path to whatever `$OMARCHY_SCREENSHOT_EDITOR`
-//! names. Tensaku takes its input as a flag, not a positional argument,
-//! so a small wrapper at `~/.local/bin/tensaku-edit` adapts the call.
-//! This module places that wrapper so a fresh Omarchy install needs no
-//! manual setup. It runs two ways, mirroring [`crate::desktop_install`]:
+//! Modern Omarchy runs `tensaku-edit` by default and packages Tensaku's
+//! window rules, so a normal package install needs no wiring step. Tensaku
+//! still ships the small `tensaku-edit` adapter because the editor receives a
+//! positional image path while Tensaku expects `--filename`.
+//!
+//! This module retains two recovery/compatibility paths:
 //!
 //! - [`run`] — the explicit `--install-omarchy-wrapper` flag; installs,
 //!   then reports and verifies the `$OMARCHY_SCREENSHOT_EDITOR` wiring.
 //! - [`ensure_first_launch`] — silent and one-shot, on the first normal
 //!   launch, when Omarchy is detected.
 //!
-//! It never edits Omarchy or Hyprland config: pointing
-//! `$OMARCHY_SCREENSHOT_EDITOR` at the wrapper stays the user's (or
-//! Omarchy's own default) job. The verbose paths only *warn* when it
-//! isn't pointed here.
+//! The legacy [`wire`] path edits pre-Lua Omarchy/Hyprland configuration;
+//! current Omarchy users should not need it.
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::fs::PermissionsExt;
@@ -108,8 +106,16 @@ pub(crate) fn classify_wiring(env_val: Option<OsString>, wrapper: &Path) -> Wiri
         },
         None => PathBuf::from(first),
     };
+    // Modern Omarchy's healthy default is the bare command `tensaku-edit`,
+    // not an absolute path. Resolve bare commands through PATH before
+    // comparing them with the installed wrapper.
+    let candidate = if candidate.components().count() == 1 {
+        which(first).unwrap_or(candidate)
+    } else {
+        candidate
+    };
 
-    let same = match (
+    let same_path = match (
         std::fs::canonicalize(&candidate).ok(),
         std::fs::canonicalize(wrapper).ok(),
     ) {
@@ -117,8 +123,15 @@ pub(crate) fn classify_wiring(env_val: Option<OsString>, wrapper: &Path) -> Wiri
         // One or both paths don't exist yet — compare as written.
         _ => candidate == wrapper,
     };
+    // Packaged, cargo-installed, and user-local copies are all valid
+    // `tensaku-edit` adapters. Their paths may differ while still naming the
+    // integration Omarchy expects.
+    let same_wrapper_name = candidate.file_name() == Some(OsStr::new(WRAPPER_NAME))
+        && wrapper.file_name() == Some(OsStr::new(WRAPPER_NAME))
+        && candidate.is_file()
+        && wrapper.is_file();
 
-    if same {
+    if same_path || same_wrapper_name {
         Wiring::Correct
     } else {
         Wiring::Elsewhere(candidate)
@@ -167,8 +180,13 @@ pub fn run() -> Result<()> {
             );
             print_wiring_help(&path);
         }
+        Wiring::Unset if omarchy_capture_defaults_to_tensaku() => {
+            println!(
+                "Omarchy uses tensaku-edit by default — no OMARCHY_SCREENSHOT_EDITOR override is needed."
+            );
+        }
         Wiring::Unset => {
-            println!("OMARCHY_SCREENSHOT_EDITOR is not set.");
+            println!("This older/custom Omarchy setup has no screenshot editor configured.");
             print_wiring_help(&path);
         }
     }
@@ -241,6 +259,29 @@ fn which(bin: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// Does the installed Omarchy capture script fall back to `tensaku-edit`
+/// when no explicit `$OMARCHY_SCREENSHOT_EDITOR` override is present?
+pub(crate) fn omarchy_capture_defaults_to_tensaku() -> bool {
+    which("omarchy-capture-screenshot")
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .is_some_and(|script| capture_script_defaults_to_tensaku(&script))
+}
+
+/// Pure parser for [`omarchy_capture_defaults_to_tensaku`]. Ignore comments
+/// and whitespace so formatting-only changes in Omarchy do not break the
+/// detection, while avoiding a false positive from documentation text.
+fn capture_script_defaults_to_tensaku(script: &str) -> bool {
+    script.lines().any(|line| {
+        let line = line.trim_start();
+        if line.starts_with('#') {
+            return false;
+        }
+        let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+        compact.starts_with("SCREENSHOT_EDITOR=")
+            && compact.contains("${OMARCHY_SCREENSHOT_EDITOR:-tensaku-edit}")
+    })
+}
+
 /// The wrapper path to wire `$OMARCHY_SCREENSHOT_EDITOR` at: a packaged
 /// `tensaku-edit` on `$PATH` (e.g. `/usr/bin/tensaku-edit`) wins; otherwise
 /// ensure the per-user copy exists and use that. Wiring at a missing file
@@ -283,7 +324,8 @@ fn packaged_wrapper_exists() -> bool {
     }
 }
 
-/// `$XDG_CONFIG_HOME/hypr/envs.conf`, falling back to `~/.config/...`.
+/// Legacy pre-Lua Omarchy's `$XDG_CONFIG_HOME/hypr/envs.conf`, falling back
+/// to `~/.config/...`.
 fn hypr_envs_conf() -> Result<PathBuf> {
     let base = if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME").filter(|d| !d.is_empty()) {
         PathBuf::from(dir)
@@ -315,14 +357,15 @@ fn env_line_value(line: &str) -> Option<String> {
     Some(value.to_string())
 }
 
-/// The `OMARCHY_SCREENSHOT_EDITOR` value configured in `envs.conf`, if any.
+/// The `OMARCHY_SCREENSHOT_EDITOR` value configured in legacy `envs.conf`, if
+/// any.
 ///
 /// Unlike the live `$OMARCHY_SCREENSHOT_EDITOR` (which reflects the running
 /// session and goes stale after `--wire-omarchy` until the next login), this
-/// is the *persistent* wiring — what screenshots will use going forward, and
-/// what `--doctor` should report. First matching directive wins, mirroring
-/// [`apply_env_line`]. Read-only and best-effort: a missing or unreadable
-/// file reads as "not configured".
+/// is the *persistent* override on older Omarchy. Current Omarchy needs no
+/// directive because its capture script defaults to `tensaku-edit`. First
+/// matching directive wins, mirroring [`apply_env_line`]. Read-only and
+/// best-effort: a missing or unreadable file reads as "not configured".
 pub(crate) fn configured_editor() -> Option<OsString> {
     let path = hypr_envs_conf().ok()?;
     let contents = std::fs::read_to_string(path).ok()?;
@@ -750,6 +793,27 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_modern_omarchy_tensaku_default() {
+        assert!(capture_script_defaults_to_tensaku(
+            r#"SCREENSHOT_EDITOR="${OMARCHY_SCREENSHOT_EDITOR:-tensaku-edit}""#
+        ));
+        assert!(capture_script_defaults_to_tensaku(
+            r#"  SCREENSHOT_EDITOR = "${OMARCHY_SCREENSHOT_EDITOR:-tensaku-edit}"  "#
+        ));
+    }
+
+    #[test]
+    fn ignores_comments_and_other_editor_defaults() {
+        assert!(!capture_script_defaults_to_tensaku(
+            r#"# SCREENSHOT_EDITOR="${OMARCHY_SCREENSHOT_EDITOR:-tensaku-edit}""#
+        ));
+        assert!(!capture_script_defaults_to_tensaku(
+            r#"SCREENSHOT_EDITOR="${OMARCHY_SCREENSHOT_EDITOR:-satty}""#
+        ));
+        assert!(!capture_script_defaults_to_tensaku("echo tensaku-edit"));
+    }
+
+    #[test]
     fn wiring_unset() {
         let w = PathBuf::from("/zzz/.local/bin/tensaku-edit");
         assert_eq!(classify_wiring(None, &w), Wiring::Unset);
@@ -779,6 +843,26 @@ mod tests {
             classify_wiring(Some(OsString::from("/usr/bin/satty")), &w),
             Wiring::Elsewhere(PathBuf::from("/usr/bin/satty")),
         );
+    }
+
+    #[test]
+    fn wiring_accepts_tensaku_edit_from_another_install_prefix() {
+        let root = std::env::temp_dir().join(format!(
+            "tensaku-wiring-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let packaged = root.join("usr/bin/tensaku-edit");
+        let local = root.join("home/u/.local/bin/tensaku-edit");
+        std::fs::create_dir_all(packaged.parent().expect("packaged parent")).unwrap();
+        std::fs::create_dir_all(local.parent().expect("local parent")).unwrap();
+        std::fs::write(&packaged, "wrapper").unwrap();
+        std::fs::write(&local, "wrapper").unwrap();
+        assert_eq!(
+            classify_wiring(Some(local.into_os_string()), &packaged),
+            Wiring::Correct,
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

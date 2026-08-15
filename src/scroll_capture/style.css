@@ -20,6 +20,32 @@
   padding: 6px 8px;
 }
 
+.scroll-capture-capturing {
+  box-shadow: none;
+}
+
+@keyframes scroll-capture-pill-shake {
+  0%   { transform: translate(0, 0); }
+  18%  { transform: translate(-6px, 0); }
+  36%  { transform: translate(5px, 0); }
+  54%  { transform: translate(-4px, 0); }
+  72%  { transform: translate(3px, 0); }
+  88%  { transform: translate(-1px, 0); }
+  100% { transform: translate(0, 0); }
+}
+
+.scroll-capture-shake {
+  animation-name: scroll-capture-pill-shake;
+  animation-duration: 520ms;
+  animation-timing-function: ease-out;
+  animation-iteration-count: 1;
+}
+
+.scroll-capture-stall-cue {
+  background-color: rgba(35, 55, 42, 0.96);
+  border-color: rgba(120, 220, 160, 0.45);
+}
+
 .scroll-capture-button {
   background: transparent;
   color: rgba(245, 245, 247, 0.92);
@@ -61,6 +87,70 @@
   font-weight: 600;
 }
 
+.scroll-capture-status {
+  color: rgba(245, 245, 247, 0.78);
+  font-size: 12px;
+  padding: 0 4px;
+}
+
+.scroll-capture-status-error {
+  color: rgba(255, 190, 140, 0.98);
+  font-weight: 600;
+}
+
+.scroll-capture-capturing.scroll-capture-paused {
+  border-radius: 16px;
+  padding: 6px 10px;
+}
+
+.scroll-capture-paused .scroll-capture-status {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 0 2px;
+}
+
+.scroll-capture-pause-actions {
+  padding: 3px 0 0;
+}
+
+.scroll-capture-pause-button {
+  min-height: 18px;
+  padding: 3px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 999px;
+  background-color: rgba(255, 255, 255, 0.045);
+  color: rgba(245, 245, 247, 0.92);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.scroll-capture-pause-button:hover {
+  background-color: rgba(255, 255, 255, 0.10);
+}
+
+.scroll-capture-pause-button:focus-visible {
+  outline: 2px solid rgba(150, 205, 255, 0.85);
+  outline-offset: -2px;
+}
+
+.scroll-capture-pause-button.scroll-capture-warning-action {
+  color: rgba(255, 190, 140, 0.98);
+}
+
+.scroll-capture-pause-button.scroll-capture-primary {
+  background-color: rgba(120, 220, 160, 0.16);
+  border-color: rgba(120, 220, 160, 0.28);
+  color: rgba(205, 250, 218, 1.0);
+}
+
+.scroll-capture-pause-button.scroll-capture-primary:hover {
+  background-color: rgba(120, 220, 160, 0.24);
+}
+
+.scroll-capture-warning {
+  color: rgba(255, 190, 140, 0.98);
+}
+
 /* Inside-selection Auto-Scroll buttons (vertical pill + circular horizontal).
  * Sit on top of the underlying content, so give them a solid dark backdrop
  * + subtle border, matching the outside pills' look. */
@@ -76,11 +166,4 @@
 
 .scroll-capture-inside-auto:hover {
   background-color: rgba(40, 50, 70, 0.95);
-}
-
-/* Horizontal variant: square padding so the ▶ glyph reads as a circle. */
-.scroll-capture-inside-auto-horiz {
-  padding: 10px 12px;
-  min-width: 36px;
-  min-height: 36px;
 }
