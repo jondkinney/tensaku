@@ -21,3 +21,5 @@ man/
 # Flatpak build artifacts
 .flatpak-builder/
 build-dir/
+# Local agent tool config
+.codex/
