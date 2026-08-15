@@ -1399,9 +1399,6 @@ impl SketchBoard {
         Ok(())
     }
 
-    fn copy_text_to_external_process(&self, text: &str, command: &str) -> anyhow::Result<()> {
-        self.save_bytes_to_external_process(text.as_bytes(), command)
-    }
 
     fn handle_copy_filepath(&self) {
         let filepath = match self.last_saved_filepath.borrow().clone() {
@@ -1409,29 +1406,9 @@ impl SketchBoard {
             None => return,
         };
 
-        // Copy the filepath to clipboard
-        let result = if let Some(command) = APP_CONFIG.read().copy_command() {
-            match self.copy_text_to_external_process(&filepath, command) {
-                Ok(()) => Ok(()),
-                Err(external_error) => {
-                    eprintln!(
-                        "Clipboard command '{command}' failed: {external_error}; falling back to GTK clipboard."
-                    );
-                    self.copy_text_to_clipboard(&filepath)
-                }
-            }
-            match self.copy_text_to_external_process(&filepath, command) {
-                Ok(()) => Ok(()),
-                Err(external_error) => {
-                    eprintln!(
-                        "Clipboard command '{command}' failed: {external_error}; falling back to GTK clipboard."
-                    );
-                    self.copy_text_to_clipboard(&filepath)
-                }
-            }
-        } else {
-            self.copy_text_to_clipboard(&filepath)
-        };
+        // Filepaths are always copied through GTK. The configured copy command
+        // is intended for image data (for example, `wl-copy --type image/png`).
+        let result = self.copy_text_to_clipboard(&filepath);
 
         match result {
             Err(e) => log_result(
