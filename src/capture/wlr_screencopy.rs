@@ -145,28 +145,28 @@ fn to_pixbuf(canvas: &[u8], info: &ShmBufferInfo) -> Result<Pixbuf> {
     let mut rgba = Vec::with_capacity(row_bytes * height);
 
     // wl_shm formats are little-endian. XRGB8888/ARGB8888 mean the bytes in
-    // memory are B, G, R, X/A. We swap to RGBA and force alpha=255 for the
-    // X variants.
-    let (force_opaque, swap_bgra) = match info.format {
-        wl_shm::Format::Xrgb8888 => (true, true),
-        wl_shm::Format::Argb8888 => (false, true),
-        wl_shm::Format::Xbgr8888 => (true, false),
-        wl_shm::Format::Abgr8888 => (false, false),
+    // memory are B, G, R, X/A. A captured output is already compositor-flattened
+    // and therefore always opaque. Some compositors leave the alpha byte of an
+    // ARGB screencopy undefined when a transparent layer surface is present;
+    // preserving that byte can turn a valid capture transparent in the editor.
+    let swap_bgra = match info.format {
+        wl_shm::Format::Xrgb8888 | wl_shm::Format::Argb8888 => true,
+        wl_shm::Format::Xbgr8888 | wl_shm::Format::Abgr8888 => false,
         other => bail!("unsupported wl_shm format: {:?}", other),
     };
 
     for y in 0..height {
         let row = &canvas[y * stride..y * stride + row_bytes];
         for px in row.chunks_exact(4) {
-            let (r, g, b, a) = if swap_bgra {
-                (px[2], px[1], px[0], px[3])
+            let (r, g, b) = if swap_bgra {
+                (px[2], px[1], px[0])
             } else {
-                (px[0], px[1], px[2], px[3])
+                (px[0], px[1], px[2])
             };
             rgba.push(r);
             rgba.push(g);
             rgba.push(b);
-            rgba.push(if force_opaque { 255 } else { a });
+            rgba.push(255);
         }
     }
 
@@ -269,3 +269,53 @@ impl ShmHandler for CaptureState {
 
 delegate_registry!(CaptureState);
 delegate_shm!(CaptureState);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn converted(format: wl_shm::Format, canvas: &[u8]) -> Vec<u8> {
+        let info = ShmBufferInfo {
+            format,
+            width: 2,
+            height: 1,
+            stride: 8,
+        };
+        to_pixbuf(canvas, &info)
+            .expect("conversion should succeed")
+            .read_pixel_bytes()
+            .as_ref()
+            .to_vec()
+    }
+
+    #[test]
+    fn output_capture_is_opaque_for_argb_and_xrgb() {
+        let memory = [3, 2, 1, 0, 6, 5, 4, 73];
+        let expected = vec![1, 2, 3, 255, 4, 5, 6, 255];
+        assert_eq!(converted(wl_shm::Format::Xrgb8888, &memory), expected);
+        assert_eq!(converted(wl_shm::Format::Argb8888, &memory), expected);
+    }
+
+    #[test]
+    fn output_capture_is_opaque_for_abgr_and_xbgr() {
+        let memory = [1, 2, 3, 0, 4, 5, 6, 73];
+        let expected = vec![1, 2, 3, 255, 4, 5, 6, 255];
+        assert_eq!(converted(wl_shm::Format::Xbgr8888, &memory), expected);
+        assert_eq!(converted(wl_shm::Format::Abgr8888, &memory), expected);
+    }
+
+    #[test]
+    fn conversion_ignores_source_row_padding() {
+        let info = ShmBufferInfo {
+            format: wl_shm::Format::Xrgb8888,
+            width: 1,
+            height: 2,
+            stride: 8,
+        };
+        let memory = [30, 20, 10, 0, 99, 99, 99, 99, 60, 50, 40, 0, 88, 88, 88, 88];
+        let pixels = to_pixbuf(&memory, &info)
+            .expect("conversion should succeed")
+            .read_pixel_bytes();
+        assert_eq!(pixels.as_ref(), [10, 20, 30, 255, 40, 50, 60, 255]);
+    }
+}
