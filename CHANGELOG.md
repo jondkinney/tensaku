@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.7](https://github.com/jondkinney/tensaku/compare/v0.26.6...v0.26.7) - 2026-08-15
+
+### Added
+
+- add version label to preferences dialog
+
+### Other
+
+- self-host star history chart
+
 ## [0.26.6](https://github.com/jondkinney/tensaku/compare/v0.26.5...v0.26.6) - 2026-06-17
 
 ### Added
