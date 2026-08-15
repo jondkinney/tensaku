@@ -952,7 +952,7 @@ fn build_overlay(
                 let sel = s.selection;
                 drop(s);
                 action_pill_w.set_visible(true);
-                window_w.set_keyboard_mode(KeyboardMode::OnDemand);
+                window_w.set_keyboard_mode(KeyboardMode::Exclusive);
                 position_selected_controls_and_input(
                     &state,
                     &window_w,
@@ -1230,7 +1230,7 @@ fn restore_previous_region(
     }
     prompt.set_visible(false);
     action_pill.set_visible(true);
-    window.set_keyboard_mode(KeyboardMode::OnDemand);
+    window.set_keyboard_mode(KeyboardMode::Exclusive);
     position_selected_controls_and_input(state, window, action_pill, vert_btn, horiz_btn, sel);
     drawing.queue_draw();
 }
@@ -1798,7 +1798,7 @@ fn capture_tick(
                 );
                 if s.consecutive_blank_frames >= MAX_CONSECUTIVE_BLANK_FRAMES {
                     halt_capture(&mut s, status, "Capture shows only a solid color — retry");
-                    window.set_keyboard_mode(KeyboardMode::OnDemand);
+                    window.set_keyboard_mode(KeyboardMode::Exclusive);
                 }
                 // Leave any automatic cycle unacknowledged so the worker
                 // holds the same screen instead of scrolling past content
@@ -2183,7 +2183,7 @@ fn capture_tick(
                                 cycle,
                             });
                             show_auto_alignment_pause_ui(window, status, sel, can_continue_anyway);
-                            window.set_keyboard_mode(KeyboardMode::OnDemand);
+                            window.set_keyboard_mode(KeyboardMode::Exclusive);
                             acknowledgement = AutoCaptureAcknowledgement::Hold;
                         }
                     }
@@ -2256,7 +2256,7 @@ fn capture_tick(
             }
 
             if s.capture_halted {
-                window.set_keyboard_mode(KeyboardMode::OnDemand);
+                window.set_keyboard_mode(KeyboardMode::Exclusive);
             }
             if let Some((handshake, cycle)) = auto_cycle {
                 s.last_captured_cycle = cycle;
@@ -2283,7 +2283,7 @@ fn capture_tick(
             s.consecutive_capture_errors += 1;
             if s.consecutive_capture_errors >= MAX_CONSECUTIVE_CAPTURE_ERRORS {
                 halt_capture(&mut s, status, "Capture failed repeatedly — retry");
-                window.set_keyboard_mode(KeyboardMode::OnDemand);
+                window.set_keyboard_mode(KeyboardMode::Exclusive);
             }
         }
     }
@@ -2855,7 +2855,7 @@ fn continue_auto_alignment_anyway(
     );
     if !success {
         status.add_css_class("scroll-capture-status-error");
-        window.set_keyboard_mode(KeyboardMode::OnDemand);
+        window.set_keyboard_mode(KeyboardMode::Exclusive);
         return;
     }
 
@@ -2864,7 +2864,7 @@ fn continue_auto_alignment_anyway(
         if let Some(pill) = capturing_pill(status) {
             end_of_content_ui(window, &pill, status, selection);
         }
-        window.set_keyboard_mode(KeyboardMode::OnDemand);
+        window.set_keyboard_mode(KeyboardMode::Exclusive);
         eprintln!("scroll-capture: accepted the final uncertain seam; endpoint already confirmed");
         return;
     }
@@ -2959,8 +2959,12 @@ fn connect_finish_capture_button(
 }
 
 fn stop_capture_with_window(state: &Rc<RefCell<OverlayState>>, window: &gtk::ApplicationWindow) {
-    // Restore keyboard mode in case Cancel/Done is pressed during capture.
-    window.set_keyboard_mode(KeyboardMode::OnDemand);
+    // Re-grab the keyboard in case Cancel/Done is pressed during capture
+    // (capture runs with KeyboardMode::None so keys pass through to the
+    // app). Exclusive — not OnDemand — because Hyprland hands OnDemand
+    // focus back to the previously focused toplevel, which sent Esc to
+    // whatever window launched the capture instead of cancelling it.
+    window.set_keyboard_mode(KeyboardMode::Exclusive);
     stop_capture(state);
 }
 
@@ -3070,7 +3074,7 @@ fn start_auto_scroll_at(
                 if let Some(timer) = capture_timer {
                     timer.remove();
                 }
-                window.set_keyboard_mode(KeyboardMode::OnDemand);
+                window.set_keyboard_mode(KeyboardMode::Exclusive);
                 if reached_end {
                     end_of_content_ui(&window, &pill, &status, selection);
                 } else {
@@ -3097,7 +3101,7 @@ fn end_of_content_ui(
     // Automatic sampling has already stopped before either caller reaches
     // this function, so the compact terminal controls may safely overlap the
     // captured rectangle when the only outside gutter is visually far away.
-    window.set_keyboard_mode(KeyboardMode::OnDemand);
+    window.set_keyboard_mode(KeyboardMode::Exclusive);
     if let Some(done) = capturing_done_button(status) {
         done.add_css_class("scroll-capture-done-highlight");
     }
