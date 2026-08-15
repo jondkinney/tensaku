@@ -170,6 +170,13 @@ pub fn open<W: IsA<gtk::Widget>>(
         .margin_end(16)
         .build();
 
+    let top_version_label = gtk::Label::builder()
+        .label(format!("Tensaku {}", env!("CARGO_PKG_VERSION")))
+        .halign(gtk::Align::End)
+        .build();
+    top_version_label.add_css_class("dim-label");
+    outer.append(&top_version_label);
+
     let heading = gtk::Label::builder()
         .label("Keyboard Shortcuts")
         .halign(gtk::Align::Start)
