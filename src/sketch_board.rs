@@ -1358,7 +1358,19 @@ impl SketchBoard {
         let texture = Texture::for_pixbuf(image);
 
         let result = if let Some(command) = APP_CONFIG.read().copy_command() {
-            self.save_texture_to_external_process(&texture, command)
+            match self.save_texture_to_external_process(&texture, command) {
+                Ok(()) => Ok(()),
+                Err(external_error) => {
+                    // A configured helper (most commonly wl-copy) may not be present
+                    // in the flatpak sandbox even though the compositor's native
+                    // clipboard is available. This keeps the copy action useful
+                    // while retaining the helper's persistence.
+                    eprintln!(
+                        "Clipboard command '{command}' failed: {external_error}; falling back to GTK clipboard."
+                    );
+                    self.save_texture_to_clipboard(&texture)
+                }
+            }
         } else {
             self.save_texture_to_clipboard(&texture)
         };
@@ -1399,7 +1411,15 @@ impl SketchBoard {
 
         // Copy the filepath to clipboard
         let result = if let Some(command) = APP_CONFIG.read().copy_command() {
-            self.copy_text_to_external_process(&filepath, command)
+            match self.copy_text_to_external_process(&filepath, command) {
+                Ok(()) => Ok(()),
+                Err(external_error) => {
+                    eprintln!(
+                        "Clipboard command '{command}' failed: {external_error}; falling back to GTK clipboard."
+                    );
+                    self.copy_text_to_clipboard(&filepath)
+                }
+            }
         } else {
             self.copy_text_to_clipboard(&filepath)
         };
