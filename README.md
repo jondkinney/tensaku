@@ -27,7 +27,7 @@ Tensaku extends Satty with a number of new capabilities:
 - **Zoom** — zoom the canvas with <kbd>Ctrl</kbd>+scroll or the <kbd>Ctrl</kbd>+digit shortcuts, with an on-screen zoom indicator.
 - **Reworked crop** — aspect-ratio presets, exact width/height entry, rotate and flip, a background-color matte, and pan/zoom while cropping.
 - **Reworked color picker** — a swatch grid with drag-to-reorder custom colors that persist across launches.
-- **Preferences dialog** — open with <kbd>Ctrl+,</kbd> to rebind tool shortcuts and toggle behaviors; choices persist to a state file kept separate from `config.toml`.
+- **Preferences dialog** — open with <kbd>Ctrl+,</kbd> to rebind tool shortcuts and toggle behaviors; the same values can be edited in `config.toml`.
 
 ## Install
 
@@ -71,16 +71,17 @@ See [Dependencies](#dependencies) and [Build from source](#build-from-source) fo
 
 Start by providing a filename or a screenshot via stdin (or use `--scroll-capture`, below) and annotate using the available tools. Save to clipboard or file when finished. Tools and interface have been kept simple.
 
-Tensaku reads its settings from three places:
+Tensaku resolves its settings from two layers:
 
-- **`config.toml`** — a config file you edit by hand, at `~/.config/tensaku/config.toml` (see [Configuration File](#configuration-file)). Tensaku never writes to it.
-- **Command-line flags** — override `config.toml` for a single run (see [Command Line](#command-line)).
-- **The Preferences dialog** — in-app settings and tool-shortcut edits (see [Preferences Dialog](#preferences-dialog)). These persist to a *separate* state file (`~/.local/state/tensaku/state.toml`) and are applied on top of `config.toml` — so a shortcut or toggle you change in Preferences wins over `config.toml`, and `config.toml` itself is left untouched.
+- **`config.toml`** — the persistent source of truth, normally at `~/.config/tensaku/config.toml` (see [Configuration File](#configuration-file)). You can edit it by hand or use the Preferences dialog; Preferences updates only the relevant keys and preserves unrelated settings and comments.
+- **Command-line flags** — supply startup overrides for one invocation and are never written back automatically (see [Command Line](#command-line)). If you explicitly change the corresponding control in Preferences during that run, that live edit takes effect and is saved to `config.toml`.
+
+`~/.local/state/tensaku/state.toml` is reserved for incidental editor state such as the last color, custom colors, saved per-tool sizes/fills, panel width, and the compositor-managed global scroll-capture shortcut. It is not a second preference layer.
 
 ### Shortcuts
 
 - <kbd>Enter</kbd>: as configured (see below), default: copy-to-clipboard (may be masked by active tool)
-- <kbd>Esc</kbd>: as configured (see below), default: exit (may be masked by active tool)
+- <kbd>Esc</kbd>: as configured (see below), default: no global close action (active tools can still use Esc to cancel)
 - <kbd>Delete</kbd> reset (clear) <sup>experimental</sup> <sup>0.20.1</sup>
 - <kbd>Ctrl+C</kbd>: Save to clipboard (may be masked by active tool)
 - <kbd>Ctrl+Shift+D</kbd> or <kbd>Ctrl+Shift+I</kbd>: Open GTK inspector if not already opened
@@ -160,12 +161,28 @@ fullscreen = true
 # resize initially (0.20.1)
 #resize = { mode="smart" }
 resize = { mode = "size", width=2000, height=800 }
+# Resize the editor window to follow cropped content. This is on by default;
+# set false to keep the current editor window size while cropping.
+resize-window-to-content-on-crop = true
 # try to have the window float (0.20.1). This may depend on the compositor.
 floating-hack = true
 # Change to true to automatically copy to clipboard after every annotation change (0.21.0)
 auto-copy = false
-# Exit directly after copy/save action. 0.20.1: Does not apply to save as
-early-exit = true
+# Legacy shorthand for closing after both copy and save. The two direct
+# settings below take precedence when present. Does not apply to Save As.
+early-exit = false
+# Preferences-backed behavior settings (shown here with their defaults)
+invert-scrolling = true
+select-any-annotation = true
+close-on-esc = false
+close-on-copy = false
+close-on-save = false
+hide-default-palette = false
+sticky-session-defaults = false
+park-pointer-during-manual-scroll-capture = true
+# Key pressed in the scroll-capture overlay (before capture starts) to reselect
+# the previous capture's region ("r", "ctrl+r", "f6", ... — empty disables)
+scroll-capture-restore-region-shortcut = "r"
 # Exit directly after save as (0.20.1)
 early-exit-save-as = true
 # Draw corners of rectangles round if the value is greater than 0 (0 disables rounded corners)
@@ -198,9 +215,10 @@ actions-on-right-click = []
 # Actions to trigger on Enter key (order is important)
 # [possible values: save-to-clipboard, save-to-file, save-to-file-as, copy-filepath-to-clipboard, exit]
 actions-on-enter = ["save-to-clipboard"]
-# Actions to trigger on Escape key (order is important)
+# Actions to trigger on Escape key (order is important). Window closing is
+# normally controlled by close-on-esc above.
 # [possible values: save-to-clipboard, save-to-file, save-to-file-as, copy-filepath-to-clipboard, exit]
-actions-on-escape = ["exit"]
+actions-on-escape = []
 # Action to perform when the Enter key is pressed [possible values: save-to-clipboard, save-to-file]
 # Deprecated: use actions-on-enter instead
 action-on-enter = "save-to-clipboard"
@@ -234,8 +252,8 @@ layer-panel-shortcut = "ctrl+l"
 
 
 # Tool selection keyboard shortcuts. The values below are the defaults;
-# each must be a single character. Shortcuts changed in the Preferences
-# dialog are saved to state.toml and take precedence over this section.
+# each must be a single character. The Preferences dialog edits this same
+# table. Use an empty string to leave a tool intentionally unbound.
 [keybinds]
 pointer = "v"
 crop = "x"
@@ -295,12 +313,17 @@ custom = [
 
 ### Preferences Dialog
 
-Open the Preferences dialog with <kbd>Ctrl+,</kbd> or the gear button in the top toolbar. It has two parts:
+Open the Preferences dialog with <kbd>Ctrl+,</kbd> or the gear button in the top toolbar. It has three parts:
 
-- **Keyboard Shortcuts** — a recorder row for every tool, Spotlight included. Click a row, press a key, then <kbd>Save</kbd> to commit (or <kbd>Cancel</kbd> to discard).
-- **Behavior** — settings that apply immediately: the annotation size factor, invert scrolling direction, close window on Esc, close window on copy, close window on save, hide the default palette colors, and keep in-session tool adjustments across tool switches.
+- **Keyboard Shortcuts** — a recorder row for every tool, Spotlight included. Click a row, press a key, then <kbd>Save</kbd> to update `[keybinds]` (or <kbd>Cancel</kbd> to discard).
+- **Scroll Capture** — record the global scroll-capture shortcut and choose whether Manual Scroll parks the pointer near the selection's lower-right edge when capture starts. Parking is on by default to reduce page-hover artifacts.
+- **Behavior** — settings that apply immediately: the annotation size factor, invert scrolling direction, click-any-annotation selection, close window on Esc/copy/save, whether the editor window resizes to cropped content, hide the default palette colors, and keep in-session tool adjustments across tool switches.
 
-Everything set here is written to `~/.local/state/tensaku/state.toml` — **not** to `config.toml`. State is applied on top of `config.toml`, so a value changed in Preferences overrides the same setting in `config.toml`, and `config.toml` itself is never modified. Tensaku also records other remembered state in this file: the last-used color, saved custom colors, per-tool "save as default" sizes and fill states, and the last arrow / blur / highlighter style.
+Every tool shortcut and Behavior/Scroll Capture checkbox shown here reads from and writes to the active configuration file: the path passed to `--config`, or `~/.config/tensaku/config.toml`. The writer changes only the relevant keys, preserving comments, formatting, and unrelated tables. The sole exception is the global scroll-capture shortcut, which stays in `state.toml` because Tensaku also mirrors it into Hyprland's live and persisted binding state.
+
+**Resize window to content on crop** maps directly to `[general] resize-window-to-content-on-crop`. It is checked / `true` by default. Uncheck it to keep the editor window at its current size for crop-only changes; the cropped image still fits inside that unchanged window.
+
+On the first launch after upgrading, Tensaku migrates old Preferences values from `state.toml` into missing `config.toml` keys. Explicit config values always win. Once migration succeeds, those legacy preference fields are removed from state so the two files cannot silently disagree.
 
 ### Command Line
 
@@ -320,15 +343,15 @@ Options:
       --doctor
           Report whether the optional external tools Tensaku relies on (grim, slurp, wl-copy) are installed and the session looks right, then exit
       --install-omarchy-wrapper
-          Install the Omarchy screenshot wrapper (~/.local/bin/tensaku-edit) so Omarchy's screenshot keybinds open captures in Tensaku, then exit. Also checks that OMARCHY_SCREENSHOT_EDITOR points at it
+          Reinstall the Omarchy screenshot wrapper (~/.local/bin/tensaku-edit), then exit. Intended for cargo/manual installs and legacy recovery; current Omarchy package installs need no setup
       --wire-omarchy
-          Point Omarchy's screenshot editor at the tensaku-edit wrapper (sets OMARCHY_SCREENSHOT_EDITOR in ~/.config/hypr/envs.conf and the running session) and add float + center window rules for Tensaku, then exit. Installs the wrapper first if needed; does not edit keybinds
+          Legacy/custom Omarchy override: point its screenshot editor at the tensaku-edit wrapper and add old-style float + center rules, then exit. Current Omarchy already supplies these defaults and needs no wiring
   -c, --config <CONFIG>
           Path to the config file. Otherwise will be read from XDG_CONFIG_DIR/tensaku/config.toml
   -f, --filename <FILENAME>
           Path to input image or '-' to read from stdin
       --auto-scroll-test
-          Dev-only smoke test for the xdg-desktop-portal RemoteDesktop / libei handshake used by Auto-Scroll. Opens a portal session, requests pointer capability, reads back the EIS file descriptor, and exits
+          Dev-only smoke test for real mouse-wheel injection used by Auto-Scroll. Sends three wheel notches beneath the current pointer
       --scroll-capture
           Enter scrolling-screenshot capture mode: opens a fullscreen overlay, drag to select a region, then capture by manual scroll or auto-scroll
       --scroll-capture-test <FULL|X,Y,W,H>
@@ -427,27 +450,17 @@ Tensaku supports IME via GTK with and without preediting. Please note, at this p
 
 ### Omarchy
 
-Omarchy already ships screenshot keybinds — they run
-`omarchy-capture-screenshot`, which handles the region/window selection
-and hands the capture to whatever `OMARCHY_SCREENSHOT_EDITOR` points at.
-Tensaku takes its input as a flag, not a positional argument, so it needs
-a small wrapper (`~/.local/bin/tensaku-edit`) to bridge the two — and
-Tensaku manages that wrapper for you. It's installed automatically the
-first time Tensaku runs on an Omarchy session.
+Current Omarchy needs no Tensaku setup step. It installs Tensaku, uses
+`tensaku-edit` as the default editor for `omarchy-capture-screenshot`, and
+ships the float + center window rules Tensaku needs. The Tensaku package
+provides the `tensaku-edit` adapter that translates Omarchy's positional
+image path into Tensaku's command-line flags.
 
-To wire everything up in one step:
-
-```sh
-tensaku --wire-omarchy
-```
-
-This installs the wrapper if needed and points `OMARCHY_SCREENSHOT_EDITOR`
-at it — both in `~/.config/hypr/envs.conf` (persisted, and backed up first)
-and in the running Hyprland session, so your screenshot keys open each
-capture straight into Tensaku, with Omarchy's window/output highlighting
-intact and no restart needed. `tensaku --install-omarchy-wrapper` installs
-just the wrapper without touching any config, and `tensaku --doctor` shows
-the current wrapper and wiring status.
+`OMARCHY_SCREENSHOT_EDITOR` remains an optional user override; leaving it
+unset uses Omarchy's Tensaku default. The `--install-omarchy-wrapper` and
+`--wire-omarchy` commands remain available for manual installs and older or
+heavily customized Omarchy setups, but normal package installs should not run
+them. `tensaku --doctor` recognizes the stock default as ready.
 
 **Scrolling capture** is a separate mode — `omarchy-capture-screenshot`
 doesn't cover it. Bind a key straight to `tensaku --scroll-capture`,
@@ -457,6 +470,24 @@ example an Alt variant of your screenshot key:
 ```
 bindd = ALT, <your screenshot key>, Scrolling screenshot, exec, tensaku --scroll-capture --copy-command wl-copy --actions-on-enter save-to-clipboard
 ```
+
+After selecting the scrolling region, choose **Manual Scroll** to use your
+wheel, touchpad, or scrolling keys, or choose an **Auto-Scroll** arrow. The
+automatic path sends real mouse-wheel events and waits for each captured
+frame before moving again. Click **Done** when manual capture is complete.
+By default, Manual Scroll parks the pointer near the selection's lower-right
+edge before taking the first frame, reducing browser hover effects and link
+status popups. You can turn this off under **Preferences → Scroll Capture**
+when you need to leave the pointer over a particular nested scroll area.
+After manual content stops changing for two seconds, the capture pill shakes
+and highlights **Done** as a cue; scrolling again clears and rearms it.
+Duplicate frames are ignored. When similar-looking rows make an automatic
+stitch ambiguous, Tensaku makes one smaller confirmation scroll and keeps going
+when the adjacent frames or cumulative motion provide a valid forward path.
+Repeated content by itself never interrupts capture. Tensaku pauses only after
+it genuinely loses alignment; then you can **Continue manually**, **Continue
+anyway**, or **Finish here**. Continuing anyway can repeat or skip content, so
+the editor displays a warning for captures that contain an unverified seam.
 
 ### Other wlroots compositors (Sway, Hyprland, river, …)
 
@@ -528,36 +559,19 @@ animations on) as a visible width-bounce when you Super+drag the
 window mid-flight while the size rule is re-asserted against the
 drag.
 
-Notably, **Omarchy ships with such a rule by default** via its
-`floating-window` tag:
+Current Omarchy already ships direct float + center rules for
+`dev.tensaku.Tensaku` and does not apply its fixed-size floating tag to the
+app. No local rule or `--wire-omarchy` step is needed there.
+
+On another Hyprland setup, make sure Tensaku is floated and centered without
+a hard-coded size. For example:
 
 ```hypr
-# ~/.local/share/omarchy/default/hypr/apps/system.conf (default)
-windowrule = float on,         match:tag floating-window
-windowrule = center on,        match:tag floating-window
-windowrule = size 875 600,     match:tag floating-window   # ← pins window size
-windowrule = tag +floating-window, match:class (... dev.tensaku.Tensaku ...)
-```
-
-**`tensaku --wire-omarchy` sets this up for you** — it appends the float +
-center rules (and the `tag -floating-window` untag) for
-`dev.tensaku.Tensaku` to `~/.config/hypr/hyprland.conf` (backed up first,
-and skipped if they're already present) and reloads Hyprland. To do it by
-hand instead — or on another wlroots compositor — drop the tag for
-`dev.tensaku.Tensaku` in your local `~/.config/hypr/hyprland.conf` and
-re-apply float + center directly:
-
-```hypr
-# Let Tensaku size its own window around the captured image.
-windowrule = tag -floating-window, match:class dev.tensaku.Tensaku
 windowrule = float on,             match:class dev.tensaku.Tensaku
 windowrule = center on,            match:class dev.tensaku.Tensaku
 ```
 
-Then `hyprctl reload`. The next screenshot will open at the right
-size; if you previously added `windowrule = animation none` for the
-drag-bounce workaround, you can remove it — the bounce was caused
-by the size rule fighting the drag, not by the animation itself.
+Then reload Hyprland. The next screenshot will open at the right size.
 
 ## Build from source
 
