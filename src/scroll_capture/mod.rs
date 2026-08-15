@@ -785,11 +785,13 @@ fn build_overlay(
         pill.set_valign(gtk::Align::Start);
         overlay.add_overlay(pill);
     }
-    // Give keyboard and pointer input back to the selected application.
-    // Pointer wheels/touchpads and keys such as PageDown work through the
-    // transparent selection; the outside Cancel/Done pill stays clickable via
-    // its explicit input region.
-    window.set_keyboard_mode(KeyboardMode::None);
+    // The creation-time Exclusive keyboard mode stays in effect while the
+    // user is choosing a region, so Esc (cancel) and the restore-region key
+    // work before anything has been dragged. Keyboard pass-through to the
+    // underlying app (PageDown etc.) is only needed while a capture is
+    // actually running — `start_capture` switches to KeyboardMode::None —
+    // and pointer wheel pass-through is governed by the surface input
+    // region, not the keyboard mode.
 
     action_pill.set_visible(false);
     capturing_pill.set_visible(false);
