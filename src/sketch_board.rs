@@ -1358,7 +1358,19 @@ impl SketchBoard {
         let texture = Texture::for_pixbuf(image);
 
         let result = if let Some(command) = APP_CONFIG.read().copy_command() {
-            self.save_texture_to_external_process(&texture, command)
+            match self.save_texture_to_external_process(&texture, command) {
+                Ok(()) => Ok(()),
+                Err(external_error) => {
+                    // A configured helper (most commonly wl-copy) may not be present
+                    // in the flatpak sandbox even though the compositor's native
+                    // clipboard is available. This keeps the copy action useful
+                    // while retaining the helper's persistence.
+                    eprintln!(
+                        "Clipboard command '{command}' failed: {external_error}; falling back to GTK clipboard."
+                    );
+                    self.save_texture_to_clipboard(&texture)
+                }
+            }
         } else {
             self.save_texture_to_clipboard(&texture)
         };
@@ -1387,22 +1399,15 @@ impl SketchBoard {
         Ok(())
     }
 
-    fn copy_text_to_external_process(&self, text: &str, command: &str) -> anyhow::Result<()> {
-        self.save_bytes_to_external_process(text.as_bytes(), command)
-    }
-
     fn handle_copy_filepath(&self) {
         let filepath = match self.last_saved_filepath.borrow().clone() {
             Some(path) => path,
             None => return,
         };
 
-        // Copy the filepath to clipboard
-        let result = if let Some(command) = APP_CONFIG.read().copy_command() {
-            self.copy_text_to_external_process(&filepath, command)
-        } else {
-            self.copy_text_to_clipboard(&filepath)
-        };
+        // Filepaths are always copied through GTK. The configured copy command
+        // is intended for image data (for example, `wl-copy --type image/png`).
+        let result = self.copy_text_to_clipboard(&filepath);
 
         match result {
             Err(e) => log_result(
