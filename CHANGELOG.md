@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.7](https://github.com/jondkinney/tensaku/compare/v0.26.6...v0.26.7) - 2026-08-15
+
+### Added
+
+- *(scroll-capture)* persist the restorable region on every shape commit
+- *(config)* config.toml as the canonical store for GUI preferences
+- *(scroll-capture)* manual scrolling, faster auto capture, robust stitching
+- *(capture)* force opaque screencopy output with format regression tests
+- add version label to preferences dialog
+
+### Fixed
+
+- *(scroll-capture)* hold an exclusive keyboard grab in every interactive state
+- *(scroll-capture)* deliver Esc and the restore key before a region is dragged
+- *(render)* tile textures past GL limits; cancel spring-back timer on unrealize
+
+### Other
+
+- *(readme)* document scroll capture, unified preferences, and new config keys
+- update star history chart
+- self-host star history chart
+
 ## [0.26.6](https://github.com/jondkinney/tensaku/compare/v0.26.5...v0.26.6) - 2026-06-17
 
 ### Added
