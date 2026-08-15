@@ -1399,7 +1399,6 @@ impl SketchBoard {
         Ok(())
     }
 
-
     fn handle_copy_filepath(&self) {
         let filepath = match self.last_saved_filepath.borrow().clone() {
             Some(path) => path,
