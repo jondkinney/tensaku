@@ -12,7 +12,8 @@ build-options:
   env:
     CARGO_HOME: /run/build/tensaku/cargo
     CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
-    RUSTFLAGS: -C link-arg=-Wl,-z,now
+    PKG_CONFIG_PATH: /app/lib64/pkgconfig:/app/lib/pkgconfig:/app/share/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig
+    RUSTFLAGS: -C link-arg=-Wl,-z,now -C link-arg=-Wl,-rpath,/app/lib64
 finish-args:
   # Wayland support; fallback-x11 only grants X11 access when
   # Wayland isn't available — tighter than --socket=x11.
@@ -39,20 +40,31 @@ finish-args:
 modules:
   # gtk4-layer-shell isn't part of the GNOME runtime; build it into /app
   # so the `gtk4-layer-shell` crate (scroll-capture overlay) can link it.
+  # skip the optional vapi/examples/docs outputs we don't need
   - name: gtk4-layer-shell
     buildsystem: meson
     config-opts:
       - -Dintrospection=false
       - -Dvapi=false
+      - -Dexamples=false
+      - -Ddocs=false
     sources:
+      # Match the release.yml:73 workflow's pinned gtk4 version
       - type: archive
-        url: https://github.com/wmww/gtk4-layer-shell/archive/refs/tags/v1.3.0.tar.gz
-        sha256: 1ebb01ab14e98afd1727f68f64981c37bd23305b1f131f5667c02b94cf593192
+        url: https://github.com/wmww/gtk4-layer-shell/archive/refs/tags/v1.0.4.tar.gz
+        sha256: 7fe327dc3740e4b6f5edfd855e23f84b1ac1ec6854b731047b95df7feb46498b
   - name: tensaku
     buildsystem: simple
     build-commands:
       - cargo build --release --locked --features ci-release
-      - install -Dm755 target/release/tensaku /app/bin/tensaku
+      - install -Dm755 target/release/tensaku /app/bin/tensaku.real
+      - |
+        cat > /app/bin/tensaku <<'EOF'
+        #!/bin/sh
+        export LD_LIBRARY_PATH="/app/lib64:/app/lib:/app/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        exec /app/bin/tensaku.real "$@"
+        EOF
+        chmod 0755 /app/bin/tensaku
       - install -Dm644 dev.tensaku.Tensaku.desktop /app/share/applications/dev.tensaku.Tensaku.desktop
       - install -Dm644 dev.tensaku.Tensaku.metainfo.xml /app/share/metainfo/dev.tensaku.Tensaku.metainfo.xml
       - install -Dm644 assets/tensaku.svg /app/share/icons/hicolor/scalable/apps/dev.tensaku.Tensaku.svg
