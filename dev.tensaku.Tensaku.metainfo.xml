@@ -36,6 +36,30 @@
        Version history section on the listing page; the latest
        release is the only one strictly required. -->
   <releases>
+    <release version="0.26.7" date="2026-08-15">
+      <description>
+        <p>Added:</p>
+        <ul>
+          <li>persist the restorable region on every shape commit</li>
+          <li>config.toml as the canonical store for GUI preferences</li>
+          <li>manual scrolling, faster auto capture, robust stitching</li>
+          <li>force opaque screencopy output with format regression tests</li>
+          <li>add version label to preferences dialog</li>
+        </ul>
+        <p>Fixed:</p>
+        <ul>
+          <li>hold an exclusive keyboard grab in every interactive state</li>
+          <li>deliver Esc and the restore key before a region is dragged</li>
+          <li>tile textures past GL limits; cancel spring-back timer on unrealize</li>
+        </ul>
+        <p>Other:</p>
+        <ul>
+          <li>document scroll capture, unified preferences, and new config keys</li>
+          <li>update star history chart</li>
+          <li>self-host star history chart</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.26.6" date="2026-06-17">
       <description>
         <p>Added:</p>
