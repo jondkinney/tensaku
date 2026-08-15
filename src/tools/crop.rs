@@ -1,8 +1,8 @@
 use crate::{
     math::{self, Vec2D},
     sketch_board::{
-        KeyEventMsg, MouseButton, MouseEventMsg, MouseEventType, SketchBoardInput,
-        SketchBoardOutput,
+        ContentSizeChangeSource, KeyEventMsg, MouseButton, MouseEventMsg, MouseEventType,
+        SketchBoardInput, SketchBoardOutput,
     },
     ui::toolbars::ToolbarEvent,
 };
@@ -1583,7 +1583,11 @@ impl CropTool {
         if let Some(sender) = &self.sender {
             sender
                 .send(SketchBoardInput::Output(
-                    SketchBoardOutput::ContentSizeChanged { width, height },
+                    SketchBoardOutput::ContentSizeChanged {
+                        width,
+                        height,
+                        source: ContentSizeChangeSource::Crop,
+                    },
                 ))
                 .ok();
         }

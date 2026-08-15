@@ -1,8 +1,23 @@
 [general]
 # Start Tensaku in fullscreen mode
 fullscreen = true
-# Exit directly after copy/save action
-early-exit = true
+# Legacy shorthand for closing after both copy and save. Direct settings
+# below take precedence; Save As is controlled separately.
+early-exit = false
+# Preferences-backed behavior settings (shown with their defaults)
+invert-scrolling = true
+select-any-annotation = true
+close-on-esc = false
+close-on-copy = false
+close-on-save = false
+resize-window-to-content-on-crop = true
+hide-default-palette = false
+sticky-session-defaults = false
+park-pointer-during-manual-scroll-capture = true
+# Key pressed in the scroll-capture overlay (before capture starts) to reselect
+# the previous capture's region. Same format as layer-panel-shortcut, e.g. "r",
+# "ctrl+r", "f6". Empty string disables it.
+scroll-capture-restore-region-shortcut = "r"
 # Draw corners of rectangles round if the value is greater than 0 (0 disables rounded corners)
 corner-roundness = 12
 # Select the tool on startup [possible values: pointer, crop, line, arrow, rectangle, ellipse, text, marker, blur, highlight, brush]
@@ -32,9 +47,10 @@ actions-on-right-click = []
 # Actions to trigger on Enter key (order is important)
 # [possible values: save-to-clipboard, save-to-file, exit]
 actions-on-enter = ["save-to-clipboard"]
-# Actions to trigger on Escape key (order is important)
+# Actions to trigger on Escape key (order is important). Window closing is
+# normally controlled by close-on-esc above.
 # [possible values: save-to-clipboard, save-to-file, exit]
-actions-on-escape = ["exit"]
+actions-on-escape = []
 # Action to perform when the Enter key is pressed [possible values: save-to-clipboard, save-to-file]
 # Deprecated: use actions-on-enter instead
 action-on-enter = "save-to-clipboard"
@@ -46,7 +62,8 @@ no-window-decoration = true
 # experimental feature: adjust history size for brush input smoothing (0: disabled, default: 0, try e.g. 5 or 10)
 brush-smooth-history-size = 10
 
-# Tool selection keyboard shortcuts
+# Tool selection keyboard shortcuts. Preferences edits this same table; use
+# an empty string to leave a tool intentionally unbound.
 [keybinds]
 pointer = "v"
 crop = "x"

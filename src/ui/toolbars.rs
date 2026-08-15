@@ -3281,21 +3281,30 @@ impl Component for ToolsToolbar {
                 // Normal center cluster — the 12 tool toggle buttons.
                 // Hidden in Crop mode so the crop-options cluster
                 // (next sibling below) takes over the center slot.
-                // FlowBox (not a plain Box) so the 12 tool buttons can
-                // wrap onto a second row when the window is too narrow
-                // for all of them. That collapses the cluster's minimum
-                // width to ~6 buttons, which is what lets the whole
-                // window shrink past the single-row toolbar width —
-                // a plain Box would pin the window minimum at the full
-                // 12-button width. `min_children_per_line: 6` caps the
-                // wrap at two rows (12 buttons ÷ 6 = 2); `max: 12` keeps
-                // every tool on one row while there's room.
+                // Kept as a FlowBox (rather than a plain Box) for its
+                // homogeneous square-button sizing, but pinned to a
+                // SINGLE row: `min == max == 12` means all twelve tools
+                // always share one line and a lone tool (Spotlight) can
+                // never drop to a ragged second row. When the window is
+                // too narrow for the three clusters side by side, the
+                // intended responsive path takes over instead — the
+                // left/right clusters drop to their own row via
+                // `TopBarLayout::Wrap`, which hands the center its full
+                // width so all 12 tools still fit on one line. In the
+                // narrow band where the CenterBox would otherwise squeeze
+                // the centered middle slot below the tools' natural width
+                // (it reserves symmetric side room = 2×max(start,end)),
+                // GtkCenterBox falls back to a packed, slightly
+                // off-center layout rather than wrapping. The cost of the
+                // single-row pin is that the window can't shrink below
+                // the 12-button width — fine for an annotation tool whose
+                // window is sized to the capture.
                 #[name(normal_center_box)]
                 gtk::FlowBox {
                 set_orientation: gtk::Orientation::Horizontal,
                 set_selection_mode: gtk::SelectionMode::None,
                 set_homogeneous: true,
-                set_min_children_per_line: 6,
+                set_min_children_per_line: 12,
                 set_max_children_per_line: 12,
                 set_row_spacing: 2,
                 set_column_spacing: 2,

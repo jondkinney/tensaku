@@ -5,9 +5,10 @@
 //! Lays out one row per tool with a recorder button that captures a
 //! single keypress and writes it into the working keybind map. Save
 //! commits keybinds to `APP_CONFIG`; Cancel discards keybind edits.
-//! The behavior toggles apply immediately on change and persist to
-//! `state.toml` on the spot — they're not part of the keybind
-//! Cancel/Save transaction.
+//! The behavior toggles apply immediately on change and persist to the
+//! active config file on the spot — they're not part of the keybind
+//! Cancel/Save transaction. The global scroll-capture chord remains in
+//! `state.toml` because it also mirrors an external compositor binding.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -42,6 +43,63 @@ const ROW_ORDER: &[Tools] = &[
 
 /// Label shown on the recorder button while waiting for a keypress.
 const PROMPT_LABEL: &str = "Press a key…";
+
+/// Pretty chip text for the restore-region shortcut ("Ctrl+Shift+R",
+/// "R", or an em-dash when unset/unparseable).
+fn restore_shortcut_display(shortcut: &str) -> String {
+    if shortcut.trim().is_empty() {
+        return "—".into();
+    }
+    shortcut
+        .split('+')
+        .map(|token| {
+            let token = token.trim();
+            match token.to_ascii_lowercase().as_str() {
+                "ctrl" | "control" => "Ctrl".to_string(),
+                "shift" => "Shift".to_string(),
+                "alt" => "Alt".to_string(),
+                "super" | "meta" | "mod4" => "Super".to_string(),
+                other => other.to_uppercase(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+/// Canonical config string ("ctrl+shift+r" style) for a recorded key
+/// press, restricted to what `sketch_board::parse_shortcut` can read
+/// back: ASCII alphanumerics and F-keys, with Ctrl/Shift/Alt/Super
+/// modifiers. `None` = unusable key, keep listening.
+fn restore_shortcut_string(key: gdk::Key, modifier: gdk::ModifierType) -> Option<String> {
+    let key_token = if let Some(c) = key.to_unicode().filter(|c| c.is_ascii_alphanumeric()) {
+        c.to_ascii_lowercase().to_string()
+    } else {
+        let name = key.name()?;
+        let is_fkey = name.starts_with('F')
+            && name.len() >= 2
+            && name[1..].chars().all(|c| c.is_ascii_digit());
+        if !is_fkey {
+            return None;
+        }
+        name.to_ascii_lowercase()
+    };
+
+    let mut tokens = Vec::new();
+    if modifier.contains(gdk::ModifierType::CONTROL_MASK) {
+        tokens.push("ctrl".to_string());
+    }
+    if modifier.contains(gdk::ModifierType::SHIFT_MASK) {
+        tokens.push("shift".to_string());
+    }
+    if modifier.contains(gdk::ModifierType::ALT_MASK) {
+        tokens.push("alt".to_string());
+    }
+    if modifier.contains(gdk::ModifierType::SUPER_MASK) {
+        tokens.push("super".to_string());
+    }
+    tokens.push(key_token);
+    Some(tokens.join("+"))
+}
 
 /// Display fragment for an unset shortcut. Most tools won't be in
 /// this state, but the configuration's default doesn't bind every
@@ -121,6 +179,12 @@ pub fn open<W: IsA<gtk::Widget>>(
         dialog.set_transient_for(Some(w));
     }
 
+    // True while the scroll-capture chord recorder is armed. Shared with
+    // the dialog-level Esc handler below so Esc cancels an in-flight
+    // recording (handled by the evdev recorder's own ESC capture) instead
+    // of closing the whole dialog out from under it.
+    let scroll_recording_active: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+
     // Window-level shortcuts. Esc closes the dialog; Super+W also
     // closes it (so the user's "close window" muscle memory targets
     // the dialog instead of falling through to satty's main window,
@@ -130,9 +194,16 @@ pub fn open<W: IsA<gtk::Widget>>(
     // recording is in progress.
     {
         let dialog_for_keys = dialog.clone();
+        let recording_for_keys = scroll_recording_active.clone();
         let key_controller = gtk::EventControllerKey::new();
         key_controller.connect_key_pressed(move |_c, key, _code, mods| {
             if key == gdk::Key::Escape && mods.is_empty() {
+                // While recording, Esc cancels the capture (the evdev
+                // recorder sees the Esc press and reports it as a cancel)
+                // rather than closing the dialog.
+                if recording_for_keys.get() {
+                    return gtk::glib::Propagation::Stop;
+                }
                 dialog_for_keys.close();
                 return gtk::glib::Propagation::Stop;
             }
@@ -375,11 +446,294 @@ pub fn open<W: IsA<gtk::Widget>>(
 
     outer.append(&list_box);
 
+    // ── Scroll capture ──────────────────────────────────────────────
+    // A recordable system-wide chord that launches scroll-capture mode.
+    // Unlike the per-tool shortcuts above (scratch until Save), this one
+    // applies immediately: recording or clearing it registers /
+    // unregisters the Hyprland keybind and persists on the spot — so it
+    // lives outside the dialog's Save/Cancel transaction, like the
+    // behavior toggles below.
+    let scroll_heading = gtk::Label::builder()
+        .label("Scroll Capture")
+        .halign(gtk::Align::Start)
+        .margin_top(8)
+        .build();
+    scroll_heading.add_css_class("title-3");
+    outer.append(&scroll_heading);
+
+    let scroll_hint = gtk::Label::builder()
+        .label(
+            "A global shortcut that launches a scrolling screenshot capture. \
+             Click the chip and press a key combination (Super included). \
+             On supported Hyprland/Omarchy sessions, Tensaku activates and \
+             saves it automatically.",
+        )
+        .wrap(true)
+        .xalign(0.0)
+        .build();
+    scroll_hint.add_css_class("dim-label");
+    outer.append(&scroll_hint);
+
+    let scroll_row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .build();
+    let scroll_label = gtk::Label::builder()
+        .label("Trigger scroll capture")
+        .halign(gtk::Align::Start)
+        .hexpand(true)
+        .build();
+    scroll_row.append(&scroll_label);
+
+    // The chip renders the chord as glyphs (⌃ ⇧ ⌥ + the Omarchy Super
+    // logo) via Pango markup, so a Label child carries the markup rather
+    // than the Button's plain-text label.
+    let scroll_chip_label = gtk::Label::new(None);
+    scroll_chip_label.set_use_markup(true);
+    let scroll_chip = gtk::Button::builder()
+        .child(&scroll_chip_label)
+        .width_request(140)
+        .halign(gtk::Align::End)
+        .tooltip_text("Click, then press the key combination to record")
+        .build();
+    scroll_row.append(&scroll_chip);
+
+    let scroll_clear = gtk::Button::builder()
+        .label("✕")
+        .tooltip_text("Clear the scroll-capture shortcut")
+        .valign(gtk::Align::Center)
+        .build();
+    scroll_clear.add_css_class("flat");
+    scroll_clear.add_css_class("circular");
+    scroll_row.append(&scroll_clear);
+    outer.append(&scroll_row);
+
+    // One-line feedback after recording/clearing (e.g. "active now and
+    // saved", or a permission error). Hidden until there's something to
+    // say.
+    let scroll_status = gtk::Label::builder()
+        .wrap(true)
+        .xalign(0.0)
+        .visible(false)
+        .build();
+    scroll_status.add_css_class("dim-label");
+    outer.append(&scroll_status);
+
+    let park_pointer_help = "Moves the pointer near the lower-right of the selected area before capture to reduce \
+         hover effects. Turn this off to leave the pointer where you placed it.";
+    let park_pointer_check = gtk::CheckButton::builder()
+        .label("Park pointer when manual scroll capture starts")
+        .tooltip_text(park_pointer_help)
+        .active(
+            APP_CONFIG
+                .read()
+                .park_pointer_during_manual_scroll_capture(),
+        )
+        .build();
+    park_pointer_check
+        .update_property(&[gtk::accessible::Property::Description(park_pointer_help)]);
+    park_pointer_check.connect_toggled(|btn| {
+        let value = btn.is_active();
+        let current = APP_CONFIG
+            .read()
+            .park_pointer_during_manual_scroll_capture();
+        if value == current {
+            return;
+        }
+        let result = APP_CONFIG
+            .write()
+            .save_park_pointer_during_manual_scroll_capture(value);
+        if let Err(error) = result {
+            eprintln!("Warning: could not save park-pointer-during-manual-scroll-capture: {error}");
+            btn.set_active(current);
+        }
+    });
+    outer.append(&park_pointer_check);
+
+    // Recordable in-overlay key that reselects the previous capture's
+    // region while choosing a selection. Commits immediately, like the
+    // other Scroll Capture controls.
+    let restore_row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .build();
+    let restore_help = "While selecting a scroll-capture region, press this key to reselect \
+         the region used by the previous capture.";
+    let restore_label = gtk::Label::builder()
+        .label("Restore previous region")
+        .tooltip_text(restore_help)
+        .halign(gtk::Align::Start)
+        .hexpand(true)
+        .build();
+    restore_row.append(&restore_label);
+    let restore_chip = gtk::Button::builder()
+        .label(restore_shortcut_display(
+            APP_CONFIG.read().scroll_capture_restore_region_shortcut(),
+        ))
+        .width_request(96)
+        .halign(gtk::Align::End)
+        .tooltip_text("Click, then press a key (modifiers allowed) to record")
+        .build();
+    restore_chip.add_css_class("monospace");
+    restore_chip.update_property(&[gtk::accessible::Property::Description(restore_help)]);
+    restore_row.append(&restore_chip);
+    outer.append(&restore_row);
+
+    restore_chip.connect_clicked(move |btn| {
+        btn.set_label(PROMPT_LABEL);
+        btn.grab_focus();
+        let controller = gtk::EventControllerKey::new();
+        let btn_inner = btn.clone();
+        controller.connect_key_pressed(move |ctrl, key, _code, modifier| {
+            if matches!(
+                key,
+                gdk::Key::Shift_L
+                    | gdk::Key::Shift_R
+                    | gdk::Key::Control_L
+                    | gdk::Key::Control_R
+                    | gdk::Key::Alt_L
+                    | gdk::Key::Alt_R
+                    | gdk::Key::Super_L
+                    | gdk::Key::Super_R
+            ) {
+                return gtk::glib::Propagation::Proceed;
+            }
+
+            let current = APP_CONFIG
+                .read()
+                .scroll_capture_restore_region_shortcut()
+                .to_string();
+            if key == gdk::Key::Escape {
+                btn_inner.set_label(&restore_shortcut_display(&current));
+                btn_inner.remove_controller(ctrl);
+                return gtk::glib::Propagation::Stop;
+            }
+
+            let Some(shortcut) = restore_shortcut_string(key, modifier) else {
+                return gtk::glib::Propagation::Proceed;
+            };
+            match APP_CONFIG
+                .write()
+                .save_scroll_capture_restore_region_shortcut(shortcut.clone())
+            {
+                Ok(()) => btn_inner.set_label(&restore_shortcut_display(&shortcut)),
+                Err(error) => {
+                    eprintln!(
+                        "Warning: could not save scroll-capture-restore-region-shortcut: {error}"
+                    );
+                    btn_inner.set_label(&restore_shortcut_display(&current));
+                }
+            }
+            btn_inner.remove_controller(ctrl);
+            gtk::glib::Propagation::Stop
+        });
+        btn.add_controller(controller);
+    });
+
+    // Committed chord (mirrors state.toml) and the in-flight recorder
+    // handle (Some while listening for a keypress).
+    let scroll_chord: Rc<RefCell<Option<String>>> =
+        Rc::new(RefCell::new(crate::state::load_scroll_capture_shortcut()));
+    let scroll_recorder: Rc<RefCell<Option<crate::chord_capture::Recording>>> =
+        Rc::new(RefCell::new(None));
+
+    render_scroll_chip(
+        &scroll_chip_label,
+        &scroll_clear,
+        scroll_chord.borrow().as_deref(),
+    );
+
+    scroll_chip.connect_clicked({
+        let scroll_chord = scroll_chord.clone();
+        let scroll_recorder = scroll_recorder.clone();
+        let recording_active = scroll_recording_active.clone();
+        let chip_label = scroll_chip_label.clone();
+        let clear_btn = scroll_clear.clone();
+        let status = scroll_status.clone();
+        move |_| {
+            // Cancel any in-flight recording before re-arming.
+            if let Some(rec) = scroll_recorder.borrow_mut().take() {
+                rec.cancel();
+            }
+            recording_active.set(true);
+            status.set_visible(false);
+            chip_label.set_markup("Press a shortcut…");
+            clear_btn.set_visible(false);
+
+            let rec =
+                crate::chord_capture::record_async(crate::chord_capture::DEFAULT_RECORD_TIMEOUT, {
+                    let scroll_chord = scroll_chord.clone();
+                    let scroll_recorder = scroll_recorder.clone();
+                    let recording_active = recording_active.clone();
+                    let chip_label = chip_label.clone();
+                    let clear_btn = clear_btn.clone();
+                    let status = status.clone();
+                    move |result| {
+                        scroll_recorder.borrow_mut().take();
+                        recording_active.set(false);
+                        match result {
+                            // Bare Esc cancels — revert to the prior chord.
+                            Ok(chord) if chord == "ESC" => {
+                                render_scroll_chip(
+                                    &chip_label,
+                                    &clear_btn,
+                                    scroll_chord.borrow().as_deref(),
+                                );
+                            }
+                            Ok(chord) => {
+                                // Drop any prior bind, then register the new one.
+                                if let Some(old) = scroll_chord.borrow().clone()
+                                    && old != chord
+                                {
+                                    crate::hypr_bind::unregister(&old);
+                                }
+                                crate::state::save_scroll_capture_shortcut(Some(chord.clone()));
+                                let outcome = crate::hypr_bind::register(&chord);
+                                *scroll_chord.borrow_mut() = Some(chord.clone());
+                                render_scroll_chip(&chip_label, &clear_btn, Some(&chord));
+                                show_scroll_status(&status, scroll_register_message(outcome));
+                            }
+                            Err(e) => {
+                                render_scroll_chip(
+                                    &chip_label,
+                                    &clear_btn,
+                                    scroll_chord.borrow().as_deref(),
+                                );
+                                show_scroll_status(&status, e.to_string());
+                            }
+                        }
+                    }
+                });
+            *scroll_recorder.borrow_mut() = Some(rec);
+        }
+    });
+
+    scroll_clear.connect_clicked({
+        let scroll_chord = scroll_chord.clone();
+        let scroll_recorder = scroll_recorder.clone();
+        let recording_active = scroll_recording_active.clone();
+        let chip_label = scroll_chip_label.clone();
+        let clear_btn = scroll_clear.clone();
+        let status = scroll_status.clone();
+        move |_| {
+            if let Some(rec) = scroll_recorder.borrow_mut().take() {
+                rec.cancel();
+            }
+            recording_active.set(false);
+            if let Some(old) = scroll_chord.borrow_mut().take() {
+                crate::hypr_bind::unregister(&old);
+            }
+            crate::state::save_scroll_capture_shortcut(None);
+            render_scroll_chip(&chip_label, &clear_btn, None);
+            status.set_visible(false);
+        }
+    });
+
     // Behavior section sits BELOW the shortcuts list — the keyboard
     // recorder is the dialog's primary content, the behavior
     // toggles are secondary preferences. Each toggle applies
-    // immediately and persists to state.toml on click; the dialog's
-    // Save button only commits the keyboard shortcuts.
+    // immediately and persists to the active config file on click;
+    // the dialog's Save button only commits the keyboard shortcuts.
     let behavior_heading = gtk::Label::builder()
         .label("Behavior")
         .halign(gtk::Align::Start)
@@ -392,7 +746,7 @@ pub fn open<W: IsA<gtk::Widget>>(
     // Size-based metric (text height, line width, arrow heads, blur
     // radius). Mostly set once during onboarding to match the user's
     // display scale; this row lets them tune it later without hunting
-    // through config files. Changes write to state.toml + APP_CONFIG
+    // through config files. Changes write through the active config file
     // immediately and push directly into sketch_board so the very
     // next stroke uses the new factor.
     let factor_row = gtk::Box::builder()
@@ -480,8 +834,15 @@ pub fn open<W: IsA<gtk::Widget>>(
         .build();
     invert_scroll_check.connect_toggled(|btn| {
         let value = btn.is_active();
-        crate::state::save_invert_scrolling(value);
-        APP_CONFIG.write().set_invert_scrolling(value);
+        let current = APP_CONFIG.read().invert_scrolling();
+        if value == current {
+            return;
+        }
+        let result = APP_CONFIG.write().save_invert_scrolling(value);
+        if let Err(error) = result {
+            eprintln!("Warning: could not save invert-scrolling: {error}");
+            btn.set_active(current);
+        }
     });
     outer.append(&invert_scroll_check);
 
@@ -496,8 +857,15 @@ pub fn open<W: IsA<gtk::Widget>>(
         .build();
     select_any_check.connect_toggled(|btn| {
         let value = btn.is_active();
-        crate::state::save_select_any_annotation(value);
-        APP_CONFIG.write().set_select_any_annotation(value);
+        let current = APP_CONFIG.read().select_any_annotation();
+        if value == current {
+            return;
+        }
+        let result = APP_CONFIG.write().save_select_any_annotation(value);
+        if let Err(error) = result {
+            eprintln!("Warning: could not save select-any-annotation: {error}");
+            btn.set_active(current);
+        }
     });
     outer.append(&select_any_check);
 
@@ -507,8 +875,15 @@ pub fn open<W: IsA<gtk::Widget>>(
         .build();
     close_on_esc_check.connect_toggled(|btn| {
         let value = btn.is_active();
-        crate::state::save_close_on_esc(value);
-        APP_CONFIG.write().set_close_on_esc(value);
+        let current = APP_CONFIG.read().close_on_esc();
+        if value == current {
+            return;
+        }
+        let result = APP_CONFIG.write().save_close_on_esc(value);
+        if let Err(error) = result {
+            eprintln!("Warning: could not save close-on-esc: {error}");
+            btn.set_active(current);
+        }
     });
     outer.append(&close_on_esc_check);
 
@@ -519,8 +894,15 @@ pub fn open<W: IsA<gtk::Widget>>(
         .build();
     close_on_copy_check.connect_toggled(|btn| {
         let value = btn.is_active();
-        crate::state::save_close_on_copy(value);
-        APP_CONFIG.write().set_close_on_copy(value);
+        let current = APP_CONFIG.read().close_on_copy();
+        if value == current {
+            return;
+        }
+        let result = APP_CONFIG.write().save_close_on_copy(value);
+        if let Err(error) = result {
+            eprintln!("Warning: could not save close-on-copy: {error}");
+            btn.set_active(current);
+        }
     });
     outer.append(&close_on_copy_check);
 
@@ -531,10 +913,46 @@ pub fn open<W: IsA<gtk::Widget>>(
         .build();
     close_on_save_check.connect_toggled(|btn| {
         let value = btn.is_active();
-        crate::state::save_close_on_save(value);
-        APP_CONFIG.write().set_close_on_save(value);
+        let current = APP_CONFIG.read().close_on_save();
+        if value == current {
+            return;
+        }
+        let result = APP_CONFIG.write().save_close_on_save(value);
+        if let Err(error) = result {
+            eprintln!("Warning: could not save close-on-save: {error}");
+            btn.set_active(current);
+        }
     });
     outer.append(&close_on_save_check);
+
+    let resize_window_to_content_on_crop_check = gtk::CheckButton::builder()
+        .label("Resize window to content on crop")
+        .tooltip_text(
+            "When on, applying, editing, or reverting a crop resizes the editor window to \
+             follow the cropped content. When off, the editor window keeps its current size \
+             and fits the cropped image within it.",
+        )
+        .active(APP_CONFIG.read().resize_window_to_content_on_crop())
+        .build();
+    resize_window_to_content_on_crop_check.connect_toggled(|btn| {
+        let value = btn.is_active();
+        let current = APP_CONFIG.read().resize_window_to_content_on_crop();
+        if value == current {
+            return;
+        }
+
+        let result = APP_CONFIG
+            .write()
+            .save_resize_window_to_content_on_crop(value);
+        if let Err(error) = result {
+            eprintln!("Warning: could not save resize-window-to-content-on-crop: {error}");
+            // Keep the checkbox aligned with the canonical on-disk value.
+            // The resulting toggled signal exits through the equality
+            // guard above, so this cannot recurse indefinitely.
+            btn.set_active(current);
+        }
+    });
+    outer.append(&resize_window_to_content_on_crop_check);
 
     let hide_palette_check = gtk::CheckButton::builder()
         .label("Hide default palette colors")
@@ -547,8 +965,15 @@ pub fn open<W: IsA<gtk::Widget>>(
         .build();
     hide_palette_check.connect_toggled(|btn| {
         let value = btn.is_active();
-        crate::state::save_hide_default_palette(value);
-        APP_CONFIG.write().set_hide_default_palette(value);
+        let current = APP_CONFIG.read().hide_default_palette();
+        if value == current {
+            return;
+        }
+        let result = APP_CONFIG.write().save_hide_default_palette(value);
+        if let Err(error) = result {
+            eprintln!("Warning: could not save hide-default-palette: {error}");
+            btn.set_active(current);
+        }
     });
     outer.append(&hide_palette_check);
 
@@ -567,8 +992,15 @@ pub fn open<W: IsA<gtk::Widget>>(
         .build();
     sticky_defaults_check.connect_toggled(|btn| {
         let value = btn.is_active();
-        crate::state::save_sticky_session_defaults(value);
-        APP_CONFIG.write().set_sticky_session_defaults(value);
+        let current = APP_CONFIG.read().sticky_session_defaults();
+        if value == current {
+            return;
+        }
+        let result = APP_CONFIG.write().save_sticky_session_defaults(value);
+        if let Err(error) = result {
+            eprintln!("Warning: could not save sticky-session-defaults: {error}");
+            btn.set_active(current);
+        }
     });
     outer.append(&sticky_defaults_check);
 
@@ -591,9 +1023,11 @@ pub fn open<W: IsA<gtk::Widget>>(
     let working_for_save = working.clone();
     save_btn.connect_clicked(move |_| {
         let map = working_for_save.borrow().clone();
-        crate::state::save_keybinds(&map);
-        APP_CONFIG.write().set_keybinds(map);
-        dialog_for_save.close();
+        let result = APP_CONFIG.write().save_keybinds(map);
+        match result {
+            Ok(()) => dialog_for_save.close(),
+            Err(error) => eprintln!("Warning: could not save keybinds: {error}"),
+        }
     });
     button_row.append(&save_btn);
     outer.append(&button_row);
@@ -608,4 +1042,35 @@ pub fn open<W: IsA<gtk::Widget>>(
         .build();
     dialog.set_child(Some(&outer_scroller));
     dialog.present();
+}
+
+/// Paint the scroll-capture chip and toggle the clear button to match
+/// the committed chord (glyph markup) or the unset prompt.
+fn render_scroll_chip(label: &gtk::Label, clear: &gtk::Button, chord: Option<&str>) {
+    match chord {
+        Some(c) => {
+            label.set_markup(&crate::glyph_font::chord_markup(c));
+            clear.set_visible(true);
+        }
+        None => {
+            label.set_markup("Click to set");
+            clear.set_visible(false);
+        }
+    }
+}
+
+/// Show a one-line status under the scroll-capture row.
+fn show_scroll_status(label: &gtk::Label, msg: String) {
+    label.set_text(&msg);
+    label.set_visible(true);
+}
+
+/// Human-readable summary of what registering the bind achieved.
+fn scroll_register_message(outcome: crate::hypr_bind::RegisterOutcome) -> String {
+    match (outcome.live, outcome.persisted) {
+        (true, true) => "Shortcut active.".to_string(),
+        (true, false) => "Shortcut active for this session only.".to_string(),
+        (false, true) => "Shortcut saved, but not active yet.".to_string(),
+        (false, false) => "Recorded, but couldn't register it with Hyprland.".to_string(),
+    }
 }
