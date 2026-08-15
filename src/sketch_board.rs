@@ -1420,6 +1420,15 @@ impl SketchBoard {
                     self.copy_text_to_clipboard(&filepath)
                 }
             }
+            match self.copy_text_to_external_process(&filepath, command) {
+                Ok(()) => Ok(()),
+                Err(external_error) => {
+                    eprintln!(
+                        "Clipboard command '{command}' failed: {external_error}; falling back to GTK clipboard."
+                    );
+                    self.copy_text_to_clipboard(&filepath)
+                }
+            }
         } else {
             self.copy_text_to_clipboard(&filepath)
         };
