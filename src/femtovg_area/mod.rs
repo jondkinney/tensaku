@@ -506,6 +506,10 @@ impl FemtoVGArea {
         let id = gtk::glib::timeout_add_local(
             std::time::Duration::from_millis(imp::SPRING_BACK_TICK_MS),
             move || {
+                if !widget.is_realized() {
+                    *widget.imp().spring_back_timer.borrow_mut() = None;
+                    return gtk::glib::ControlFlow::Break;
+                }
                 // Each tick: trigger update_transformation (does the
                 // spring-back lerp) + queue a fresh draw.
                 widget.imp().resize(0, 0);

@@ -9,7 +9,7 @@ use std::{
 };
 
 use femtovg::{
-    Canvas, CompositeOperation, FontId, ImageFlags, ImageId, ImageSource, Paint, Path, PixelFormat,
+    Canvas, CompositeOperation, FontId, ImageFlags, ImageSource, Paint, Path, PixelFormat,
     RenderTarget, Transform2D,
     imgref::{Img, ImgVec},
     renderer,
@@ -404,11 +404,49 @@ pub struct FemtoVGArea {
     /// has fully recovered — keeps the timer from running forever
     /// while there's no rubber-band stretch to recover.
     pub spring_back_timer: RefCell<Option<gtk::glib::SourceId>>,
+    /// `GL_MAX_TEXTURE_SIZE` of the context the canvas was created on.
+    /// 0 until `setup_canvas` has run; consumers fall back to a safe
+    /// minimum. Textures above this limit "succeed" at the API level
+    /// but are storage-less: sampling them returns black and attaching
+    /// them to an FBO fails — femtovg then silently keeps the previous
+    /// render target, which is how oversized scroll captures used to
+    /// export as solid-white canvas-sized images.
+    max_texture_size: std::cell::Cell<usize>,
+}
+
+/// One GPU tile of the background image. Long scroll captures exceed
+/// `GL_MAX_TEXTURE_SIZE` (16384 on common desktop GPUs), so the
+/// background is split into a grid of tiles no larger than the limit,
+/// each drawn at its image-space rect.
+struct BackgroundTile {
+    id: femtovg::ImageId,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
+/// Split `total` into consecutive `(start, len)` ranges of at most
+/// `limit` each. Ranges are non-empty; a zero `total` yields none.
+fn tile_ranges(total: usize, limit: usize) -> Vec<(usize, usize)> {
+    let limit = limit.max(1);
+    let mut ranges = Vec::with_capacity(total.div_ceil(limit));
+    let mut start = 0;
+    while start < total {
+        let len = limit.min(total - start);
+        ranges.push((start, len));
+        start += len;
+    }
+    ranges
 }
 
 pub struct FemtoVgAreaMut {
     background_image: Pixbuf,
-    background_image_id: Option<femtovg::ImageId>,
+    background_tiles: Vec<BackgroundTile>,
+    /// Propagated from the GL context via `ensure_canvas`; see
+    /// `FemtoVGArea::max_texture_size`. Defaults to a conservative
+    /// 8192 until the real limit is known.
+    max_texture_size: usize,
     /// Image-space rect of the original (pre-auto-extension)
     /// screenshot inside the current `background_image`. Initially
     /// `(0, 0, orig_w, orig_h)`. When the canvas auto-extends, the
@@ -531,6 +569,9 @@ impl WidgetImpl for FemtoVGArea {
 
     fn unrealize(&self) {
         self.obj().make_current();
+        if let Some(id) = self.spring_back_timer.borrow_mut().take() {
+            id.remove();
+        }
         self.canvas.borrow_mut().take();
         self.parent_unrealize();
     }
@@ -687,10 +728,44 @@ impl FemtoVGArea {
         };
         let Some(outer) = outer else { return };
         let chrome = (outer.height() - canvas.height()).max(0);
-        let floor = min_canvas_h.ceil() as i32 + chrome;
+        let mut floor = min_canvas_h.ceil() as i32 + chrome;
+        // The floor exists to stop the user shrinking the image below
+        // 10% zoom — it must never instead FORCE the window taller
+        // than the screen (a 30k-pixel scroll capture's 10% is taller
+        // than a 1728px display). When the clamp engages, the canvas
+        // clips the image at the floored zoom and panning reaches the
+        // remainder.
+        if let Some(monitor_h) = self.monitor_logical_height() {
+            floor = floor.min((monitor_h as f32 * 0.85) as i32);
+        }
         if outer.height_request() != floor {
             outer.set_size_request(outer.width_request(), floor);
         }
+    }
+
+    /// Logical height of the monitor showing this widget, resolved
+    /// with the same fallback chain as the window-sizing code: the
+    /// surface's own monitor, else the focused Hyprland monitor
+    /// (cached — this runs on every canvas resize), else any monitor
+    /// GTK knows about.
+    fn monitor_logical_height(&self) -> Option<i32> {
+        let widget = self.obj();
+        let display = WidgetExt::display(widget.as_ref());
+        widget
+            .native()
+            .and_then(|native| native.surface())
+            .and_then(|surface| display.monitor_at_surface(&surface))
+            .map(|monitor| monitor.geometry().height())
+            .or_else(|| {
+                crate::display::hyprland_focused_logical_size_cached().map(|(_, height)| height)
+            })
+            .or_else(|| {
+                display
+                    .monitors()
+                    .item(0)
+                    .and_then(|obj| obj.downcast::<gtk::gdk::Monitor>().ok())
+                    .map(|monitor| monitor.geometry().height())
+            })
     }
 
     fn notify_zoom_display(&self, scale_factor: f32) {
@@ -739,7 +814,8 @@ impl FemtoVGArea {
         );
         self.inner().replace(FemtoVgAreaMut {
             background_image,
-            background_image_id: None,
+            background_tiles: Vec::new(),
+            max_texture_size: 8192,
             original_rect,
             transparent_background_id: None,
             active_tool,
@@ -779,6 +855,16 @@ impl FemtoVGArea {
                 .setup_canvas()
                 .expect("Cannot setup renderer and canvas");
             self.canvas.borrow_mut().replace(c);
+        }
+
+        // Propagate the context's real texture limit to the renderer
+        // state so background tiling and export tiling divide against
+        // the actual hardware bound instead of the 8192 default.
+        let max_texture_size = self.max_texture_size.get();
+        if max_texture_size >= 1024
+            && let Some(inner) = self.inner().as_mut()
+        {
+            inner.max_texture_size = max_texture_size;
         }
 
         if self.font.borrow().is_none()
@@ -873,6 +959,12 @@ impl FemtoVGArea {
             let ctx = glow::Context::from_loader_function(LOAD_FN);
             let id = NonZeroU32::new(ctx.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING) as u32)
                 .expect("No GTK provided framebuffer binding");
+            let max_texture_size = ctx.get_parameter_i32(glow::MAX_TEXTURE_SIZE);
+            // GL guarantees at least 1024; anything smaller means the
+            // query itself failed, so keep the conservative default.
+            if max_texture_size >= 1024 {
+                self.max_texture_size.set(max_texture_size as usize);
+            }
             ctx.bind_framebuffer(glow::FRAMEBUFFER, None);
             (renderer, glow::NativeFramebuffer(id))
         };
@@ -1002,7 +1094,7 @@ impl FemtoVgAreaMut {
             }
         }
         self.background_image = resized;
-        self.background_image_id = None;
+        self.background_tiles.clear();
 
         let resize = UndoAction::ResizeCanvas {
             prev_image,
@@ -1582,7 +1674,7 @@ impl FemtoVgAreaMut {
                 translated_ids,
             } => {
                 let cur_image = std::mem::replace(&mut self.background_image, prev_image);
-                self.background_image_id = None;
+                self.background_tiles.clear();
                 let translated_set: HashSet<DrawableId> = translated_ids.iter().copied().collect();
                 for s in &mut self.drawables {
                     if translated_set.contains(&s.id) {
@@ -1609,7 +1701,7 @@ impl FemtoVgAreaMut {
                 // post-op image back, apply the inverse-of-this (the
                 // forward op) at the resulting (pre-`transform`) dims.
                 let cur_image = std::mem::replace(&mut self.background_image, image);
-                self.background_image_id = None;
+                self.background_tiles.clear();
                 let cur_rect = std::mem::replace(&mut self.original_rect, original_rect);
                 for s in &mut self.drawables {
                     s.drawable.apply_canvas_transform(transform, w, h);
@@ -1708,41 +1800,90 @@ impl FemtoVgAreaMut {
             .filter(|(_, size)| !size.is_zero())
             .unwrap_or(bounds);
 
-        // create render-target
-        let image_id = canvas.create_image_empty(
-            size.x as usize,
-            size.y as usize,
-            PixelFormat::Rgba8,
-            ImageFlags::empty(),
-        )?;
-        canvas.set_render_target(RenderTarget::Image(image_id));
+        // Render in tiles no larger than the GL texture limit. A single
+        // full-size render target silently breaks above the limit: the
+        // texture allocates without storage, its framebuffer is
+        // incomplete, femtovg keeps the previous (screen) target bound,
+        // and `screenshot()` then returns its white-initialized,
+        // canvas-sized buffer — which is exactly how oversized scroll
+        // captures used to export as solid white. Long captures easily
+        // exceed the limit, so tile unconditionally.
+        let out_w = size.x as usize;
+        let out_h = size.y as usize;
+        let limit = self.max_texture_size.max(1024);
+        let mut result = ImgVec::new(vec![RGBA8::new(0, 0, 0, 0); out_w * out_h], out_w, out_h);
 
-        // apply offset
-        let mut transform = Transform2D::identity();
-        transform.translate(-pos.x, -pos.y);
-        canvas.reset_transform();
-        canvas.set_transform(&transform);
+        for (tile_y, tile_h) in tile_ranges(out_h, limit) {
+            for (tile_x, tile_w) in tile_ranges(out_w, limit) {
+                let image_id = canvas.create_image_empty(
+                    tile_w,
+                    tile_h,
+                    PixelFormat::Rgba8,
+                    ImageFlags::empty(),
+                )?;
+                // Execute anything pending against the old target before
+                // switching, so this tile's readback can't observe it.
+                canvas.flush();
+                canvas.set_render_target(RenderTarget::Image(image_id));
 
-        self.render(
-            canvas,
-            font,
-            false,
-            femtovg::Color::rgbaf(0.0, 0.0, 0.0, 0.0),
-            false,
-            true,
-            RenderTarget::Image(image_id),
-            transform,
-            None,
-        )?;
+                // Map image coordinates so this tile's region lands at
+                // the target's origin.
+                let mut transform = Transform2D::identity();
+                transform.translate(-(pos.x + tile_x as f32), -(pos.y + tile_y as f32));
+                canvas.reset_transform();
+                canvas.set_transform(&transform);
+                // `render()`'s own clear uses the on-screen canvas
+                // dimensions, which don't match the tile — clear the
+                // full tile here instead and pass `clear_canvas: false`.
+                canvas.clear_rect(
+                    0,
+                    0,
+                    tile_w as u32,
+                    tile_h as u32,
+                    femtovg::Color::rgbaf(0.0, 0.0, 0.0, 0.0),
+                );
 
-        // return screenshot
-        let result = canvas.screenshot();
+                self.render(
+                    canvas,
+                    font,
+                    false,
+                    femtovg::Color::rgbaf(0.0, 0.0, 0.0, 0.0),
+                    false,
+                    false,
+                    RenderTarget::Image(image_id),
+                    transform,
+                    None,
+                )?;
 
-        // clean up
-        canvas.set_render_target(RenderTarget::Screen);
-        canvas.delete_image(image_id);
+                let tile_pixels = canvas.screenshot()?;
+                let tile_ok = tile_pixels.width() == tile_w && tile_pixels.height() == tile_h;
+                if !tile_ok {
+                    let got_w = tile_pixels.width();
+                    let got_h = tile_pixels.height();
+                    canvas.set_render_target(RenderTarget::Screen);
+                    canvas.delete_image(image_id);
+                    anyhow::bail!(
+                        "export tile readback returned {got_w}x{got_h}, expected \
+                         {tile_w}x{tile_h} — refusing to produce a corrupt export"
+                    );
+                }
 
-        Ok(result?)
+                let src_stride = tile_pixels.stride();
+                let src = tile_pixels.buf();
+                let dst = result.buf_mut();
+                for row in 0..tile_h {
+                    let src_start = row * src_stride;
+                    let dst_start = (tile_y + row) * out_w + tile_x;
+                    dst[dst_start..dst_start + tile_w]
+                        .copy_from_slice(&src[src_start..src_start + tile_w]);
+                }
+
+                canvas.set_render_target(RenderTarget::Screen);
+                canvas.delete_image(image_id);
+            }
+        }
+
+        Ok(result)
     }
 
     pub fn render_framebuffer(
@@ -2259,6 +2400,19 @@ impl FemtoVgAreaMut {
         let img_w = (bounds.1.x - bounds.0.x).max(1.0) as usize;
         let img_h = (bounds.1.y - bounds.0.y).max(1.0) as usize;
 
+        // The punch-out buffer is allocated at full image size; above
+        // the GL texture limit that buffer is storage-less and its
+        // render-target switch silently fails — the dark fill would
+        // then land on the CALLER'S target and corrupt it. Skip the
+        // effect for oversized images until the overlay is tiled too.
+        let limit = self.max_texture_size.max(1024);
+        if img_w > limit || img_h > limit {
+            eprintln!(
+                "spotlight overlay skipped: image {img_w}x{img_h} exceeds GL texture limit {limit}"
+            );
+            return Ok(());
+        }
+
         // Offscreen target for the punched overlay. FLIP_Y because
         // GL framebuffer-attached textures are bottom-up; without it
         // the composited image lands upside-down on the screen
@@ -2378,7 +2532,7 @@ impl FemtoVgAreaMut {
         // undoable op. No history remap needed: the op sits on the undo
         // stack, so LIFO reverses it before any older snapshot is used.
         let prev_image = std::mem::replace(&mut self.background_image, new_bg);
-        self.background_image_id = None;
+        self.background_tiles.clear();
         let prev_rect = self.original_rect;
         for s in self.drawables.iter_mut() {
             s.drawable.apply_canvas_transform(t, old_w, old_h);
@@ -2447,7 +2601,7 @@ impl FemtoVgAreaMut {
             self.record_canvas_op(prev_image, prev_rect, t, w, h);
         }
         self.background_image = resized;
-        self.background_image_id = None;
+        self.background_tiles.clear();
         Some((w, h))
     }
 
@@ -2517,14 +2671,13 @@ impl FemtoVgAreaMut {
         canvas: &mut femtovg::Canvas<femtovg::renderer::OpenGl>,
         onscreen: bool,
     ) -> Result<()> {
-        let background_image_id = match self.background_image_id {
-            Some(id) => id,
-            None => {
-                let id = Self::upload_background_image(canvas, &self.background_image)?;
-                self.background_image_id.replace(id);
-                id
-            }
-        };
+        if self.background_tiles.is_empty() {
+            self.background_tiles = Self::upload_background_tiles(
+                canvas,
+                &self.background_image,
+                self.max_texture_size,
+            )?;
+        }
 
         let transparency_bg_id = match self.transparent_background_id {
             Some(id) if onscreen => Some(id),
@@ -2567,82 +2720,89 @@ impl FemtoVgAreaMut {
             );
         }
 
-        canvas.fill_path(
-            &path,
-            &Paint::image(background_image_id, 0f32, 0f32, w, h, 0f32, 1f32),
-        );
+        for tile in &self.background_tiles {
+            let mut tile_path = Path::new();
+            tile_path.rect(tile.x, tile.y, tile.w, tile.h);
+            canvas.fill_path(
+                &tile_path,
+                &Paint::image(tile.id, tile.x, tile.y, tile.w, tile.h, 0f32, 1f32),
+            );
+        }
 
         Ok(())
     }
 
-    fn upload_background_image(
+    /// Upload `image` as a grid of GPU tiles no larger than
+    /// `max_texture_size` on either axis. A single texture would be
+    /// storage-less above that limit (long scroll captures routinely
+    /// exceed it), sampling as black on screen and breaking offscreen
+    /// exports — see `BackgroundTile`.
+    fn upload_background_tiles(
         canvas: &mut femtovg::Canvas<femtovg::renderer::OpenGl>,
         image: &Pixbuf,
-    ) -> Result<ImageId> {
+        max_texture_size: usize,
+    ) -> Result<Vec<BackgroundTile>> {
         let format = if image.has_alpha() {
             PixelFormat::Rgba8
         } else {
             PixelFormat::Rgb8
         };
 
-        let background_image_id = canvas.create_image_empty(
-            image.width() as usize,
-            image.height() as usize,
-            format,
-            ImageFlags::empty(),
-        )?;
-
-        // extract values
         let width = image.width() as usize;
-        let stride = image.rowstride() as usize; // stride is in bytes per row
         let height = image.height() as usize;
-        let bytes_per_pixel = if image.has_alpha() { 4 } else { 3 }; // pixbuf supports rgb or rgba
+        let stride = image.rowstride() as usize; // bytes per row
+        let bytes_per_pixel = if image.has_alpha() { 4 } else { 3 };
+        let limit = max_texture_size.max(1024);
 
+        let mut tiles = Vec::new();
+        // SAFETY: `image.pixels()` borrows the pixbuf's live buffer; we
+        // only read from it and copy out. `align_to` on the tightly
+        // packed copy is safe because RGBA<u8>/RGB<u8> are byte arrays.
         unsafe {
             let src_buffer = image.pixels();
+            for (tile_y, tile_h) in tile_ranges(height, limit) {
+                for (tile_x, tile_w) in tile_ranges(width, limit) {
+                    let id =
+                        canvas.create_image_empty(tile_w, tile_h, format, ImageFlags::empty())?;
 
-            let row_length = width * bytes_per_pixel;
-            let mut dst_buffer = if row_length == stride {
-                // stride == row_length, there are no additional bytes after the end of each row
-                src_buffer.to_vec()
-            } else {
-                // stride != row_length, there are additional bytes after the end of each row that
-                // need to be truncated. We copy row by row..
-                let mut dst_buffer = Vec::<u8>::with_capacity(width * height * bytes_per_pixel);
+                    let row_length = tile_w * bytes_per_pixel;
+                    let mut dst_buffer = Vec::<u8>::with_capacity(row_length * tile_h);
+                    for row in tile_y..tile_y + tile_h {
+                        let src_offset = row * stride + tile_x * bytes_per_pixel;
+                        dst_buffer
+                            .extend_from_slice(&src_buffer[src_offset..src_offset + row_length]);
+                    }
 
-                for row in 0..height {
-                    let src_offset = row * stride;
-                    dst_buffer.extend_from_slice(&src_buffer[src_offset..src_offset + row_length]);
+                    if image.has_alpha() {
+                        let img = Img::new_stride(
+                            dst_buffer.align_to::<RGBA<u8>>().1.to_vec(),
+                            tile_w,
+                            tile_h,
+                            tile_w,
+                        );
+                        canvas.update_image(id, ImageSource::Rgba(img.as_ref()), 0, 0)?;
+                    } else {
+                        let img = Img::new_stride(
+                            dst_buffer.align_to::<RGB<u8>>().1.to_owned(),
+                            tile_w,
+                            tile_h,
+                            tile_w,
+                        );
+                        canvas.update_image(id, ImageSource::Rgb(img.as_ref()), 0, 0)?;
+                    }
+
+                    tiles.push(BackgroundTile {
+                        id,
+                        x: tile_x as f32,
+                        y: tile_y as f32,
+                        w: tile_w as f32,
+                        h: tile_h as f32,
+                    });
                 }
-                dst_buffer
-            };
-
-            // in almost all cases, that should be a no-op. Buf we might have additional elements after the
-            // end of the buffer, e.g. after width * height * bytes_per_pixel
-            dst_buffer.truncate(width * height * bytes_per_pixel);
-
-            if image.has_alpha() {
-                let img = Img::new_stride(
-                    dst_buffer.align_to::<RGBA<u8>>().1.to_vec(),
-                    width,
-                    height,
-                    width,
-                );
-
-                canvas.update_image(background_image_id, ImageSource::Rgba(img.as_ref()), 0, 0)?;
-            } else {
-                let img = Img::new_stride(
-                    dst_buffer.align_to::<RGB<u8>>().1.to_owned(),
-                    width,
-                    height,
-                    width,
-                );
-
-                canvas.update_image(background_image_id, ImageSource::Rgb(img.as_ref()), 0, 0)?;
             }
         }
 
-        Ok(background_image_id)
+        Ok(tiles)
     }
 
     fn create_transparency_bg(
@@ -3139,5 +3299,43 @@ impl FemtoVgAreaMut {
 
     pub fn set_is_drag(&mut self, is_drag: bool) {
         self.is_drag = is_drag;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tile_ranges;
+
+    #[test]
+    fn tile_ranges_covers_exactly_once() {
+        for (total, limit) in [
+            (1usize, 16384usize),
+            (16384, 16384),
+            (16385, 16384),
+            (35011, 16384),
+            (5000, 1024),
+        ] {
+            let ranges = tile_ranges(total, limit);
+            let mut expected_start = 0;
+            for (start, len) in &ranges {
+                assert_eq!(*start, expected_start);
+                assert!(*len > 0 && *len <= limit);
+                expected_start = start + len;
+            }
+            assert_eq!(
+                expected_start, total,
+                "ranges must cover total for {total}/{limit}"
+            );
+        }
+    }
+
+    #[test]
+    fn tile_ranges_zero_total_is_empty() {
+        assert!(tile_ranges(0, 16384).is_empty());
+    }
+
+    #[test]
+    fn tile_ranges_guards_zero_limit() {
+        assert_eq!(tile_ranges(3, 0), vec![(0, 1), (1, 1), (2, 1)]);
     }
 }
