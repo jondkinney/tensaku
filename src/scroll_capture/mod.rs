@@ -936,6 +936,12 @@ fn build_overlay(
                 drop(s);
                 drawing_w.queue_draw();
                 if phase == Phase::Selected {
+                    if sel.is_valid() {
+                        // Every committed shape change updates the
+                        // restorable region — even if this overlay is
+                        // cancelled afterwards.
+                        crate::state::save_scroll_capture_last_region([sel.x, sel.y, sel.w, sel.h]);
+                    }
                     position_selected_controls_and_input(
                         &state,
                         &window_w,
@@ -951,6 +957,9 @@ fn build_overlay(
                 s.phase = Phase::Selected;
                 let sel = s.selection;
                 drop(s);
+                // The freshly dragged shape becomes the restorable region
+                // immediately — Esc after this still remembers it.
+                crate::state::save_scroll_capture_last_region([sel.x, sel.y, sel.w, sel.h]);
                 action_pill_w.set_visible(true);
                 window_w.set_keyboard_mode(KeyboardMode::Exclusive);
                 position_selected_controls_and_input(
@@ -1249,7 +1258,6 @@ fn start_capture(
     mode: CaptureMode,
 ) -> bool {
     let sel = state.borrow().selection;
-    crate::state::save_scroll_capture_last_region([sel.x, sel.y, sel.w, sel.h]);
     status.set_text(match mode {
         CaptureMode::Manual(_) => "Scroll inside selection",
         CaptureMode::Auto(_) => "Auto-scrolling…",
