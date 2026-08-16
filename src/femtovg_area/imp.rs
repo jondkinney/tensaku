@@ -2400,64 +2400,101 @@ impl FemtoVgAreaMut {
         let img_w = (bounds.1.x - bounds.0.x).max(1.0) as usize;
         let img_h = (bounds.1.y - bounds.0.y).max(1.0) as usize;
 
-        // The punch-out buffer is allocated at full image size; above
-        // the GL texture limit that buffer is storage-less and its
-        // render-target switch silently fails — the dark fill would
-        // then land on the CALLER'S target and corrupt it. Skip the
-        // effect for oversized images until the overlay is tiled too.
+        // The punched dark sheet is built as a grid of offscreen tiles
+        // no larger than the GL texture limit — the same treatment the
+        // background image and export targets get. A single full-image
+        // buffer above the limit is storage-less: its render-target
+        // switch silently fails and the dark fill would land on the
+        // CALLER'S target and corrupt it (long scroll captures exceed
+        // the limit routinely). Tiles are seamless because per-pixel
+        // coverage is computed by exactly one tile.
         let limit = self.max_texture_size.max(1024);
-        if img_w > limit || img_h > limit {
-            eprintln!(
-                "spotlight overlay skipped: image {img_w}x{img_h} exceeds GL texture limit {limit}"
-            );
-            return Ok(());
-        }
-
-        // Offscreen target for the punched overlay. FLIP_Y because
-        // GL framebuffer-attached textures are bottom-up; without it
-        // the composited image lands upside-down on the screen
-        // target.
-        let overlay_id =
-            canvas.create_image_empty(img_w, img_h, PixelFormat::Rgba8, ImageFlags::FLIP_Y)?;
-
-        canvas.flush();
-        canvas.set_render_target(RenderTarget::Image(overlay_id));
-        canvas.reset_transform();
-        // Drop any scissor the caller left set. femtovg keeps the
-        // scissor in canvas state across `set_render_target`, so in
-        // committed-crop mode the clip would still be the on-screen
-        // crop rect — and it would clip the dark fill below to that
-        // rect *inside* this full-image offscreen buffer, leaving the
-        // overlay dark only in a misplaced sub-rectangle. The clip is
-        // re-applied before the composite (see below).
-        canvas.reset_scissor();
-        canvas.clear_rect(
-            0,
-            0,
-            img_w as u32,
-            img_h as u32,
-            femtovg::Color::rgbaf(0.0, 0.0, 0.0, 0.0),
-        );
-
-        // Lay down the dark fill across the entire overlay.
-        let mut fill = Path::new();
-        fill.rect(0.0, 0.0, img_w as f32, img_h as f32);
         let dark = Paint::color(femtovg::Color::rgbaf(0.0, 0.0, 0.0, darkness));
-        canvas.fill_path(&fill, &dark);
-
-        // Punch the spotlight shapes out of the dark overlay. The
-        // composite operation only cares about the source's alpha;
-        // any opaque color works.
-        canvas.global_composite_operation(CompositeOperation::DestinationOut);
         let punch = Paint::color(femtovg::Color::rgbaf(1.0, 1.0, 1.0, 1.0));
-        for p in &paths {
-            canvas.fill_path(p, &punch);
-        }
-        canvas.global_composite_operation(CompositeOperation::SourceOver);
-        canvas.flush();
 
-        // Restore the caller's target + transform and composite the
-        // punched overlay on top.
+        struct OverlayTile {
+            id: femtovg::ImageId,
+            x: f32,
+            y: f32,
+            w: f32,
+            h: f32,
+        }
+        let mut tiles: Vec<OverlayTile> = Vec::new();
+
+        // Build every tile before compositing any of them, so the
+        // render target switches stay batched. Collected in a closure
+        // so an allocation failure part-way still falls through to the
+        // caller-state restore + tile cleanup below instead of leaving
+        // the canvas pointed at a half-built tile.
+        let build_result = (|| -> Result<()> {
+            for (tile_y, tile_h) in tile_ranges(img_h, limit) {
+                for (tile_x, tile_w) in tile_ranges(img_w, limit) {
+                    // FLIP_Y because GL framebuffer-attached textures
+                    // are bottom-up; without it the composited tile
+                    // lands upside-down on the final target.
+                    let overlay_id = canvas.create_image_empty(
+                        tile_w,
+                        tile_h,
+                        PixelFormat::Rgba8,
+                        ImageFlags::FLIP_Y,
+                    )?;
+                    tiles.push(OverlayTile {
+                        id: overlay_id,
+                        x: tile_x as f32,
+                        y: tile_y as f32,
+                        w: tile_w as f32,
+                        h: tile_h as f32,
+                    });
+
+                    canvas.flush();
+                    canvas.set_render_target(RenderTarget::Image(overlay_id));
+                    canvas.reset_transform();
+                    // Drop any scissor the caller left set. femtovg
+                    // keeps the scissor in canvas state across
+                    // `set_render_target`, so in committed-crop mode
+                    // the clip would still be the on-screen crop rect —
+                    // and it would clip the dark fill below to that
+                    // rect *inside* this offscreen buffer, leaving the
+                    // overlay dark only in a misplaced sub-rectangle.
+                    // The clip is re-applied before the composite.
+                    canvas.reset_scissor();
+                    canvas.clear_rect(
+                        0,
+                        0,
+                        tile_w as u32,
+                        tile_h as u32,
+                        femtovg::Color::rgbaf(0.0, 0.0, 0.0, 0.0),
+                    );
+
+                    // Map image coordinates into this tile so the
+                    // spotlight paths (image-space) punch at the right
+                    // spots; shapes outside the tile clip away.
+                    let mut tile_transform = Transform2D::identity();
+                    tile_transform.translate(-(tile_x as f32), -(tile_y as f32));
+                    canvas.set_transform(&tile_transform);
+
+                    // Dark fill across this tile's slice of the image.
+                    let mut fill = Path::new();
+                    fill.rect(tile_x as f32, tile_y as f32, tile_w as f32, tile_h as f32);
+                    canvas.fill_path(&fill, &dark);
+
+                    // Punch the spotlight shapes out. The composite
+                    // operation only cares about the source's alpha;
+                    // any opaque color works.
+                    canvas.global_composite_operation(CompositeOperation::DestinationOut);
+                    for p in &paths {
+                        canvas.fill_path(p, &punch);
+                    }
+                    canvas.global_composite_operation(CompositeOperation::SourceOver);
+                    canvas.flush();
+                }
+            }
+            Ok(())
+        })();
+
+        // Restore the caller's target + transform BEFORE acting on any
+        // build error, so a failure can never leave the canvas pointed
+        // at an overlay tile.
         canvas.set_render_target(restore_target);
         canvas.reset_transform();
         canvas.set_transform(&restore_transform);
@@ -2470,14 +2507,19 @@ impl FemtoVgAreaMut {
             canvas.scissor(sx, sy, sw, sh);
         }
 
-        let mut final_path = Path::new();
-        final_path.rect(0.0, 0.0, img_w as f32, img_h as f32);
-        let composited = Paint::image(overlay_id, 0.0, 0.0, img_w as f32, img_h as f32, 0.0, 1.0);
-        canvas.fill_path(&final_path, &composited);
-        canvas.flush();
-
-        canvas.delete_image(overlay_id);
-        Ok(())
+        if build_result.is_ok() {
+            for tile in &tiles {
+                let mut final_path = Path::new();
+                final_path.rect(tile.x, tile.y, tile.w, tile.h);
+                let composited = Paint::image(tile.id, tile.x, tile.y, tile.w, tile.h, 0.0, 1.0);
+                canvas.fill_path(&final_path, &composited);
+            }
+            canvas.flush();
+        }
+        for tile in &tiles {
+            canvas.delete_image(tile.id);
+        }
+        build_result
     }
 
     /// Update the global spotlight darkness used by the next render.
