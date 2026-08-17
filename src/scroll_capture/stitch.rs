@@ -44,6 +44,14 @@ const STATIONARY_EDGE_ERROR: f64 = 1.0;
 /// to win by ratio. Each edge gives up at most this fraction of the axis so a
 /// genuinely stationary pair still resolves as `Stationary` on the remainder.
 const MAX_STATIONARY_SCORING_EDGE_DEN: usize = 4;
+/// Rows just above a fixed footer (or a translucent overlay with no opaque
+/// part) often carry its drop shadow: the content beneath scrolls, but every
+/// frame tints it. Compared document-aligned with the next frame — where the
+/// same rows have scrolled up out of the shadow — those rows differ by the
+/// tint while plain translated content differs by nothing. Any such rows
+/// contiguous with the trailing edge join the trailing extent, so each frame
+/// contributes only untinted rows and the shadow appears once, at the end.
+const NEAR_STATIONARY_ERROR: f64 = 1.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StitchAxis {
@@ -736,6 +744,10 @@ pub struct StitchAccumulator {
     total_delta: usize,
     edge_error_sums: Vec<u64>,
     edge_error_counts: Vec<u64>,
+    /// Per trailing depth: how much a row differs from the *same document
+    /// row* in the following frame (see [`NEAR_STATIONARY_ERROR`]).
+    aligned_error_sums: Vec<u64>,
+    aligned_error_counts: Vec<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -778,6 +790,8 @@ impl StitchAccumulator {
             total_delta: 0,
             edge_error_sums: vec![0; max_edge],
             edge_error_counts: vec![0; max_edge],
+            aligned_error_sums: vec![0; max_edge],
+            aligned_error_counts: vec![0; max_edge],
         })
     }
 
@@ -839,9 +853,12 @@ impl StitchAccumulator {
         let source_axis_start = self.axis_len.saturating_sub(retained_extent);
         let rgba = copy_tail_band(frame, self.axis, self.width, self.height, source_axis_start)?;
         let (edge_sums, edge_counts) = self.edge_observation(frame)?;
+        let (aligned_sums, aligned_counts) = self.aligned_observation(frame, delta)?;
 
         let mut combined_sums = Vec::with_capacity(self.max_edge);
         let mut combined_counts = Vec::with_capacity(self.max_edge);
+        let mut combined_aligned_sums = Vec::with_capacity(self.max_edge);
+        let mut combined_aligned_counts = Vec::with_capacity(self.max_edge);
         for depth in 0..self.max_edge {
             combined_sums.push(
                 self.edge_error_sums[depth]
@@ -853,9 +870,21 @@ impl StitchAccumulator {
                     .checked_add(edge_counts[depth])
                     .ok_or_else(|| anyhow::anyhow!("stationary-edge sample count overflow"))?,
             );
+            combined_aligned_sums.push(
+                self.aligned_error_sums[depth]
+                    .checked_add(aligned_sums[depth])
+                    .ok_or_else(|| anyhow::anyhow!("near-stationary error sum overflow"))?,
+            );
+            combined_aligned_counts.push(
+                self.aligned_error_counts[depth]
+                    .checked_add(aligned_counts[depth])
+                    .ok_or_else(|| anyhow::anyhow!("near-stationary sample count overflow"))?,
+            );
         }
         self.edge_error_sums = combined_sums;
         self.edge_error_counts = combined_counts;
+        self.aligned_error_sums = combined_aligned_sums;
+        self.aligned_error_counts = combined_aligned_counts;
         self.bands.push(TailBand {
             delta,
             source_axis_start,
@@ -870,7 +899,8 @@ impl StitchAccumulator {
     }
 
     pub fn finish(self) -> Result<Pixbuf> {
-        let trailing = self.stationary_trailing_strip();
+        let strip = self.stationary_trailing_strip();
+        let trailing = strip + self.near_stationary_trailing_zone(strip);
         let content_extent = self.axis_len.saturating_sub(trailing);
         if content_extent == 0 {
             bail!("stationary trailing edge covers the entire capture");
@@ -926,6 +956,94 @@ impl StitchAccumulator {
             }
         }
         Ok((sums, counts))
+    }
+
+    /// Compare the trailing rows/columns of the previously retained frame
+    /// with the same *document* rows in `frame` (shifted by `delta`). Depth 0
+    /// is the trailing edge; depths that scroll past the leading edge are
+    /// simply not observed.
+    fn aligned_observation(&self, frame: &Pixbuf, delta: usize) -> Result<(Vec<u64>, Vec<u64>)> {
+        let mut sums = vec![0u64; self.max_edge];
+        let mut counts = vec![0u64; self.max_edge];
+        if self.max_edge == 0 {
+            return Ok((sums, counts));
+        }
+
+        // The previous frame's trailing max_edge rows live either in the
+        // full first frame or in the last retained band.
+        let (previous, previous_start, previous_row_bytes): (&[u8], usize, usize) =
+            match self.bands.last() {
+                None => (&self.first_rgba, 0, self.width * 4),
+                Some(band) => {
+                    let band_row_bytes = match self.axis {
+                        StitchAxis::Vertical => self.width * 4,
+                        StitchAxis::Horizontal => (self.axis_len - band.source_axis_start) * 4,
+                    };
+                    (&band.rgba, band.source_axis_start, band_row_bytes)
+                }
+            };
+        let other_bytes = frame.read_pixel_bytes();
+        let other = other_bytes.as_ref();
+        let other_stride = frame.rowstride() as usize;
+        let cross_step = (self.cross_len / 512).max(1);
+
+        for depth in 0..self.max_edge {
+            let position = self.axis_len - depth - 1;
+            let Some(aligned) = position.checked_sub(delta) else {
+                continue;
+            };
+            if position < previous_start {
+                continue;
+            }
+            for cross in (0..self.cross_len).step_by(cross_step) {
+                let (previous_off, other_off) = match self.axis {
+                    StitchAxis::Vertical => (
+                        (position - previous_start) * previous_row_bytes + cross * 4,
+                        aligned * other_stride + cross * 4,
+                    ),
+                    StitchAxis::Horizontal => (
+                        cross * previous_row_bytes + (position - previous_start) * 4,
+                        cross * other_stride + aligned * 4,
+                    ),
+                };
+                for channel in 0..3 {
+                    sums[depth] = sums[depth]
+                        .checked_add(
+                            previous[previous_off + channel].abs_diff(other[other_off + channel])
+                                as u64,
+                        )
+                        .ok_or_else(|| anyhow::anyhow!("near-stationary error sum overflow"))?;
+                    counts[depth] = counts[depth]
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow::anyhow!("near-stationary sample count overflow"))?;
+                }
+            }
+        }
+        Ok((sums, counts))
+    }
+
+    /// Rows/columns directly above the stationary strip whose document-aligned
+    /// difference to the next frame stays above [`NEAR_STATIONARY_ERROR`] —
+    /// a fixed overlay's shadow or translucent edge. Bounded so the strip
+    /// plus zone still fit inside every retained band.
+    fn near_stationary_trailing_zone(&self, strip: usize) -> usize {
+        if self.bands.is_empty() {
+            return 0;
+        }
+        let mut zone = 0usize;
+        for depth in strip..self.max_edge {
+            let count = self.aligned_error_counts[depth];
+            let error = if count == 0 {
+                0.0
+            } else {
+                self.aligned_error_sums[depth] as f64 / count as f64
+            };
+            if error <= NEAR_STATIONARY_ERROR {
+                break;
+            }
+            zone += 1;
+        }
+        zone
     }
 
     fn stationary_trailing_strip(&self) -> usize {
@@ -2509,11 +2627,17 @@ mod tests {
         accumulator.push_forward(&frames[2], deltas[1]).unwrap();
 
         // Freezing the edge after the first pair would incorrectly use eight
-        // rows. Online all-frame statistics reduce it to four, and the saved
-        // halo still contains the shifted slices needed at finish time.
+        // rows. Online all-frame statistics reduce the stationary strip to
+        // four, and the saved halo still contains the shifted slices needed at
+        // finish time. The four rows that were border in the first two frames
+        // and content in the third are near-stationary (border vs content
+        // when document-aligned), so the trailing extent grows back to eight:
+        // those document rows are taken from the last frame, where they are
+        // visible, instead of emitting hidden border rows mid-image.
         assert_eq!(accumulator.stationary_trailing_strip(), 4);
+        assert_eq!(accumulator.near_stationary_trailing_zone(4), 4);
         let stitched = accumulator.finish().unwrap();
-        assert_vertical_composition(&stitched, &frames, &deltas, 4);
+        assert_vertical_composition(&stitched, &frames, &deltas, 8);
     }
 
     #[test]
@@ -2575,6 +2699,152 @@ mod tests {
             }
         }
         pixbuf_from_rgba(pixels, VIEW_W, VIEW_H)
+    }
+
+    /// Viewport with an opaque fixed footer whose translucent drop shadow
+    /// darkens the `shadow` document rows above it, strongest next to the
+    /// footer. `shaded == false` gives the same view without the shadow.
+    fn viewport_with_shadowed_footer(
+        document_y: usize,
+        footer: usize,
+        shadow: usize,
+        shaded: bool,
+    ) -> Pixbuf {
+        let mut pixels = Vec::with_capacity(VIEW_W * VIEW_H * 4);
+        for y in 0..VIEW_H {
+            for x in 0..VIEW_W {
+                let pixel = if y >= VIEW_H - footer {
+                    BORDER
+                } else {
+                    let mut pixel = doc_pixel(x, document_y + y);
+                    let distance = VIEW_H - footer - y; // 1 = touching the footer
+                    if shaded && distance <= shadow {
+                        let tint = ((shadow + 1 - distance) * 6) as u8;
+                        for channel in &mut pixel[..3] {
+                            *channel = channel.saturating_sub(tint);
+                        }
+                    }
+                    pixel
+                };
+                pixels.extend_from_slice(&pixel);
+            }
+        }
+        pixbuf_from_rgba(pixels, VIEW_W, VIEW_H)
+    }
+
+    #[test]
+    fn footer_shadow_is_emitted_once_not_at_every_seam() {
+        const FOOTER: usize = 10;
+        const SHADOW: usize = 8;
+        let offsets = [0usize, 37, 78, 107];
+        let deltas = [37usize, 41, 29];
+        let frames: Vec<_> = offsets
+            .iter()
+            .map(|&y| viewport_with_shadowed_footer(y, FOOTER, SHADOW, true))
+            .collect();
+
+        let mut accumulator = StitchAccumulator::new(&frames[0], StitchAxis::Vertical).unwrap();
+        for (frame, &delta) in frames.iter().skip(1).zip(&deltas) {
+            accumulator.push_forward(frame, delta).unwrap();
+        }
+        let strip = accumulator.stationary_trailing_strip();
+        assert_eq!(strip, FOOTER);
+        let zone = accumulator.near_stationary_trailing_zone(strip);
+        assert_eq!(zone, SHADOW, "shadow rows above the footer");
+
+        // Every content row before the final footer + shadow equals the
+        // untinted document, i.e. no seam carries the shadow.
+        let stitched = accumulator.finish().unwrap();
+        let total: usize = deltas.iter().sum::<usize>() + VIEW_H;
+        assert_eq!(stitched.height() as usize, total);
+        let bytes = stitched.read_pixel_bytes();
+        let stride = stitched.rowstride() as usize;
+        for y in 0..total - FOOTER - SHADOW {
+            for x in 0..VIEW_W {
+                let off = y * stride + x * 4;
+                assert_eq!(
+                    &bytes[off..off + 3],
+                    &doc_pixel(x, y)[..3],
+                    "row {y} col {x} carries a tint"
+                );
+            }
+        }
+        // The last frame's shadow and footer close the image, once.
+        let tail_row = total - 1;
+        let footer_off = tail_row * stride;
+        assert_eq!(&bytes[footer_off..footer_off + 3], &BORDER[..3]);
+        let shaded_row = total - FOOTER - 1;
+        let shaded_off = shaded_row * stride;
+        assert!(
+            bytes[shaded_off] < doc_pixel(0, shaded_row)[0] || doc_pixel(0, shaded_row)[0] < 6,
+            "final shadow row {shaded_row} should be tinted"
+        );
+    }
+
+    #[test]
+    fn plain_translation_has_no_near_stationary_zone() {
+        let frames = [
+            viewport(0, 0, VIEW_W, VIEW_H, Some(10)),
+            viewport(0, 40, VIEW_W, VIEW_H, Some(10)),
+            viewport(0, 85, VIEW_W, VIEW_H, Some(10)),
+        ];
+        let mut accumulator = StitchAccumulator::new(&frames[0], StitchAxis::Vertical).unwrap();
+        accumulator.push_forward(&frames[1], 40).unwrap();
+        accumulator.push_forward(&frames[2], 45).unwrap();
+        let strip = accumulator.stationary_trailing_strip();
+        assert_eq!(strip, 10);
+        assert_eq!(accumulator.near_stationary_trailing_zone(strip), 0);
+    }
+
+    #[test]
+    fn horizontal_edge_shadow_is_emitted_once() {
+        // Fixed right edge (12 columns) with a 6-column shadow fading left.
+        const EDGE: usize = 12;
+        const SHADOW: usize = 6;
+        let (w, h) = (180usize, 64usize);
+        let frame = |document_x: usize| {
+            let mut pixels = Vec::with_capacity(w * h * 4);
+            for y in 0..h {
+                for x in 0..w {
+                    let pixel = if x >= w - EDGE {
+                        BORDER
+                    } else {
+                        let mut pixel = doc_pixel(document_x + x, y);
+                        let distance = w - EDGE - x;
+                        if distance <= SHADOW {
+                            let tint = ((SHADOW + 1 - distance) * 8) as u8;
+                            for channel in &mut pixel[..3] {
+                                *channel = channel.saturating_sub(tint);
+                            }
+                        }
+                        pixel
+                    };
+                    pixels.extend_from_slice(&pixel);
+                }
+            }
+            pixbuf_from_rgba(pixels, w, h)
+        };
+        let frames = [frame(0), frame(43), frame(95)];
+        let mut accumulator = StitchAccumulator::new(&frames[0], StitchAxis::Horizontal).unwrap();
+        accumulator.push_forward(&frames[1], 43).unwrap();
+        accumulator.push_forward(&frames[2], 52).unwrap();
+        let strip = accumulator.stationary_trailing_strip();
+        assert_eq!(strip, EDGE);
+        assert_eq!(accumulator.near_stationary_trailing_zone(strip), SHADOW);
+        let stitched = accumulator.finish().unwrap();
+        assert_eq!(stitched.width() as usize, w + 95);
+        let bytes = stitched.read_pixel_bytes();
+        let stride = stitched.rowstride() as usize;
+        for y in 0..h {
+            for x in 0..w + 95 - EDGE - SHADOW {
+                let off = y * stride + x * 4;
+                assert_eq!(
+                    &bytes[off..off + 3],
+                    &doc_pixel(x, y)[..3],
+                    "col {x} row {y}"
+                );
+            }
+        }
     }
 
     #[test]
