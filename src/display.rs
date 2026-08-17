@@ -57,6 +57,48 @@ pub fn detect_hyprland_scale() -> Option<f32> {
     parse_scale(text)
 }
 
+/// The Hyprland monitor currently marked `focused` in `hyprctl monitors -j`.
+///
+/// Scroll capture uses `name` (the connector, e.g. `DP-3`) to pin its
+/// layer-shell overlay, its screencopy source and its virtual pointer to the
+/// same output. `None` outside Hyprland or when `hyprctl` fails.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct HyprlandMonitor {
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub scale: f32,
+    #[serde(default)]
+    pub transform: i32,
+    #[serde(default)]
+    pub focused: bool,
+}
+
+pub fn hyprland_focused_monitor() -> Option<HyprlandMonitor> {
+    std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")?;
+    let output = Command::new("hyprctl")
+        .args(["monitors", "-j"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_focused_monitor(std::str::from_utf8(&output.stdout).ok()?)
+}
+
+/// Parse `hyprctl monitors -j` and return the focused monitor, falling back
+/// to the first one when none is marked focused.
+fn parse_focused_monitor(text: &str) -> Option<HyprlandMonitor> {
+    let monitors: Vec<HyprlandMonitor> = serde_json::from_str(text).ok()?;
+    monitors
+        .iter()
+        .find(|monitor| monitor.focused)
+        .or_else(|| monitors.first())
+        .cloned()
+}
+
 /// Logical (CSS-px) size of the focused Hyprland monitor. Used as the
 /// window-size cap when GTK can't yet resolve which monitor a surface
 /// is on (on Wayland `monitor_at_surface` returns nothing until the
@@ -169,6 +211,29 @@ fn parse_scale(text: &str) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_the_focused_monitor_from_hyprctl_json() {
+        // Real `hyprctl monitors -j` shape (nested workspace objects included).
+        let text = r#"[{
+            "id": 0, "name": "DP-3", "width": 6144, "height": 3456, "x": 0, "y": 0,
+            "activeWorkspace": {"id": 1, "name": "1"},
+            "specialWorkspace": {"id": 0, "name": ""},
+            "reserved": [0, 26, 0, 0], "scale": 2, "transform": 0, "focused": false
+        },{
+            "id": 1, "name": "HDMI-A-1", "width": 2560, "height": 1440, "x": 3072, "y": 0,
+            "activeWorkspace": {"id": 2, "name": "2"},
+            "specialWorkspace": {"id": 0, "name": ""},
+            "reserved": [0, 0, 0, 0], "scale": 1, "transform": 0, "focused": true
+        }]"#;
+        let monitor = parse_focused_monitor(text).expect("monitor");
+        assert_eq!(monitor.name, "HDMI-A-1");
+        assert_eq!((monitor.x, monitor.y), (3072, 0));
+        assert_eq!(monitor.scale, 1.0);
+        let none_focused = text.replace("\"focused\": true", "\"focused\": false");
+        assert_eq!(parse_focused_monitor(&none_focused).unwrap().name, "DP-3");
+        assert!(parse_focused_monitor("not json").is_none());
+    }
 
     #[test]
     fn parses_focused_monitor_scale() {

@@ -649,6 +649,11 @@ struct OverlayState {
     /// Whether a manual capture should relocate the pointer before frame one.
     /// Snapshotted when the standalone scroll-capture overlay is launched.
     park_manual_pointer: bool,
+    /// Connector name of the monitor the overlay covers (e.g. `DP-3`). Every
+    /// screencopy request and virtual-pointer warp targets this output so a
+    /// second monitor never changes where frames come from or where the
+    /// pointer lands. `None` = compositor default / first output.
+    output_name: Option<String>,
     auto_scroll_stop: Option<Arc<AtomicBool>>,
     pointer_focus_stop: Option<Arc<AtomicBool>>,
     /// Lower-right focus target for the active manual capture. When parking is
@@ -686,6 +691,20 @@ struct OverlayState {
 pub struct ScrollCaptureOutcome {
     pub image: Pixbuf,
     pub warning: Option<String>,
+}
+
+/// The GdkMonitor whose connector (e.g. `DP-3`) matches `name`.
+fn gdk_monitor_named(name: &str) -> Option<gtk::gdk::Monitor> {
+    let display = gtk::gdk::Display::default()?;
+    let monitors = display.monitors();
+    (0..monitors.n_items())
+        .filter_map(|index| monitors.item(index))
+        .filter_map(|item| item.downcast::<gtk::gdk::Monitor>().ok())
+        .find(|monitor| {
+            monitor
+                .connector()
+                .is_some_and(|connector| connector == name)
+        })
 }
 
 pub fn run(park_manual_pointer: bool) -> Result<Option<ScrollCaptureOutcome>> {
@@ -728,6 +747,7 @@ fn build_overlay(
         capture_epoch: 0,
         capture_mode: None,
         park_manual_pointer,
+        output_name: None,
         auto_scroll_stop: None,
         pointer_focus_stop: None,
         manual_pointer_target: None,
@@ -748,6 +768,32 @@ fn build_overlay(
 
     let window = gtk::ApplicationWindow::new(app);
     window.init_layer_shell();
+    // Pin the overlay to the focused Hyprland monitor and remember its
+    // connector so capture and pointer warps address the same output. Other
+    // compositors fall back to the monitor the surface is mapped on.
+    if let Some(monitor) = crate::display::hyprland_focused_monitor() {
+        if let Some(gdk_monitor) = gdk_monitor_named(&monitor.name) {
+            window.set_monitor(Some(&gdk_monitor));
+        }
+        state.borrow_mut().output_name = Some(monitor.name);
+    }
+    {
+        let state_w = Rc::clone(&state);
+        window.connect_map(move |window| {
+            if state_w.borrow().output_name.is_some() {
+                return;
+            }
+            let connector = window
+                .surface()
+                .and_then(|surface| WidgetExt::display(window).monitor_at_surface(&surface))
+                .and_then(|monitor| monitor.connector())
+                .map(|connector| connector.to_string());
+            if let Some(connector) = connector {
+                eprintln!("scroll-capture: overlay mapped on {connector}");
+                state_w.borrow_mut().output_name = Some(connector);
+            }
+        });
+    }
     window.set_layer(Layer::Overlay);
     window.set_keyboard_mode(KeyboardMode::Exclusive);
     window.set_namespace(Some("tensaku-scroll-capture"));
@@ -1486,7 +1532,13 @@ fn park_pointer_then_resume_auto(
 ) {
     let (cursor_x, cursor_y) = pointer_park_target(selection, window.scale_factor().max(1));
     let stop = Arc::new(AtomicBool::new(false));
-    if let Err(error) = auto_scroll::focus_underlying_once(Arc::clone(&stop), cursor_x, cursor_y) {
+    let output_name = state.borrow().output_name.clone();
+    if let Err(error) = auto_scroll::focus_underlying_once(
+        Arc::clone(&stop),
+        cursor_x,
+        cursor_y,
+        output_name.as_deref(),
+    ) {
         // A real-wheel worker will repeat this focus attempt immediately
         // before injecting; the keyboard fallback only needs the committed
         // KeyboardMode::None above. Let the worker decide whether its own
@@ -1542,7 +1594,13 @@ fn park_pointer_then_resume_manual(
 ) {
     let (cursor_x, cursor_y) = pointer_park_target(selection, window.scale_factor().max(1));
     let stop = Arc::new(AtomicBool::new(false));
-    if let Err(error) = auto_scroll::focus_underlying_once(Arc::clone(&stop), cursor_x, cursor_y) {
+    let output_name = state.borrow().output_name.clone();
+    if let Err(error) = auto_scroll::focus_underlying_once(
+        Arc::clone(&stop),
+        cursor_x,
+        cursor_y,
+        output_name.as_deref(),
+    ) {
         eprintln!("scroll-capture: could not repark pointer for manual continuation: {error:#}");
         status.set_text("Move the pointer inside the selection, then scroll");
         run_capture_tick_and_reschedule(state, window, selection, status);
@@ -1584,7 +1642,13 @@ fn start_capture_after_optional_pointer_park(
     };
 
     let stop = Arc::new(AtomicBool::new(false));
-    if let Err(error) = auto_scroll::focus_underlying_once(Arc::clone(&stop), cursor_x, cursor_y) {
+    let output_name = state.borrow().output_name.clone();
+    if let Err(error) = auto_scroll::focus_underlying_once(
+        Arc::clone(&stop),
+        cursor_x,
+        cursor_y,
+        output_name.as_deref(),
+    ) {
         // Preserve the target so frame one's existing in-place refocus path
         // still runs. A failed park must not make the capture unusable.
         eprintln!("scroll-capture: could not park manual capture pointer: {error:#}");
@@ -1794,7 +1858,8 @@ fn capture_tick(
         width: sel.w.round() as i32,
         height: sel.h.round() as i32,
     };
-    match capture::capture_region(rect) {
+    let output_name = state.borrow().output_name.clone();
+    match capture::capture_region(rect, output_name.as_deref()) {
         Ok(pixbuf) => {
             dump_debug_frame(&pixbuf, auto_cycle.as_ref().map(|(_, cycle)| *cycle));
             if state.borrow().capture.is_none() && pixbuf_is_uniform(&pixbuf) {
@@ -3020,6 +3085,7 @@ fn start_auto_scroll_at(
     let scale = clicked_btn.scale_factor().max(1);
     let sel = state.borrow().selection;
     let (cursor_x, cursor_y) = pointer_park_target(sel, scale);
+    let output_name = state.borrow().output_name.clone();
 
     let state_w = Rc::clone(state);
     let window_w = window.clone();
@@ -3037,6 +3103,7 @@ fn start_auto_scroll_at(
             cursor_x,
             cursor_y,
             direction,
+            output_name.as_deref(),
         ) {
             eprintln!("scroll-capture: auto-scroll failed to start: {e}");
             // Capture is still useful without injection: transparently fall

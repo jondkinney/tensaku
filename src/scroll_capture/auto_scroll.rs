@@ -15,7 +15,9 @@ use smithay_client_toolkit::delegate_registry;
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
 use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat};
-use wayland_client::{Connection, Dispatch, QueueHandle};
+use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
+
+use crate::capture::outputs::OutputTracker;
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
     zwp_virtual_keyboard_manager_v1, zwp_virtual_keyboard_v1,
 };
@@ -105,7 +107,7 @@ const ACK_POLL_MS: u64 = 5;
 
 struct State {
     registry_state: RegistryState,
-    output_size: Option<(i32, i32)>,
+    outputs: OutputTracker,
 }
 
 /// Lock-step coordination between the input worker and GTK's capture loop.
@@ -395,6 +397,7 @@ pub fn spawn_worker(
     cursor_x: i32,
     cursor_y: i32,
     direction: ScrollDirection,
+    output_name: Option<&str>,
 ) -> Result<()> {
     let uinput_result = match hyprland_natural_scroll_setting() {
         Some(natural_scroll) => spawn_worker_uinput(
@@ -404,6 +407,7 @@ pub fn spawn_worker(
             cursor_y,
             direction,
             natural_scroll,
+            output_name,
         ),
         None => Err(anyhow!(
             "compositor natural-scroll policy is unknown; using a logical wheel backend"
@@ -417,6 +421,7 @@ pub fn spawn_worker(
             cursor_x,
             cursor_y,
             direction,
+            output_name,
         ) {
             Ok(()) => {
                 eprintln!(
@@ -445,6 +450,7 @@ fn spawn_worker_uinput(
     cursor_y: i32,
     direction: ScrollDirection,
     natural_scroll: bool,
+    output_name: Option<&str>,
 ) -> Result<()> {
     let mut device = create_uinput_mouse()?;
     // Parking is useful for keeping hover effects out of captured frames, but
@@ -452,7 +458,7 @@ fn spawn_worker_uinput(
     // Wayland pointer context for the worker and reuse it for every cycle;
     // compositors without the protocol can still use uinput at the cursor's
     // current position.
-    let mut focus_context = match create_virtual_pointer() {
+    let mut focus_context = match create_virtual_pointer(output_name) {
         Ok(context) => Some(context),
         Err(error) => {
             eprintln!(
@@ -511,8 +517,10 @@ fn spawn_worker_virtual_pointer(
     cursor_x: i32,
     cursor_y: i32,
     direction: ScrollDirection,
+    output_name: Option<&str>,
 ) -> Result<()> {
-    let (mut event_queue, pointer, screen_width, screen_height) = create_virtual_pointer()?;
+    let (mut event_queue, pointer, screen_width, screen_height) =
+        create_virtual_pointer(output_name)?;
 
     thread::spawn(move || {
         let start = Instant::now();
@@ -574,7 +582,15 @@ type VirtualPointerContext = (
     i32,
 );
 
-fn create_virtual_pointer() -> Result<VirtualPointerContext> {
+/// Create a virtual pointer mapped to the output named `output_name`.
+///
+/// `motion_absolute` coordinates are physical pixels of that output, so the
+/// pointer must be bound to it (`create_virtual_pointer_with_output`, v2);
+/// an unbound pointer is mapped across the whole compositor layout, which
+/// lands warps on the wrong screen (or far off inside the right one) as soon
+/// as a second monitor is connected. Compositors that only offer v1 keep the
+/// old whole-layout behavior.
+fn create_virtual_pointer(output_name: Option<&str>) -> Result<VirtualPointerContext> {
     let conn = Connection::connect_to_env().context("auto-scroll: failed to connect to Wayland")?;
     let (globals, mut event_queue) =
         registry_queue_init::<State>(&conn).context("auto-scroll: registry init")?;
@@ -585,25 +601,31 @@ fn create_virtual_pointer() -> Result<VirtualPointerContext> {
     let seat = globals
         .bind::<wl_seat::WlSeat, _, _>(&qh, 1..=8, ())
         .context("no wl_seat available")?;
-    let _output = globals
-        .bind::<wl_output::WlOutput, _, _>(&qh, 1..=4, ())
-        .context("no wl_output available")?;
+    let mut outputs = OutputTracker::default();
+    outputs.bind_all(&globals, &qh);
     let mut state = State {
         registry_state: RegistryState::new(&globals),
-        output_size: None,
+        outputs,
     };
-    // Output mode provides the absolute-pointer coordinate extent. Two
-    // roundtrips match the existing path and reliably receive wl_output.mode.
+    // Output names and modes provide the target and its absolute-pointer
+    // coordinate extent. Two roundtrips match the existing path and reliably
+    // receive wl_output.mode.
     event_queue
         .roundtrip(&mut state)
-        .context("roundtrip 1 for wl_output mode")?;
+        .context("roundtrip 1 for wl_output info")?;
     event_queue
         .roundtrip(&mut state)
-        .context("roundtrip 2 for wl_output mode")?;
-    let (screen_width, screen_height) = state
-        .output_size
-        .context("wl_output did not report a mode")?;
-    let pointer = manager.create_virtual_pointer(Some(&seat), &qh, ());
+        .context("roundtrip 2 for wl_output info")?;
+    let (output, info) = state.outputs.select(output_name)?;
+    let (screen_width, screen_height) = info.mode.context("wl_output did not report a mode")?;
+    let pointer = if manager.version() >= 2 {
+        manager.create_virtual_pointer_with_output(Some(&seat), Some(output), &qh, ())
+    } else {
+        eprintln!(
+            "auto-scroll: zwlr_virtual_pointer_manager_v1 v1 only; pointer warps map to the whole layout"
+        );
+        manager.create_virtual_pointer(Some(&seat), &qh, ())
+    };
     event_queue
         .roundtrip(&mut state)
         .context("roundtrip after virtual-pointer creation")?;
@@ -612,10 +634,15 @@ fn create_virtual_pointer() -> Result<VirtualPointerContext> {
 
 /// Move the pointer into the selected app once so physical wheel/touchpad
 /// input reaches the now-transparent capture region. No scroll is injected.
-pub fn focus_underlying_once(stop: Arc<AtomicBool>, cursor_x: i32, cursor_y: i32) -> Result<()> {
+pub fn focus_underlying_once(
+    stop: Arc<AtomicBool>,
+    cursor_x: i32,
+    cursor_y: i32,
+    output_name: Option<&str>,
+) -> Result<()> {
     // Validate/setup synchronously so the caller can surface a useful error;
     // the actual motion remains off GTK's main thread.
-    let mut context = create_virtual_pointer()?;
+    let mut context = create_virtual_pointer(output_name)?;
     thread::spawn(move || {
         if sleep_unless_stopped(&stop, Duration::from_millis(INPUT_REGION_SETTLE_MS)) {
             focus_underlying_with_context(&mut context, cursor_x, cursor_y);
@@ -758,7 +785,7 @@ fn spawn_worker_virtual_keyboard(
         .context("no wl_seat available")?;
     let mut state = State {
         registry_state: RegistryState::new(&globals),
-        output_size: None,
+        outputs: OutputTracker::default(),
     };
     let keyboard = keyboard_manager.create_virtual_keyboard(&seat, &qh, ());
     let (keymap_fd, keymap_size) = make_keymap_fd()?;
@@ -873,15 +900,13 @@ impl Dispatch<zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1, ()> for State {
 impl Dispatch<wl_output::WlOutput, ()> for State {
     fn event(
         state: &mut Self,
-        _: &wl_output::WlOutput,
+        proxy: &wl_output::WlOutput,
         event: wl_output::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_output::Event::Mode { width, height, .. } = event {
-            state.output_size = Some((width, height));
-        }
+        state.outputs.handle(proxy, event);
     }
 }
 

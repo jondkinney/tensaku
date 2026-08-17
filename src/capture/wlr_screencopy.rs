@@ -13,10 +13,12 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 };
 
 use super::Rect;
+use super::outputs::OutputTracker;
 
 struct CaptureState {
     registry_state: RegistryState,
     shm: Shm,
+    outputs: OutputTracker,
 
     // Frame negotiation
     shm_buffer_info: Option<ShmBufferInfo>,
@@ -36,7 +38,9 @@ struct ShmBufferInfo {
     stride: u32,
 }
 
-pub fn capture(region: Option<Rect>) -> Result<Pixbuf> {
+/// Capture `region` (or the whole output) from the output named
+/// `output_name`; `None` falls back to the first advertised output.
+pub fn capture(region: Option<Rect>, output_name: Option<&str>) -> Result<Pixbuf> {
     let conn = Connection::connect_to_env()
         .context("failed to connect to Wayland display (is WAYLAND_DISPLAY set?)")?;
 
@@ -50,20 +54,25 @@ pub fn capture(region: Option<Rect>) -> Result<Pixbuf> {
         .bind::<zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1, _, _>(&qh, 1..=3, ())
         .context("compositor does not expose zwlr_screencopy_manager_v1 (wlroots-only)")?;
 
-    // Pick the first wl_output. Multi-monitor selection is not yet supported.
-    let output = globals
-        .bind::<wl_output::WlOutput, _, _>(&qh, 1..=4, ())
-        .context("no wl_output globals")?;
+    let mut outputs = OutputTracker::default();
+    outputs.bind_all(&globals, &qh);
 
     let mut state = CaptureState {
         registry_state,
         shm,
+        outputs,
         shm_buffer_info: None,
         buffer_done: false,
         ready: false,
         failed: false,
         fail_reason: None,
     };
+    // Output names and modes arrive with the initial wl_output events.
+    event_queue
+        .roundtrip(&mut state)
+        .context("roundtrip for wl_output info")?;
+    let (output, _) = state.outputs.select(output_name)?;
+    let output = output.clone();
 
     // Request capture. Cursor not included (overlay_cursor = 0).
     let frame = match region {
@@ -243,14 +252,14 @@ impl Dispatch<zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1, ()> for CaptureSt
 
 impl Dispatch<wl_output::WlOutput, ()> for CaptureState {
     fn event(
-        _state: &mut Self,
-        _proxy: &wl_output::WlOutput,
-        _event: wl_output::Event,
+        state: &mut Self,
+        proxy: &wl_output::WlOutput,
+        event: wl_output::Event,
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        // Output info events not needed for the spike.
+        state.outputs.handle(proxy, event);
     }
 }
 

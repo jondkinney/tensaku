@@ -1786,6 +1786,7 @@ dependencies = [
  "rustix 1.1.4",
  "serde",
  "serde_derive",
+ "serde_json",
  "smithay-client-toolkit",
  "tensaku_cli",
  "thiserror 2.0.18",

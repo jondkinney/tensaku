@@ -2183,19 +2183,25 @@ fn load_input_image() -> Result<Pixbuf> {
     };
     generate_profile_output!("loading image");
     if let Some(spec) = scroll_capture_test {
+        // Same output the scroll-capture overlay would use: the focused
+        // Hyprland monitor, else the first advertised output.
+        let output = display::hyprland_focused_monitor().map(|monitor| monitor.name);
         match spec {
-            ScrollCaptureTest::Full => capture::capture_output(),
+            ScrollCaptureTest::Full => capture::capture_output(output.as_deref()),
             ScrollCaptureTest::Region {
                 x,
                 y,
                 width,
                 height,
-            } => capture::capture_region(capture::Rect {
-                x,
-                y,
-                width,
-                height,
-            }),
+            } => capture::capture_region(
+                capture::Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                },
+                output.as_deref(),
+            ),
         }
     } else if input_filename == "-" {
         let mut buf = Vec::<u8>::new();
@@ -2270,7 +2276,8 @@ fn main() -> Result<()> {
             width: v[2],
             height: v[3],
         };
-        let pixbuf = capture::capture_region(rect)?;
+        let output = display::hyprland_focused_monitor().map(|monitor| monitor.name);
+        let pixbuf = capture::capture_region(rect, output.as_deref())?;
         pixbuf.savev(path, "png", &[])?;
         eprintln!(
             "probe: saved {}x{} to {path}",
