@@ -2677,8 +2677,8 @@ mod tests {
         let line = y / 5;
         let mut h = (line as u64).wrapping_mul(0x9E37_79B1_85EB_CA77);
         h ^= h >> 29;
-        let text_row = h % 4 == 0;
-        let ink = text_row && (doc_pixel(x, line)[0] % 3 != 0);
+        let text_row = h.is_multiple_of(4);
+        let ink = text_row && !doc_pixel(x, line)[0].is_multiple_of(3);
         if ink {
             [20, 20, 24, 255]
         } else {
