@@ -370,6 +370,19 @@ impl Text {
         }
     }
 
+    /// Widest wrap the auto-fit may use before the pill would leave the
+    /// image: the room from `pos_x` to the image's right edge less the
+    /// pill's side pad (both in image units), or `None` when even that is
+    /// narrower than a sensible line so the text stays unwrapped.
+    fn auto_fit_room(bounds: (Vec2D, Vec2D), pos_x: f32, pill_pad_x: f32) -> Option<f32> {
+        let right_edge = bounds.0.x + bounds.1.x;
+        if right_edge <= bounds.0.x {
+            return None;
+        }
+        let room = right_edge - pos_x - pill_pad_x;
+        (room >= MIN_TEXT_BOX_WIDTH).then_some(room)
+    }
+
     fn byte_index_from_char_index(text: &str, char_index: usize) -> usize {
         text.char_indices()
             .nth(char_index)
@@ -442,7 +455,7 @@ impl Drawable for Text {
         &self,
         canvas: &mut femtovg::Canvas<femtovg::renderer::OpenGl>,
         font: FontId,
-        _bounds: (Vec2D, Vec2D),
+        bounds: (Vec2D, Vec2D),
     ) -> Result<()> {
         // (Cream pill background drawing moved below — it's now drawn
         // per-line after layout, so the pill snugly fits each
@@ -486,6 +499,12 @@ impl Drawable for Text {
         // `JITTER_BUFFER_PX` floor keeps wrap_width strictly larger
         // than the measured text so this never happens.
         const JITTER_BUFFER_PX: f32 = 4.0;
+        // DPR-aware CSS→image factor so the pill padding, editing outline
+        // and handles match the on-screen size used by SelectionOverlay
+        // (which also factors DPR). Without DPR the editing visuals end
+        // up half-sized on retina.
+        let dpr_for_pads = crate::femtovg_area::current_device_pixel_ratio().max(0.0001);
+        let css_to_image_dpr = dpr_for_pads / canva_scale.max(0.0001);
         let wrap_width = if let Some(w) = self.text_box_width {
             w.max(MIN_TEXT_BOX_WIDTH)
         } else {
@@ -494,10 +513,21 @@ impl Drawable for Text {
                 .ok()
                 .map(|m| m.width())
                 .unwrap_or(0.0);
-            if measured > 0.0 {
+            let natural = if measured > 0.0 {
                 (measured + JITTER_BUFFER_PX).max(MIN_TEXT_BOX_WIDTH)
             } else {
                 DEFAULT_INITIAL_BOX_WIDTH
+            };
+            // Auto-fit never runs past the image's right edge: the room
+            // left from `pos.x` to the edge (minus the pill's side pad)
+            // caps the wrap, so text folds onto the next line while it
+            // is being typed instead of running off the capture — where
+            // you could neither read it nor reach its handle. Only when
+            // even that room is too narrow does the text stay unwrapped.
+            let room = Self::auto_fit_room(bounds, self.pos.x, PILL_PAD_X_CSS * css_to_image_dpr);
+            match room {
+                Some(room) => natural.min(room),
+                None => natural,
             }
         };
 
@@ -540,12 +570,10 @@ impl Drawable for Text {
         };
         let cursor_top_offset = -cursor_height;
 
-        // CSS→image conversion factor (DPR-aware, post-zoom) shared
+        // The same CSS→image factor (DPR-aware, post-zoom) is shared
         // between the pill pad, outline, and caret metrics so all
         // these dimensions stay locked together at every zoom level.
-        let dpr_for_pads = crate::femtovg_area::current_device_pixel_ratio().max(0.0001);
-        let css_to_image_dpr_for_caret =
-            dpr_for_pads / canvas.transform().average_scale().max(0.0001);
+        let css_to_image_dpr_for_caret = css_to_image_dpr;
         let pill_pad_y_top_img_for_caret = PILL_PAD_Y_TOP_CSS * css_to_image_dpr_for_caret;
         let descender_estimate_img_for_caret = line_height.abs() * DESCENDER_RATIO_OF_LINE_HEIGHT;
         let pill_pad_y_bottom_img_for_caret = (PILL_PAD_Y_BOTTOM_CSS * css_to_image_dpr_for_caret)
@@ -685,12 +713,6 @@ impl Drawable for Text {
         let stack_top = self.pos.y - cursor_height;
         let stack_height = (line_count - 1.0) * line_height + line_extent_img;
 
-        // DPR-aware CSS→image factor so the editing outline + padding
-        // match the on-screen size used by SelectionOverlay (which
-        // also factors DPR). Without DPR the editing visuals end up
-        // half-sized on retina.
-        let dpr_for_pads = crate::femtovg_area::current_device_pixel_ratio().max(0.0001);
-        let css_to_image_dpr = dpr_for_pads / canvas.transform().average_scale().max(0.0001);
         let pill_pad_x_img = PILL_PAD_X_CSS * css_to_image_dpr;
         let pill_pad_y_top_img = PILL_PAD_Y_TOP_CSS * css_to_image_dpr;
         // Bottom pad floors at 8 CSS px (symmetric with the top), but
@@ -962,18 +984,22 @@ impl Drawable for Text {
             None => (glyph_w + 4.0).max(MIN_TEXT_BOX_WIDTH),
         };
 
-        // Live line-count: estimate from the natural text width
-        // divided by current wrap_width so the outline reflects
-        // wrapping in real time during a drag, instead of waiting
-        // for the next draw to re-run break_text_vec. The cached
-        // natural-text-width covers the whole text laid out on a
-        // single line; combined with current wrap_width this gives
-        // the correct line count even mid-drag when the cached
-        // line_ranges is still from the previous frame.
-        let live_line_count = if natural_w > 0.0 && wrap_width > 0.0 {
-            (natural_w / wrap_width).ceil().max(1.0)
-        } else {
-            cached_line_count
+        // Live line-count: while a handle drag sets an explicit width,
+        // estimate from the natural text width divided by current
+        // wrap_width so the outline reflects wrapping in real time,
+        // instead of waiting for the next draw to re-run
+        // break_text_vec. The cached natural-text-width covers the
+        // whole text laid out on a single line; combined with current
+        // wrap_width this gives the correct line count even mid-drag
+        // when the cached line_ranges is still from the previous
+        // frame. Auto-fit text (no explicit width) wraps only at the
+        // image edge, where the widest laid-out line can be well short
+        // of the room, so its cached line count is the accurate one.
+        let live_line_count = match self.text_box_width {
+            Some(_) if natural_w > 0.0 && wrap_width > 0.0 => {
+                (natural_w / wrap_width).ceil().max(1.0)
+            }
+            _ => cached_line_count,
         };
 
         // Vertical: stack_top = pos.y - line_height (matches draw).
@@ -2859,5 +2885,23 @@ impl TextTool {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_fit_room_caps_wrap_at_the_image_edge() {
+        let bounds = (Vec2D::zero(), Vec2D::new(1000.0, 500.0));
+        assert_eq!(Text::auto_fit_room(bounds, 100.0, 6.0), Some(894.0));
+        // Too close to the edge for a sensible line: stay unwrapped.
+        assert_eq!(Text::auto_fit_room(bounds, 970.0, 6.0), None);
+        // Degenerate bounds (no image yet): no cap.
+        assert_eq!(
+            Text::auto_fit_room((Vec2D::zero(), Vec2D::zero()), 10.0, 6.0),
+            None
+        );
     }
 }
