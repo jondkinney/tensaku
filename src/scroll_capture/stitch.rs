@@ -1851,6 +1851,7 @@ mod tests {
     /// Run with:
     ///   TENSAKU_STITCH_REPLAY_DIR=~/.cache/tensaku/capture-debug \
     ///   TENSAKU_STITCH_REPLAY_OUT=/tmp/replay.png \
+    ///   TENSAKU_STITCH_REPLAY_AXIS=vertical|horizontal   (default vertical) \
     ///   cargo test --release replay_dumped_capture_frames -- --ignored --nocapture
     #[test]
     #[ignore = "manual harness; needs TENSAKU_STITCH_REPLAY_DIR"]
@@ -1870,10 +1871,13 @@ mod tests {
         files.sort();
         assert!(!files.is_empty(), "no frame-*.png files in {dir}");
 
-        let axis = StitchAxis::Vertical;
+        let axis = match std::env::var("TENSAKU_STITCH_REPLAY_AXIS").as_deref() {
+            Ok("horizontal") | Ok("h") => StitchAxis::Horizontal,
+            _ => StitchAxis::Vertical,
+        };
         let first = Pixbuf::from_file(&files[0]).expect("first frame must load");
         eprintln!(
-            "replay: {} frames of {}x{}",
+            "replay: {} frames of {}x{} ({axis:?})",
             files.len(),
             first.width(),
             first.height()
