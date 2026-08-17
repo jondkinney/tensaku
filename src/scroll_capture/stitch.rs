@@ -36,6 +36,14 @@ const PATH_DELTA_TOLERANCE: usize = 2;
 /// fixed footer.
 const MAX_STATIONARY_EDGE: usize = 128;
 const STATIONARY_EDGE_ERROR: f64 = 1.0;
+/// Viewport-fixed chrome (sticky headers, cookie bars, fixed footers) is the
+/// same in both frames at shift 0 while the content between them moves. Rows
+/// or columns like that are cropped away before the motion search — otherwise
+/// they put an identical error floor under every candidate shift and a
+/// high-contrast band (a dark header on a light page) leaves no offset able
+/// to win by ratio. Each edge gives up at most this fraction of the axis so a
+/// genuinely stationary pair still resolves as `Stationary` on the remainder.
+const MAX_STATIONARY_SCORING_EDGE_DEN: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StitchAxis {
@@ -175,6 +183,37 @@ impl GrayView {
         match axis {
             StitchAxis::Vertical => self.width,
             StitchAxis::Horizontal => self.height,
+        }
+    }
+
+    /// The sub-view spanning `[start, end)` along `axis` (rows for vertical
+    /// motion, columns for horizontal), with the cross axis untouched.
+    fn crop_axis(&self, axis: StitchAxis, start: usize, end: usize) -> GrayView {
+        let end = end.min(self.axis_len(axis)).max(start);
+        match axis {
+            StitchAxis::Vertical => GrayView {
+                pixels: self.pixels[start * self.width..end * self.width].to_vec(),
+                width: self.width,
+                height: end - start,
+                source_width: self.source_width,
+            },
+            StitchAxis::Horizontal => {
+                let width = end - start;
+                let mut pixels = Vec::with_capacity(width * self.height);
+                for row in 0..self.height {
+                    let base = row * self.width;
+                    pixels.extend_from_slice(&self.pixels[base + start..base + end]);
+                }
+                // Horizontal views are not downsampled along the motion axis,
+                // so the source extent shrinks with the crop.
+                let source_scale = self.source_scale(axis);
+                GrayView {
+                    pixels,
+                    width,
+                    height: self.height,
+                    source_width: width * source_scale,
+                }
+            }
         }
     }
 
@@ -387,6 +426,50 @@ impl ForwardLookahead {
     }
 }
 
+/// Mean absolute difference between one row/column of `prev` and `cur` at
+/// shift 0, over the same cross-axis margin the scorer uses.
+fn edge_line_error(prev: &GrayView, cur: &GrayView, axis: StitchAxis, along: usize) -> f64 {
+    let cross_len = prev.cross_len(axis);
+    let cross_margin = (cross_len / 12).min(cross_len.saturating_sub(1) / 2);
+    let cross_step = (cross_len / 128).max(1);
+    let mut total = 0u64;
+    let mut count = 0usize;
+    for cross in (cross_margin..cross_len - cross_margin).step_by(cross_step) {
+        let index = match axis {
+            StitchAxis::Vertical => along * prev.width + cross,
+            StitchAxis::Horizontal => cross * prev.width + along,
+        };
+        total += prev.pixels[index].abs_diff(cur.pixels[index]) as u64;
+        count += 1;
+    }
+    if count == 0 {
+        f64::INFINITY
+    } else {
+        total as f64 / count as f64
+    }
+}
+
+/// Rows/columns at the leading and trailing edge that are unchanged between
+/// the two frames at shift 0 — viewport-fixed chrome (or flat margins, which
+/// carry no alignment signal either way). Each edge is capped at a fraction
+/// of the axis so a fully stationary pair keeps enough of the frame to be
+/// recognised as such.
+fn stationary_scoring_edges(prev: &GrayView, cur: &GrayView, axis: StitchAxis) -> (usize, usize) {
+    let axis_len = prev.axis_len(axis);
+    let max_edge = axis_len / MAX_STATIONARY_SCORING_EDGE_DEN;
+    let mut lead = 0;
+    while lead < max_edge && edge_line_error(prev, cur, axis, lead) <= STATIONARY_EDGE_ERROR {
+        lead += 1;
+    }
+    let mut trail = 0;
+    while trail < max_edge
+        && edge_line_error(prev, cur, axis, axis_len - 1 - trail) <= STATIONARY_EDGE_ERROR
+    {
+        trail += 1;
+    }
+    (lead, trail)
+}
+
 fn classify_motion_with_search_bound(
     prev: &GrayView,
     cur: &GrayView,
@@ -401,6 +484,30 @@ fn classify_motion_with_search_bound(
         return unmatchable();
     }
 
+    let axis_len = prev.axis_len(axis);
+    let cross_len = prev.cross_len(axis);
+    if axis_len < MIN_OVERLAP_PIXELS + MIN_MOTION_PIXELS || cross_len < 2 {
+        return unmatchable();
+    }
+
+    // Score only the part of the viewport that actually moved: crop away
+    // viewport-fixed bands at both edges. The cropped views feed the same
+    // search below, so deltas stay in source pixels of the full frame.
+    let (lead, trail) = stationary_scoring_edges(prev, cur, axis);
+    if lead + trail > 0 {
+        let prev = prev.crop_axis(axis, lead, axis_len - trail);
+        let cur = cur.crop_axis(axis, lead, axis_len - trail);
+        return classify_motion_cropped(&prev, &cur, axis, max_source_delta);
+    }
+    classify_motion_cropped(prev, cur, axis, max_source_delta)
+}
+
+fn classify_motion_cropped(
+    prev: &GrayView,
+    cur: &GrayView,
+    axis: StitchAxis,
+    max_source_delta: Option<usize>,
+) -> MotionEstimate {
     let axis_len = prev.axis_len(axis);
     let cross_len = prev.cross_len(axis);
     if axis_len < MIN_OVERLAP_PIXELS + MIN_MOTION_PIXELS || cross_len < 2 {
@@ -2433,6 +2540,94 @@ mod tests {
             StitchAxis::Vertical,
         );
         assert_eq!(estimate.motion, Motion::Forward(DELTA), "{estimate:?}");
+    }
+
+    /// A sparse light page: white with irregular dark text rows, so most
+    /// pixels carry no alignment signal — the case where a fixed band's
+    /// constant error floor used to swamp the true shift.
+    fn sparse_doc_pixel(x: usize, y: usize) -> [u8; 4] {
+        let line = y / 5;
+        let mut h = (line as u64).wrapping_mul(0x9E37_79B1_85EB_CA77);
+        h ^= h >> 29;
+        let text_row = h % 4 == 0;
+        let ink = text_row && (doc_pixel(x, line)[0] % 3 != 0);
+        if ink {
+            [20, 20, 24, 255]
+        } else {
+            [250, 250, 250, 255]
+        }
+    }
+
+    /// Viewport over the sparse page with a dark sticky header and a bright
+    /// fixed footer that stay put while the content between them scrolls.
+    fn viewport_with_chrome(document_y: usize, header: usize, footer: usize) -> Pixbuf {
+        let mut pixels = Vec::with_capacity(VIEW_W * VIEW_H * 4);
+        for y in 0..VIEW_H {
+            for x in 0..VIEW_W {
+                let pixel = if y < header {
+                    [28 + (x % 5) as u8, 28, 30, 255]
+                } else if y >= VIEW_H - footer {
+                    [255, 214, 10, 255]
+                } else {
+                    sparse_doc_pixel(x, document_y + y - header)
+                };
+                pixels.extend_from_slice(&pixel);
+            }
+        }
+        pixbuf_from_rgba(pixels, VIEW_W, VIEW_H)
+    }
+
+    #[test]
+    fn scoring_crops_high_contrast_fixed_header_and_footer() {
+        let first = downsample_to_gray(&viewport_with_chrome(0, 24, 16));
+        let second = downsample_to_gray(&viewport_with_chrome(53, 24, 16));
+        // Blank rows adjoining the footer are unchanged too and may extend the
+        // trailing crop; they carry no signal, so that is harmless.
+        let (lead, trail) = stationary_scoring_edges(&first, &second, StitchAxis::Vertical);
+        assert_eq!(lead, 24);
+        assert!(trail >= 16, "trail {trail}");
+        let estimate = classify_motion(&first, &second, StitchAxis::Vertical);
+        assert_eq!(estimate.motion, Motion::Forward(53), "{estimate:?}");
+        assert!(estimate.confidence >= MIN_CONFIDENCE, "{estimate:?}");
+        assert!(estimate.error <= MAX_AMBIGUOUS_ERROR, "{estimate:?}");
+    }
+
+    #[test]
+    fn scoring_edges_stay_bounded_for_a_stationary_pair() {
+        let frame = downsample_to_gray(&viewport_with_chrome(40, 24, 16));
+        let (lead, trail) = stationary_scoring_edges(&frame, &frame, StitchAxis::Vertical);
+        assert_eq!(lead, VIEW_H / MAX_STATIONARY_SCORING_EDGE_DEN);
+        assert_eq!(trail, VIEW_H / MAX_STATIONARY_SCORING_EDGE_DEN);
+        let estimate = classify_motion(&frame, &frame, StitchAxis::Vertical);
+        assert_eq!(estimate.motion, Motion::Stationary, "{estimate:?}");
+    }
+
+    #[test]
+    fn scoring_crops_a_fixed_sidebar_for_horizontal_motion() {
+        // Fixed 12-column sidebar on the left; content scrolls right by 43.
+        let frame = |document_x: usize| {
+            let (w, h) = (180usize, 64usize);
+            let mut pixels = Vec::with_capacity(w * h * 4);
+            for y in 0..h {
+                for x in 0..w {
+                    let pixel = if x < 12 {
+                        [40, 44, 52, 255]
+                    } else {
+                        sparse_doc_pixel(y, document_x + x - 12)
+                    };
+                    pixels.extend_from_slice(&pixel);
+                }
+            }
+            pixbuf_from_rgba(pixels, w, h)
+        };
+        let first = downsample_to_gray_for_axis(&frame(0), StitchAxis::Horizontal);
+        let second = downsample_to_gray_for_axis(&frame(43), StitchAxis::Horizontal);
+        assert_eq!(
+            stationary_scoring_edges(&first, &second, StitchAxis::Horizontal).0,
+            12
+        );
+        let estimate = classify_motion(&first, &second, StitchAxis::Horizontal);
+        assert_eq!(estimate.motion, Motion::Forward(43), "{estimate:?}");
     }
 
     #[test]
