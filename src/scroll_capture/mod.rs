@@ -173,6 +173,20 @@ const EDGE_HIT_SLACK: f64 = 12.0;
 /// EDGE_HIT_SLACK so corners are easy to grab.
 const CORNER_HIT_RADIUS: f64 = 20.0;
 
+/// Selected phase: is the pointer over the page exposed inside the region —
+/// strictly inside the rectangle and not on a resize/move handle? While it is,
+/// the overlay releases its keyboard grab so wheel and PageUp/Home reach the
+/// underlying app (lining the content up before capture); everywhere else the
+/// overlay keeps an exclusive grab so Esc, the restore key, the handles and
+/// the mode buttons work.
+fn pointer_over_selected_page(sel: Selection, x: f64, y: f64) -> bool {
+    let inside = x > sel.x + EDGE_HIT_SLACK
+        && y > sel.y + EDGE_HIT_SLACK
+        && x < sel.x + sel.w - EDGE_HIT_SLACK
+        && y < sel.y + sel.h - EDGE_HIT_SLACK;
+    inside && hit_test_handle(sel, x, y).is_none()
+}
+
 fn hit_test_handle(sel: Selection, x: f64, y: f64) -> Option<ResizeHandle> {
     // 1) Corners win if you're near one (so you get diagonal resize even
     // though the edge bands overlap there).
@@ -649,6 +663,10 @@ struct OverlayState {
     /// Whether a manual capture should relocate the pointer before frame one.
     /// Snapshotted when the standalone scroll-capture overlay is launched.
     park_manual_pointer: bool,
+    /// Selected phase: the keyboard grab is currently released because the
+    /// pointer is over the page inside the region (see
+    /// `pointer_over_selected_page`).
+    selected_keyboard_released: bool,
     /// Connector name of the monitor the overlay covers (e.g. `DP-3`). Every
     /// screencopy request and virtual-pointer warp targets this output so a
     /// second monitor never changes where frames come from or where the
@@ -691,6 +709,48 @@ struct OverlayState {
 pub struct ScrollCaptureOutcome {
     pub image: Pixbuf,
     pub warning: Option<String>,
+}
+
+/// Selected phase only: hand the pointer and keyboard to the page inside the
+/// region while the cursor is over it, and take them back everywhere else.
+/// Hyprland pins pointer focus to any layer surface holding an exclusive
+/// keyboard grab, so the surface input region alone cannot let wheel events
+/// through — the grab itself has to go while the pointer is over the page.
+fn update_selected_keyboard_zone(
+    state: &Rc<RefCell<OverlayState>>,
+    window: &gtk::ApplicationWindow,
+    x: f64,
+    y: f64,
+) {
+    let release = {
+        let mut s = state.borrow_mut();
+        if s.phase != Phase::Selected || s.drag_active || s.resize_handle.is_some() {
+            return;
+        }
+        let release = pointer_over_selected_page(s.selection, x, y);
+        if release == s.selected_keyboard_released {
+            return;
+        }
+        s.selected_keyboard_released = release;
+        release
+    };
+    window.set_keyboard_mode(if release {
+        KeyboardMode::None
+    } else {
+        KeyboardMode::Exclusive
+    });
+}
+
+/// Re-take the exclusive grab (pointer moved onto overlay chrome such as the
+/// mode buttons, which sit inside the region but belong to the overlay).
+fn hold_selected_keyboard(state: &Rc<RefCell<OverlayState>>, window: &gtk::ApplicationWindow) {
+    let mut s = state.borrow_mut();
+    if s.phase != Phase::Selected || !s.selected_keyboard_released {
+        return;
+    }
+    s.selected_keyboard_released = false;
+    drop(s);
+    window.set_keyboard_mode(KeyboardMode::Exclusive);
 }
 
 /// The GdkMonitor whose connector (e.g. `DP-3`) matches `name`.
@@ -747,6 +807,7 @@ fn build_overlay(
         capture_epoch: 0,
         capture_mode: None,
         park_manual_pointer,
+        selected_keyboard_released: false,
         output_name: None,
         auto_scroll_stop: None,
         pointer_focus_stop: None,
@@ -1007,6 +1068,7 @@ fn build_overlay(
                 // immediately — Esc after this still remembers it.
                 crate::state::save_scroll_capture_last_region([sel.x, sel.y, sel.w, sel.h]);
                 action_pill_w.set_visible(true);
+                state.borrow_mut().selected_keyboard_released = false;
                 window_w.set_keyboard_mode(KeyboardMode::Exclusive);
                 position_selected_controls_and_input(
                     &state,
@@ -1035,12 +1097,14 @@ fn build_overlay(
     {
         let state = Rc::clone(&state);
         let drawing_w = drawing.clone();
+        let window_w = window.clone();
         motion.connect_motion(move |_, x, y| {
             let phase = state.borrow().phase;
             if !matches!(phase, Phase::Selected) {
                 drawing_w.set_cursor_from_name(Some("default"));
                 return;
             }
+            update_selected_keyboard_zone(&state, &window_w, x, y);
             let sel = state.borrow().selection;
             let name = match hit_test_handle(sel, x, y) {
                 Some(ResizeHandle::TopLeft) | Some(ResizeHandle::BottomRight) => "nwse-resize",
@@ -1054,6 +1118,19 @@ fn build_overlay(
         });
     }
     drawing.add_controller(motion);
+    // The mode buttons and pill sit inside the region but are overlay chrome:
+    // hovering them takes the keyboard back so Esc works there too.
+    for widget in [
+        action_pill.clone().upcast::<gtk::Widget>(),
+        vert_auto_scroll.clone().upcast::<gtk::Widget>(),
+        horiz_auto_scroll.clone().upcast::<gtk::Widget>(),
+    ] {
+        let hover = gtk::EventControllerMotion::new();
+        let state = Rc::clone(&state);
+        let window_w = window.clone();
+        hover.connect_enter(move |_, _, _| hold_selected_keyboard(&state, &window_w));
+        widget.add_controller(hover);
+    }
 
     // Center the prompt once we know the surface size.
     {
@@ -1285,6 +1362,7 @@ fn restore_previous_region(
     }
     prompt.set_visible(false);
     action_pill.set_visible(true);
+    state.borrow_mut().selected_keyboard_released = false;
     window.set_keyboard_mode(KeyboardMode::Exclusive);
     position_selected_controls_and_input(state, window, action_pill, vert_btn, horiz_btn, sel);
     drawing.queue_draw();
@@ -3469,20 +3547,36 @@ fn position_selected_controls_and_input(
         let Some(surface) = window.surface() else {
             return;
         };
-        let pill_pad: i32 = 6;
-        let region = cairo::Region::create_rectangle(&cairo::RectangleInt::new(
-            x as i32 - pill_pad,
-            y as i32 - pill_pad,
-            pw as i32 + 2 * pill_pad,
-            ph as i32 + 2 * pill_pad,
-        ));
-
-        // Edge bands and the move handle keep selection editing available.
+        // The overlay owns everything except the page exposed inside the
+        // region: the dimmed surround (drag there to redraw), the edge bands
+        // and move handle, the pill and the mode buttons. The exposed page
+        // receives the pointer, and — while the pointer is over it — the
+        // keyboard (see `update_selected_keyboard_zone`).
         let band = EDGE_HIT_SLACK as i32;
         let sx = sel.x as i32;
         let sy = sel.y as i32;
         let sw = sel.w as i32;
         let sh = sel.h as i32;
+        let region = cairo::Region::create_rectangle(&cairo::RectangleInt::new(
+            0,
+            0,
+            surface.width().max(1),
+            surface.height().max(1),
+        ));
+        region
+            .subtract_rectangle(&cairo::RectangleInt::new(sx, sy, sw.max(0), sh.max(0)))
+            .ok();
+        let pill_pad: i32 = 6;
+        region
+            .union_rectangle(&cairo::RectangleInt::new(
+                x as i32 - pill_pad,
+                y as i32 - pill_pad,
+                pw as i32 + 2 * pill_pad,
+                ph as i32 + 2 * pill_pad,
+            ))
+            .ok();
+
+        // Edge bands and the move handle keep selection editing available.
         let bands = [
             cairo::RectangleInt::new(sx - band, sy - band, sw + 2 * band, 2 * band),
             cairo::RectangleInt::new(sx - band, sy + sh - band, sw + 2 * band, 2 * band),
@@ -4060,6 +4154,36 @@ fn install_css(_app: &gtk::Application) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_page_zone_excludes_handles_bands_and_outside() {
+        let sel = Selection {
+            x: 100.0,
+            y: 100.0,
+            w: 400.0,
+            h: 300.0,
+        };
+        // Deep inside the region: the page gets pointer + keyboard.
+        assert!(pointer_over_selected_page(sel, 300.0, 200.0));
+        // Outside, on the dimmed surround.
+        assert!(!pointer_over_selected_page(sel, 50.0, 50.0));
+        assert!(!pointer_over_selected_page(sel, 600.0, 200.0));
+        // On the edge band and a corner handle.
+        assert!(!pointer_over_selected_page(
+            sel,
+            300.0,
+            100.0 + EDGE_HIT_SLACK / 2.0
+        ));
+        assert!(!pointer_over_selected_page(sel, 100.0, 100.0));
+        // On the centre move handle.
+        let (mx, my) = ResizeHandle::Move.center(sel);
+        assert!(!pointer_over_selected_page(sel, mx, my));
+        assert!(pointer_over_selected_page(
+            sel,
+            mx + MOVE_HANDLE_RADIUS + 10.0,
+            my
+        ));
+    }
 
     #[test]
     fn pointer_park_target_uses_lower_right_inset_and_output_scale() {

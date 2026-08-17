@@ -471,6 +471,11 @@ example an Alt variant of your screenshot key:
 bindd = ALT, <your screenshot key>, Scrolling screenshot, exec, tensaku --scroll-capture --copy-command wl-copy --actions-on-enter save-to-clipboard
 ```
 
+While the region is selected, the page showing through it still receives
+your pointer and keyboard whenever the cursor is over it — scroll or press
+`Home`/`PageUp` there to line the content up before capturing. Move the cursor
+outside the region (or onto a handle or button) and the overlay takes the
+keyboard back for `Esc`, the restore key, and dragging a new region.
 After selecting the scrolling region, choose **Manual Scroll** to use your
 wheel, touchpad, or scrolling keys, or choose an **Auto-Scroll** arrow. The
 automatic path sends real mouse-wheel events and waits for each captured
