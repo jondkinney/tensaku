@@ -193,93 +193,105 @@ fn resize_pixbuf_to_rect(
         new_h,
     )?;
     new.fill(0x000000ff);
-    let depth = AUTO_EXTEND_EDGE_SAMPLE_DEPTH.min(orig_w).min(orig_h).max(1);
     let has_alpha = original.has_alpha();
-    let left_color = dominant_color(original, 0, 0, depth, orig_h, has_alpha);
-    let right_color = dominant_color(original, orig_w - depth, 0, depth, orig_h, has_alpha);
-    let top_color = dominant_color(original, 0, 0, orig_w, depth, has_alpha);
-    let bottom_color = dominant_color(original, 0, orig_h - depth, orig_w, depth, has_alpha);
+    // One colour per line rather than one per side, so the extension
+    // tracks whatever the capture's edge is doing at that point.
+    let left_colors = edge_line_colors(original, Side::Left, has_alpha);
+    let right_colors = edge_line_colors(original, Side::Right, has_alpha);
+    let top_colors = edge_line_colors(original, Side::Top, has_alpha);
+    let bottom_colors = edge_line_colors(original, Side::Bottom, has_alpha);
 
     // Grow amounts on each side (0 when that side is shrinking or
     // unchanged). These delineate the strips of `new` whose source
-    // would be outside `original` and so need an edge-color fill.
+    // would be outside `original` and so need an edge-colour fill.
     let grow_left = (-src_x).max(0);
     let grow_top = (-src_y).max(0);
     let grow_right = ((src_x + new_w) - orig_w).max(0);
     let grow_bottom = ((src_y + new_h) - orig_h).max(0);
 
+    // The copied region's extent inside `new`. The side strips run
+    // alongside it, so they consume the matching slice of the source
+    // edge's colours: a shrink on one axis means the strip is shorter
+    // than the side and starts partway down it.
+    let copy_h = new_h - grow_top - grow_bottom;
+    let copy_w = new_w - grow_left - grow_right;
+    let src_row0 = src_y.max(0) as usize;
+    let src_col0 = src_x.max(0) as usize;
+    let rows = |c: &[Rgba]| -> Vec<Rgba> {
+        c.iter()
+            .skip(src_row0)
+            .take(copy_h.max(0) as usize)
+            .copied()
+            .collect()
+    };
+    let cols = |c: &[Rgba]| -> Vec<Rgba> {
+        c.iter()
+            .skip(src_col0)
+            .take(copy_w.max(0) as usize)
+            .copied()
+            .collect()
+    };
+
     if grow_left > 0 {
-        fill_rect(
-            &new,
-            0,
-            grow_top,
-            grow_left,
-            new_h - grow_top - grow_bottom,
-            left_color,
-        );
+        fill_rows(&new, 0, grow_top, grow_left, &rows(&left_colors));
     }
     if grow_right > 0 {
-        fill_rect(
+        fill_rows(
             &new,
             new_w - grow_right,
             grow_top,
             grow_right,
-            new_h - grow_top - grow_bottom,
-            right_color,
+            &rows(&right_colors),
         );
     }
     if grow_top > 0 {
-        fill_rect(
-            &new,
-            grow_left,
-            0,
-            new_w - grow_left - grow_right,
-            grow_top,
-            top_color,
-        );
+        fill_band(&new, grow_left, 0, grow_top, &cols(&top_colors));
     }
     if grow_bottom > 0 {
-        fill_rect(
+        fill_band(
             &new,
             grow_left,
             new_h - grow_bottom,
-            new_w - grow_left - grow_right,
             grow_bottom,
-            bottom_color,
+            &cols(&bottom_colors),
         );
     }
-    // Corners (where both axes grew). Pick the adjacent edge color
-    // matching the longer of the two strips so we get a continuous
-    // band along the dominant direction.
+
+    // Corners (where both axes grew). Continue whichever adjacent band
+    // is longer, taking that band's END colour so the corner joins it
+    // without a step.
+    let first = |c: &[Rgba], i: usize| c.get(i).copied().unwrap_or((0, 0, 0, 255));
+    let last_row = (src_row0 + copy_h.max(0) as usize).saturating_sub(1);
+    let last_col = (src_col0 + copy_w.max(0) as usize).saturating_sub(1);
     if grow_top > 0 && grow_left > 0 {
         let c = if grow_top >= grow_left {
-            top_color
+            first(&top_colors, src_col0)
         } else {
-            left_color
+            first(&left_colors, src_row0)
         };
         fill_rect(&new, 0, 0, grow_left, grow_top, c);
     }
     if grow_top > 0 && grow_right > 0 {
         let c = if grow_top >= grow_right {
-            top_color
+            first(&top_colors, last_col)
         } else {
-            right_color
+            first(&right_colors, src_row0)
         };
         fill_rect(&new, new_w - grow_right, 0, grow_right, grow_top, c);
     }
     if grow_bottom > 0 && grow_left > 0 {
         let c = if grow_bottom >= grow_left {
-            bottom_color
+            first(&bottom_colors, src_col0)
         } else {
-            left_color
+            first(&left_colors, last_row)
         };
         fill_rect(&new, 0, new_h - grow_bottom, grow_left, grow_bottom, c);
     }
     if grow_bottom > 0 && grow_right > 0 {
         let c = if grow_bottom >= grow_right {
-            bottom_color
+            first(&bottom_colors, last_col)
         } else {
-            right_color
+            first(&right_colors, last_row)
         };
         fill_rect(
             &new,
@@ -306,6 +318,7 @@ fn resize_pixbuf_to_rect(
     Some(new)
 }
 
+#[cfg(test)]
 fn read_pixel(p: &Pixbuf, x: i32, y: i32, has_alpha: bool) -> (u8, u8, u8, u8) {
     let stride = p.rowstride() as usize;
     let bpp = if has_alpha { 4 } else { 3 };
@@ -320,82 +333,190 @@ fn read_pixel(p: &Pixbuf, x: i32, y: i32, has_alpha: bool) -> (u8, u8, u8, u8) {
     }
 }
 
-/// Pick the dominant color of a rectangular sample area by 5-bit
-/// quantization (32 levels per channel ⇒ ~32 K bins). Builds a
-/// histogram, picks the bin with the most samples, then returns the
-/// mean of all pixels that landed in that bin (so we don't snap to
-/// the quantization grid). This filters out antialiased text
-/// pixels at edges — the background dominates the bin count, and
-/// the few stray text pixels fall into different bins.
-fn dominant_color(
-    p: &Pixbuf,
-    x0: i32,
-    y0: i32,
-    w: i32,
-    h: i32,
-    has_alpha: bool,
-) -> (u8, u8, u8, u8) {
-    use std::collections::HashMap;
-    let mut bins: HashMap<u32, (u32, [u64; 4])> = HashMap::new();
-    for y in y0..(y0 + h) {
-        for x in x0..(x0 + w) {
-            let (r, g, b, a) = read_pixel(p, x, y, has_alpha);
-            let key = ((r as u32) >> 3) << 15
-                | ((g as u32) >> 3) << 10
-                | ((b as u32) >> 3) << 5
-                | ((a as u32) >> 3);
-            let entry = bins.entry(key).or_insert((0, [0u64; 4]));
-            entry.0 += 1;
-            entry.1[0] += r as u64;
-            entry.1[1] += g as u64;
-            entry.1[2] += b as u64;
-            entry.1[3] += a as u64;
+/// RGBA colour sample used by the edge-extension fills.
+type Rgba = (u8, u8, u8, u8);
+
+/// Write `row` — already `w * bytes_per_pixel` bytes — into `h`
+/// consecutive rows starting at `(x, y)`.
+///
+/// The one place the extension fills touch raw Pixbuf memory. The
+/// obvious `put_pixel` loop costs a GObject call per pixel, which
+/// showed up as ~5 ms of every canvas auto-grow at 6144x3456: the
+/// strips a grow fills are full-width, so the pixel count is large
+/// even when the strip is thin.
+fn blit_row(p: &Pixbuf, x: i32, y: i32, h: i32, row: &[u8]) {
+    if h <= 0 || x < 0 || y < 0 || row.is_empty() {
+        return;
+    }
+    let bpp = if p.has_alpha() { 4 } else { 3 };
+    let stride = p.rowstride() as usize;
+    let start_col = x as usize * bpp;
+    if start_col + row.len() > stride || (y + h) as usize > p.height() as usize {
+        return;
+    }
+
+    // SAFETY: `pixels()` hands back the Pixbuf's live buffer. The
+    // bounds check above guarantees every write below stays inside the
+    // row it targets and inside the last line.
+    unsafe {
+        let buf = p.pixels();
+        for yy in y..(y + h) {
+            let offset = yy as usize * stride + start_col;
+            buf[offset..offset + row.len()].copy_from_slice(row);
         }
     }
-    let Some((_, top)) = bins.iter().max_by_key(|(_, (count, _))| *count) else {
-        return (0, 0, 0, 255);
-    };
-    let n = top.0.max(1) as u64;
-    (
-        (top.1[0] / n).min(255) as u8,
-        (top.1[1] / n).min(255) as u8,
-        (top.1[2] / n).min(255) as u8,
-        (top.1[3] / n).min(255) as u8,
-    )
+}
+
+/// The bytes of one pixel, in this Pixbuf's layout.
+fn pixel_bytes(p: &Pixbuf, (r, g, b, a): Rgba) -> Vec<u8> {
+    if p.has_alpha() {
+        vec![r, g, b, a]
+    } else {
+        vec![r, g, b]
+    }
 }
 
 /// Flood `w`x`h` at `(x, y)` with a solid colour.
-///
-/// Builds one row and memcpys it down the rect. The obvious
-/// `put_pixel` loop costs a GObject call per pixel, which showed up as
-/// ~5 ms of every canvas auto-grow at 6144x3456 — the edge strips a
-/// grow fills are full-width, so the pixel count is large even when
-/// the strip is thin.
-fn fill_rect(p: &Pixbuf, x: i32, y: i32, w: i32, h: i32, (r, g, b, a): (u8, u8, u8, u8)) {
-    if w <= 0 || h <= 0 || x < 0 || y < 0 {
+fn fill_rect(p: &Pixbuf, x: i32, y: i32, w: i32, h: i32, color: Rgba) {
+    if w <= 0 {
         return;
     }
-    let has_alpha = p.has_alpha();
-    let bpp = if has_alpha { 4 } else { 3 };
-    let stride = p.rowstride() as usize;
-    let pixel: &[u8] = if has_alpha { &[r, g, b, a] } else { &[r, g, b] };
-    let row = pixel.repeat(w as usize);
-    let start_col = x as usize * bpp;
+    blit_row(p, x, y, h, &pixel_bytes(p, color).repeat(w as usize));
+}
 
-    // SAFETY: `pixels()` hands back the Pixbuf's live buffer. Every
-    // write below stays inside one row's `w` pixels starting at `x`,
-    // and the bounds check above the loop rejects any rect that would
-    // run past the row or the last line.
-    unsafe {
-        let buf = p.pixels();
-        if start_col + row.len() > stride || (y + h) as usize > p.height() as usize {
-            return;
-        }
-        for yy in y..(y + h) {
-            let offset = yy as usize * stride + start_col;
-            buf[offset..offset + row.len()].copy_from_slice(&row);
-        }
+/// Fill `w`-wide rows at `(x, y)` downward, one colour per row.
+///
+/// For the left/right extension strips, whose colour follows the
+/// capture's content down the edge.
+fn fill_rows(p: &Pixbuf, x: i32, y: i32, w: i32, colors: &[Rgba]) {
+    if w <= 0 {
+        return;
     }
+    for (i, color) in colors.iter().enumerate() {
+        blit_row(
+            p,
+            x,
+            y + i as i32,
+            1,
+            &pixel_bytes(p, *color).repeat(w as usize),
+        );
+    }
+}
+
+/// Fill an `h`-tall band at `(x, y)` whose colour varies per column.
+///
+/// For the top/bottom extension bands. Every row of the band is
+/// identical, so the per-column colours are assembled once and memcpyd
+/// down — writing it column-major instead would stride across the
+/// whole raster per column.
+fn fill_band(p: &Pixbuf, x: i32, y: i32, h: i32, colors: &[Rgba]) {
+    let bpp = if p.has_alpha() { 4 } else { 3 };
+    let mut row = Vec::with_capacity(colors.len() * bpp);
+    for color in colors {
+        row.extend_from_slice(&pixel_bytes(p, *color));
+    }
+    blit_row(p, x, y, h, &row);
+}
+
+/// Which side of the raster an extension strip is being sampled from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Side {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+/// One extension colour per line along `side` — per row for the
+/// left/right sides, per column for top/bottom.
+///
+/// Replaces a single dominant colour for the whole side, which is what
+/// made the extension visibly mismatch the capture: a 6K screenshot's
+/// right edge might be a near-black window for part of its height and
+/// desktop background for the rest, and one flat fill can only match
+/// one of them.
+///
+/// Robustness without a histogram: each line takes the per-channel
+/// MEDIAN of its `AUTO_EXTEND_EDGE_SAMPLE_DEPTH` samples, so a few
+/// antialiased glyph pixels can't drag the result (that was the job the
+/// quantized histogram used to do, and a median does it with a handful
+/// of samples instead of a HashMap over the whole side). The result is
+/// then median-filtered ALONG the side, so one line that happens to cut
+/// through a glyph can't stand out from its neighbours, while a real
+/// content boundary — which persists across many lines — survives.
+fn edge_line_colors(p: &Pixbuf, side: Side, has_alpha: bool) -> Vec<Rgba> {
+    let w = p.width();
+    let h = p.height();
+    let depth = AUTO_EXTEND_EDGE_SAMPLE_DEPTH.min(w).min(h).max(1);
+    let lines = match side {
+        Side::Left | Side::Right => h,
+        Side::Top | Side::Bottom => w,
+    };
+
+    let stride = p.rowstride() as usize;
+    let bpp = if has_alpha { 4 } else { 3 };
+    // SAFETY: read-only access to the Pixbuf's live buffer; every index
+    // below is inside `depth` pixels of an edge of a `w` x `h` raster.
+    let buf = unsafe { p.pixels() };
+
+    let mut colors = Vec::with_capacity(lines as usize);
+    let mut channels = [[0u8; AUTO_EXTEND_EDGE_SAMPLE_DEPTH as usize]; 4];
+    for line in 0..lines {
+        let used = depth as usize;
+        for d in 0..depth {
+            let (x, y) = match side {
+                Side::Left => (d, line),
+                Side::Right => (w - 1 - d, line),
+                Side::Top => (line, d),
+                Side::Bottom => (line, h - 1 - d),
+            };
+            let idx = y as usize * stride + x as usize * bpp;
+            channels[0][d as usize] = buf[idx];
+            channels[1][d as usize] = buf[idx + 1];
+            channels[2][d as usize] = buf[idx + 2];
+            channels[3][d as usize] = if has_alpha { buf[idx + 3] } else { 255 };
+        }
+        let mut median = [0u8; 4];
+        for (c, out) in channels.iter_mut().zip(median.iter_mut()) {
+            let slice = &mut c[..used];
+            slice.sort_unstable();
+            *out = slice[used / 2];
+        }
+        colors.push((median[0], median[1], median[2], median[3]));
+    }
+
+    median_filter_along(&colors)
+}
+
+/// Median-filter a run of colours with a 5-wide window, per channel.
+fn median_filter_along(colors: &[Rgba]) -> Vec<Rgba> {
+    const RADIUS: usize = 2;
+    if colors.len() <= RADIUS * 2 {
+        return colors.to_vec();
+    }
+    (0..colors.len())
+        .map(|i| {
+            let lo = i.saturating_sub(RADIUS);
+            let hi = (i + RADIUS + 1).min(colors.len());
+            let window = &colors[lo..hi];
+            let mut out = [0u8; 4];
+            let mut scratch = [0u8; RADIUS * 2 + 1];
+            for (channel, slot) in out.iter_mut().enumerate() {
+                for (dst, c) in scratch.iter_mut().zip(window) {
+                    *dst = match channel {
+                        0 => c.0,
+                        1 => c.1,
+                        2 => c.2,
+                        _ => c.3,
+                    };
+                }
+                let used = &mut scratch[..window.len()];
+                used.sort_unstable();
+                *slot = used[used.len() / 2];
+            }
+            (out[0], out[1], out[2], out[3])
+        })
+        .collect()
 }
 
 /// Dark gray fill behind the screenshot (replaces solid black). Matches
@@ -3932,6 +4053,99 @@ mod tests {
         assert!(hits.iter().all(|h| *h == 0));
     }
 
+    /// The edge extension must FOLLOW the capture's edge rather than
+    /// paint one flat colour per side — that mismatch is what made a
+    /// grown canvas show a visible seam wherever the edge content
+    /// varied along it. Build a raster of coloured bands so every row's
+    /// edge colour differs, grow it on all four sides, and check the
+    /// extension carries each band outward.
+    #[test]
+    fn edge_extension_follows_per_line_colour() {
+        const BAND: i32 = 20;
+        const PAD: i32 = 12;
+        let (w, h) = (120, 120);
+        let src = Pixbuf::new(
+            relm4::gtk::gdk_pixbuf::Colorspace::Rgb,
+            false,
+            8,
+            w,
+            h,
+        )
+        .unwrap();
+        // Horizontal bands drive the left/right edges; a vertical tint
+        // gradient across each band drives top/bottom.
+        let band_color = |y: i32| -> (u8, u8, u8) { (((y / BAND) * 40) as u8, 60, 200) };
+        let col_color = |x: i32| -> (u8, u8, u8) { (10, ((x / BAND) * 40) as u8, 90) };
+        for y in 0..h {
+            for x in 0..w {
+                // Top and bottom strips carry the column pattern, the
+                // middle carries the row pattern, so each side has its
+                // own varying signal.
+                let (r, g, b) = if y < PAD || y >= h - PAD {
+                    col_color(x)
+                } else {
+                    band_color(y)
+                };
+                src.put_pixel(x as u32, y as u32, r, g, b, 255);
+            }
+        }
+
+        let out = super::resize_pixbuf_to_rect(&src, -PAD, -PAD, w + 2 * PAD, h + 2 * PAD).unwrap();
+
+        // Left and right extensions: sample the middle of each band,
+        // clear of the median filter's reach at the band edges.
+        for y in (PAD + BAND / 2..h - PAD).step_by(BAND as usize) {
+            let want = band_color(y);
+            for probe_x in [0, PAD - 1, w + PAD, w + 2 * PAD - 1] {
+                let got = super::read_pixel(&out, probe_x, y + PAD, false);
+                assert_eq!(
+                    (got.0, got.1, got.2),
+                    want,
+                    "row {y} extension at x={probe_x}"
+                );
+            }
+        }
+
+        // Top and bottom extensions carry the column pattern.
+        for x in (BAND / 2..w).step_by(BAND as usize) {
+            let want = col_color(x);
+            for probe_y in [0, PAD - 1, h + PAD, h + 2 * PAD - 1] {
+                let got = super::read_pixel(&out, x + PAD, probe_y, false);
+                assert_eq!(
+                    (got.0, got.1, got.2),
+                    want,
+                    "column {x} extension at y={probe_y}"
+                );
+            }
+        }
+    }
+
+    /// A single stray pixel at the edge — an antialiased glyph, say —
+    /// must not become a streak across the whole extension for that
+    /// line. That robustness used to come from a quantized histogram
+    /// over the entire side; it now comes from a per-line median.
+    #[test]
+    fn edge_extension_ignores_a_stray_edge_pixel() {
+        let (w, h) = (60, 60);
+        let src = Pixbuf::new(
+            relm4::gtk::gdk_pixbuf::Colorspace::Rgb,
+            false,
+            8,
+            w,
+            h,
+        )
+        .unwrap();
+        src.fill(0x20304000);
+        // Two bright pixels in one row's sampled depth — a minority of
+        // the 8 samples, so the median must reject them.
+        src.put_pixel(0, 30, 255, 0, 0, 255);
+        src.put_pixel(1, 30, 255, 0, 0, 255);
+
+        let out = super::resize_pixbuf_to_rect(&src, -8, 0, w + 8, h).unwrap();
+        let got = super::read_pixel(&out, 0, 30, false);
+        assert_eq!((got.0, got.1, got.2), (0x20, 0x30, 0x40));
+    }
+
     /// Checksum of a grown raster, for confirming that a refactor of
     /// the grow path left the produced pixels bit-identical.
     ///
@@ -3962,6 +4176,10 @@ mod tests {
             out.height(),
             digest
         );
+        if let Ok(dest) = std::env::var("TENSAKU_BENCH_OUT") {
+            out.savev(&dest, "png", &[]).expect("writing grown raster");
+            println!("wrote {dest}");
+        }
     }
 
     /// Manual benchmark for the canvas auto-grow raster rebuild.
@@ -4013,19 +4231,22 @@ mod tests {
                 .unwrap();
             n.fill(0x000000ff);
         });
-        t("4x dominant_color", &|| {
-            let d = super::AUTO_EXTEND_EDGE_SAMPLE_DEPTH;
-            super::dominant_color(&src, 0, 0, d, h, false);
-            super::dominant_color(&src, w - d, 0, d, h, false);
-            super::dominant_color(&src, 0, 0, w, d, false);
-            super::dominant_color(&src, 0, h - d, w, d, false);
+        t("4x edge_line_colors", &|| {
+            for side in [
+                super::Side::Left,
+                super::Side::Right,
+                super::Side::Top,
+                super::Side::Bottom,
+            ] {
+                super::edge_line_colors(&src, side, false);
+            }
         });
         let dst = Pixbuf::new(relm4::gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, w + 40, h + 40)
             .unwrap();
         t("copy_area", &|| src.copy_area(0, 0, w, h, &dst, 0, 0));
-        t("fill_rect right+bottom strips", &|| {
-            super::fill_rect(&dst, w, 0, 40, h + 40, (1, 2, 3, 255));
-            super::fill_rect(&dst, 0, h, w, 40, (1, 2, 3, 255));
+        t("fill right+bottom strips", &|| {
+            super::fill_rows(&dst, w, 0, 40, &vec![(1, 2, 3, 255); (h + 40) as usize]);
+            super::fill_band(&dst, 0, h, 40, &vec![(1, 2, 3, 255); w as usize]);
         });
     }
 }
