@@ -1,4 +1,17 @@
 mod imp;
+mod perf;
+
+/// Time `f` and record it in the frame profiler under `label` (see
+/// `perf`). A no-op unless `TENSAKU_PERF` is set, so call sites can
+/// wrap suspicious work unconditionally.
+pub fn perf_timed<T>(label: &'static str, f: impl FnOnce() -> T) -> T {
+    perf::timed(label, f)
+}
+
+/// RAII variant of [`perf_timed`] for regions with several exits.
+pub fn perf_guard(label: &'static str) -> Option<perf::Guard> {
+    perf::guard(label)
+}
 
 use std::{cell::RefCell, rc::Rc, sync::OnceLock};
 

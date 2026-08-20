@@ -4686,6 +4686,19 @@ impl Component for SketchBoard {
         // the result-processing match at the bottom can still use it
         // (e.g. for `EditTextDrawable` which triggers a tool switch).
         let outer_sender = sender.clone();
+        // Frame-profiler hook (`TENSAKU_PERF`): drag and hover motion
+        // are the two messages that arrive at pointer-report rate, so
+        // their handler cost is what a "laggy while dragging" report
+        // is actually about. The report prints mean ms and the hit
+        // count per window, so events-per-frame is visible too.
+        let _perf = match &msg {
+            SketchBoardInput::InputEvent(InputEvent::Mouse(me)) => match me.type_ {
+                MouseEventType::UpdateDrag => crate::femtovg_area::perf_guard("input-drag"),
+                MouseEventType::PointerPos => crate::femtovg_area::perf_guard("input-hover"),
+                _ => None,
+            },
+            _ => None,
+        };
         // handle resize ourselves, pass everything else to tool
         let result = match msg {
             SketchBoardInput::InputEvent(mut ie) => {

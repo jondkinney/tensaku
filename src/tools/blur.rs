@@ -418,7 +418,12 @@ impl Drawable for Blur {
 
             // create new cached image
             if self.cached_image.borrow().is_none() {
-                let id = match self.blur_style {
+                // Profiled: every rebuild does a full-framebuffer
+                // `canvas.screenshot()` (a synchronous glReadPixels),
+                // and every drag motion event invalidates the cache —
+                // so this is the cost that scales with panel size
+                // while a blur is being moved or resized.
+                let id = crate::femtovg_area::perf_timed("blur-resample", || match self.blur_style {
                     BlurStyle::Gaussian => Self::blur(
                         canvas,
                         pos,
@@ -426,7 +431,7 @@ impl Drawable for Blur {
                         self.style
                             .size
                             .to_blur_factor(self.style.annotation_size_factor),
-                    )?,
+                    ),
                     BlurStyle::SecureBlur => Self::secure_blur(
                         canvas,
                         pos,
@@ -434,7 +439,7 @@ impl Drawable for Blur {
                         self.style
                             .size
                             .to_blur_factor(self.style.annotation_size_factor),
-                    )?,
+                    ),
                     BlurStyle::Pixelate => Self::pixelate(
                         canvas,
                         pos,
@@ -442,9 +447,9 @@ impl Drawable for Blur {
                         self.style
                             .size
                             .to_pixelate_cell_size(self.style.annotation_size_factor),
-                    )?,
+                    ),
                     BlurStyle::BlackOut => unreachable!("handled above"),
-                };
+                })?;
                 self.cached_image.borrow_mut().replace(id);
             }
 

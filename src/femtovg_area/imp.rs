@@ -565,6 +565,17 @@ impl ObjectImpl for FemtoVGArea {
 impl WidgetImpl for FemtoVGArea {
     fn realize(&self) {
         self.parent_realize();
+        if super::perf::spin() {
+            // Free-running profiling mode: drive a render every frame
+            // tick so steady-state canvas cost is measurable without a
+            // human moving the mouse. A `queue_render` from inside
+            // `render` would be swallowed as already-in-progress, so
+            // the request has to come from the frame clock instead.
+            self.obj().add_tick_callback(|area, _| {
+                area.queue_render();
+                glib::ControlFlow::Continue
+            });
+        }
     }
 
     fn unrealize(&self) {
@@ -1082,7 +1093,16 @@ impl FemtoVgAreaMut {
             return None;
         }
         let prev_image = self.background_image.clone();
-        let resized = resize_pixbuf_to_rect(&self.background_image, dx_min, dy_min, new_w, new_h)?;
+        // Profiled: this reallocates and edge-fills the whole
+        // background raster, and its cost scales with the capture's
+        // pixel count (~30 ms at 6144x3456). It runs from
+        // `auto_resize_canvas`, so any drawable whose bounds reach the
+        // image edge pays it once per commit or end-of-drag — and once
+        // per EVENT for a keyboard nudge, which repeats faster than the
+        // frame clock.
+        let resized = super::perf::timed("canvas-grow", || {
+            resize_pixbuf_to_rect(&self.background_image, dx_min, dy_min, new_w, new_h)
+        })?;
         let translation = Vec2D::new(-dx_min as f32, -dy_min as f32);
         self.original_rect.pos += translation;
         let exclude: HashSet<DrawableId> = ids_to_exclude.iter().copied().collect();
@@ -1891,6 +1911,7 @@ impl FemtoVgAreaMut {
         canvas: &mut femtovg::Canvas<femtovg::renderer::OpenGl>,
         font: FontId,
     ) -> Result<()> {
+        super::perf::begin_frame();
         canvas.set_render_target(RenderTarget::Screen);
         // Publish current DPR so drawables can size CSS-pixel UI
         // (text editing handles, outlines) inside `Drawable::draw`
@@ -2074,6 +2095,9 @@ impl FemtoVgAreaMut {
             );
         }
 
+        // Phase boundary: canvas clear + both drop-shadow layers.
+        super::perf::mark();
+
         canvas.reset_transform();
         canvas.set_transform(&transform);
 
@@ -2099,6 +2123,17 @@ impl FemtoVgAreaMut {
         if scissor.is_some() {
             canvas.reset_scissor();
         }
+
+        if super::perf::readback_probe() {
+            let _ = super::perf::timed("readback", || canvas.screenshot());
+        }
+
+        super::perf::end_frame(
+            canvas.width(),
+            canvas.height(),
+            self.device_pixel_ratio,
+            self.drawables.len(),
+        );
 
         Ok(())
     }
@@ -2127,6 +2162,9 @@ impl FemtoVgAreaMut {
 
         // render background
         self.render_background_image(canvas, onscreen)?;
+        if onscreen {
+            super::perf::mark();
+        }
 
         // Debug overlay: when `TENSAKU_DEBUG_BANDS=1`, draw a faint
         // colored stripe at each detected text band so we can
@@ -2183,6 +2221,9 @@ impl FemtoVgAreaMut {
             restore_transform,
             restore_scissor,
         )?;
+        if onscreen {
+            super::perf::mark();
+        }
 
         // Skip rendering of any drawable currently being dragged by either
         // tool — the tool will render the moved/transformed copy below.
@@ -2302,8 +2343,14 @@ impl FemtoVgAreaMut {
         if render_crop && let Some(c) = self.crop_tool.borrow().get_crop() {
             c.draw(canvas, font, bounds)?;
         }
+        if onscreen {
+            super::perf::mark();
+        }
 
         canvas.flush();
+        if onscreen {
+            super::perf::mark();
+        }
         Ok(())
     }
 
@@ -2714,11 +2761,18 @@ impl FemtoVgAreaMut {
         onscreen: bool,
     ) -> Result<()> {
         if self.background_tiles.is_empty() {
-            self.background_tiles = Self::upload_background_tiles(
-                canvas,
-                &self.background_image,
-                self.max_texture_size,
-            )?;
+            // Profiled: a full CPU→GPU re-upload of the screenshot.
+            // Anything that clears `background_tiles` (canvas grow /
+            // shrink, flip, rotate, undo of those) pays it on the next
+            // frame, and its cost scales with the capture's pixel
+            // count.
+            self.background_tiles = super::perf::timed("bg-upload", || {
+                Self::upload_background_tiles(
+                    canvas,
+                    &self.background_image,
+                    self.max_texture_size,
+                )
+            })?;
         }
 
         let transparency_bg_id = match self.transparent_background_id {
@@ -3346,7 +3400,7 @@ impl FemtoVgAreaMut {
 
 #[cfg(test)]
 mod tests {
-    use super::tile_ranges;
+    use super::{Pixbuf, resize_pixbuf_to_rect, tile_ranges};
 
     #[test]
     fn tile_ranges_covers_exactly_once() {
@@ -3379,5 +3433,44 @@ mod tests {
     #[test]
     fn tile_ranges_guards_zero_limit() {
         assert_eq!(tile_ranges(3, 0), vec![(0, 1), (1, 1), (2, 1)]);
+    }
+
+    /// Manual benchmark for the canvas auto-grow raster rebuild.
+    ///
+    /// `auto_resize_for_drawables` runs this on every drag motion
+    /// event once a drawable's bounds spill past the image, so its
+    /// cost — which scales with the capture's pixel count — is felt
+    /// as drag lag on large displays. Run with the capture size you
+    /// want to characterise:
+    ///
+    ///   TENSAKU_BENCH_W=6016 TENSAKU_BENCH_H=3384 \
+    ///     cargo test --release grow_bench -- --ignored --nocapture
+    #[test]
+    #[ignore = "manual benchmark; prints timings"]
+    fn resize_pixbuf_to_rect_grow_bench() {
+        let w: i32 = std::env::var("TENSAKU_BENCH_W")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(6016);
+        let h: i32 = std::env::var("TENSAKU_BENCH_H")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3384);
+        let src = Pixbuf::new(
+            relm4::gtk::gdk_pixbuf::Colorspace::Rgb,
+            false,
+            8,
+            w,
+            h,
+        )
+        .unwrap();
+        src.fill(0x304050ff);
+        // A drawable that has spilled 40 px past the right and bottom
+        // edges — the shape of a grow triggered mid-drag.
+        let start = std::time::Instant::now();
+        let out = resize_pixbuf_to_rect(&src, 0, 0, w + 40, h + 40).unwrap();
+        let elapsed = start.elapsed();
+        assert_eq!(out.width(), w + 40);
+        println!("resize_pixbuf_to_rect {w}x{h} -> +40px: {:.1} ms", elapsed.as_secs_f64() * 1000.0);
     }
 }
