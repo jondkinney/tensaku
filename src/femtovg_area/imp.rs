@@ -228,7 +228,24 @@ impl ResizeLayout {
 /// `dst` must already hold the surviving pixels at
 /// `(layout.dst_x, layout.dst_y)` — either copied there, or already
 /// present because `dst` is a re-view of the same allocation.
-fn extend_edges(dst: &Pixbuf, src: &Pixbuf, layout: ResizeLayout) {
+/// How far each side of `src` has already been extended beyond the
+/// capture. The extension's fade is a function of distance from the
+/// CAPTURE, so a grow that starts beyond the fade paints flat.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CaptureInset {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+fn extend_edges(
+    dst: &Pixbuf,
+    src: &Pixbuf,
+    layout: ResizeLayout,
+    settled: Rgba,
+    inset: CaptureInset,
+) {
     let ResizeLayout {
         src_x,
         src_y,
@@ -272,19 +289,9 @@ fn extend_edges(dst: &Pixbuf, src: &Pixbuf, layout: ResizeLayout) {
     let right = rows(&right_colors);
     let top = cols(&top_colors);
     let bottom = cols(&bottom_colors);
-    // ONE settled colour for the whole frame, not one per side.
-    // Per-side values differ by a level or two — they sample different
-    // edges of the same background — and that difference lands as a
-    // step wherever two sides' far fields meet, which is every corner.
-    // A single value makes the far field of the entire extension
-    // exactly uniform; each side still matches the capture at its own
-    // boundary, so this costs nothing where the match matters.
-    let settled = settled_color(
-        &[left.as_slice(), right.as_slice(), top.as_slice(), bottom.as_slice()].concat(),
-    );
 
     if grow_left > 0 {
-        fill_side_strip(dst, 0, dst_y, grow_left, &left, settled, Anchor::End);
+        fill_side_strip(dst, 0, dst_y, grow_left, &left, settled, Anchor::End, inset.left);
     }
     if grow_right > 0 {
         fill_side_strip(
@@ -295,10 +302,11 @@ fn extend_edges(dst: &Pixbuf, src: &Pixbuf, layout: ResizeLayout) {
             &right,
             settled,
             Anchor::Start,
+            inset.right,
         );
     }
     if grow_top > 0 {
-        fill_side_band(dst, dst_x, 0, grow_top, &top, settled, Anchor::End);
+        fill_side_band(dst, dst_x, 0, grow_top, &top, settled, Anchor::End, inset.top);
     }
     if grow_bottom > 0 {
         fill_side_band(
@@ -309,6 +317,7 @@ fn extend_edges(dst: &Pixbuf, src: &Pixbuf, layout: ResizeLayout) {
             &bottom,
             settled,
             Anchor::Start,
+            inset.bottom,
         );
     }
 
@@ -347,6 +356,7 @@ fn extend_edges(dst: &Pixbuf, src: &Pixbuf, layout: ResizeLayout) {
 /// `resize_pixbuf_to_rect` would have produced — that equivalence is
 /// what `view_resize_matches_copy_resize` pins down — it just avoids
 /// the copy whenever the surviving pixels are already in place.
+#[allow(clippy::too_many_arguments)]
 fn resize_raster_in_alloc(
     old: &Pixbuf,
     alloc: Option<&Pixbuf>,
@@ -355,6 +365,8 @@ fn resize_raster_in_alloc(
     src_y: i32,
     new_w: i32,
     new_h: i32,
+    settled: Rgba,
+    inset: CaptureInset,
 ) -> Option<(Pixbuf, Pixbuf, (i32, i32))> {
     if new_w <= 0 || new_h <= 0 {
         return None;
@@ -371,7 +383,7 @@ fn resize_raster_in_alloc(
             // colour is sampled before the first write, which is what
             // makes reading `old` while writing an overlapping `view`
             // safe.
-            extend_edges(&view, old, layout);
+            extend_edges(&view, old, layout, settled, inset);
             return Some((view, alloc.clone(), (nx, ny)));
         }
     }
@@ -398,7 +410,7 @@ fn resize_raster_in_alloc(
         );
     }
     let view = fresh.new_subpixbuf(pad, pad, new_w, new_h);
-    extend_edges(&view, old, layout);
+    extend_edges(&view, old, layout, settled, inset);
     Some((view, fresh, (pad, pad)))
 }
 
@@ -409,12 +421,15 @@ fn resize_raster_in_alloc(
 /// the straightforward implementation, so if the two ever disagree it
 /// is the fast one that is wrong.
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn resize_pixbuf_to_rect(
     original: &Pixbuf,
     src_x: i32,
     src_y: i32,
     new_w: i32,
     new_h: i32,
+    settled: Rgba,
+    inset: CaptureInset,
 ) -> Option<Pixbuf> {
     if new_w <= 0 || new_h <= 0 {
         return None;
@@ -448,7 +463,7 @@ fn resize_pixbuf_to_rect(
             layout.dst_y,
         );
     }
-    extend_edges(&new, original, layout);
+    extend_edges(&new, original, layout, settled, inset);
     Some(new)
 }
 
@@ -569,6 +584,29 @@ fn settled_color(colors: &[Rgba]) -> Rgba {
     (out[0], out[1], out[2], out[3])
 }
 
+/// The colour an image's extension settles to away from the capture:
+/// one value for the whole frame, pooled across all four edges.
+///
+/// ONE value, not one per side: per-side medians differ by a level or
+/// two — they sample different edges of the same background — and that
+/// difference lands as a step wherever two sides' far fields meet,
+/// which is every corner.
+///
+/// Computed ONCE per raster and reused for every subsequent grow (see
+/// `FemtoVgAreaMut::extension_settled`). Recomputing it per grow is
+/// what produced a line per expansion: after the first grow an edge is
+/// the previous extension rather than the capture, so the pooled median
+/// drifts, and each new strip settles to a slightly different colour
+/// than the one beside it.
+pub fn image_settled_color(image: &Pixbuf) -> Rgba {
+    let has_alpha = image.has_alpha();
+    let pooled: Vec<Rgba> = [Side::Left, Side::Right, Side::Top, Side::Bottom]
+        .into_iter()
+        .flat_map(|side| edge_line_colors(image, side, has_alpha))
+        .collect();
+    settled_color(&pooled)
+}
+
 /// Which end of a strip or band touches the capture. The per-line
 /// colour sits there and fades away from it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -590,6 +628,7 @@ fn push_pixel(row: &mut Vec<u8>, has_alpha: bool, c: Rgba) {
 
 /// Fill a `w`-wide vertical strip at `(x, y)`, one colour per row at
 /// the capture-facing edge, fading across to `settled`.
+#[allow(clippy::too_many_arguments)]
 fn fill_side_strip(
     p: &Pixbuf,
     x: i32,
@@ -598,13 +637,21 @@ fn fill_side_strip(
     colors: &[Rgba],
     settled: Rgba,
     anchor: Anchor,
+    already: i32,
 ) {
     if w <= 0 || colors.is_empty() {
         return;
     }
     let has_alpha = p.has_alpha();
     let bpp = if has_alpha { 4 } else { 3 };
-    let fade = EDGE_FADE_PX.min(w);
+    // `already` is how far this side has ALREADY been extended. The
+    // fade is a function of distance from the capture, not from this
+    // strip, so a strip that starts beyond the fade is uniformly
+    // settled. Restarting the ramp per strip is what drew a line per
+    // expansion: each grow re-sampled the previous strip's ramp
+    // (`edge_line_colors` looks several pixels deep, so it straddles
+    // it) and laid down another one.
+    let fade = (EDGE_FADE_PX - already).clamp(0, w);
     // Columns at least `fade` from the capture are all `settled`, so
     // that stretch is built once and reused for every row.
     let flat = pixel_bytes(p, settled).repeat((w - fade).max(0) as usize);
@@ -635,6 +682,7 @@ fn fill_side_strip(
 ///
 /// Rows are written whole: assembling this column-major would stride
 /// across the entire raster once per column.
+#[allow(clippy::too_many_arguments)]
 fn fill_side_band(
     p: &Pixbuf,
     x: i32,
@@ -643,13 +691,15 @@ fn fill_side_band(
     colors: &[Rgba],
     settled: Rgba,
     anchor: Anchor,
+    already: i32,
 ) {
     if h <= 0 || colors.is_empty() {
         return;
     }
     let has_alpha = p.has_alpha();
     let bpp = if has_alpha { 4 } else { 3 };
-    let fade = EDGE_FADE_PX.min(h);
+    // See `fill_side_strip`: distance is measured from the capture.
+    let fade = (EDGE_FADE_PX - already).clamp(0, h);
 
     // Rows at least `fade` from the capture are uniformly `settled`.
     let flat_rows = (h - fade).max(0);
@@ -941,6 +991,16 @@ pub struct FemtoVgAreaMut {
     background_alloc: Option<Pixbuf>,
     /// Origin of `background_image` inside `background_alloc`.
     background_origin: (i32, i32),
+    /// Colour the edge extension settles to, computed once from the
+    /// capture and reused for every grow of it. `None` until the first
+    /// grow; cleared whenever a foreign raster is adopted.
+    ///
+    /// It has to be stable: after the first grow, an edge of the image
+    /// IS the previous extension, so recomputing from the live image
+    /// drifts a level or two each time and every strip settles to a
+    /// slightly different colour than its neighbour — which is a
+    /// visible line per expansion, stacking up along the growing edge.
+    extension_settled: Option<Rgba>,
     background_tiles: Vec<BackgroundTile>,
     /// Image-space rects whose pixels are on the CPU but not yet on the
     /// GPU. Set by an incremental canvas grow, consumed by the next
@@ -1330,6 +1390,7 @@ impl FemtoVGArea {
             background_image,
             background_alloc: None,
             background_origin: (0, 0),
+            extension_settled: None,
             background_tiles: Vec::new(),
             pending_tile_strips: Vec::new(),
             max_texture_size: 8192,
@@ -3409,6 +3470,21 @@ impl FemtoVgAreaMut {
             return None;
         }
         let old = self.background_image.clone();
+        // Derived from the capture on the first grow and held: see
+        // `extension_settled`.
+        let settled = *self
+            .extension_settled
+            .get_or_insert_with(|| image_settled_color(&old));
+        // How far the raster already reaches past the capture on each
+        // side, so the fade stays anchored to the capture across any
+        // number of grows.
+        let rect = self.original_rect;
+        let inset = CaptureInset {
+            left: rect.pos.x.max(0.0) as i32,
+            top: rect.pos.y.max(0.0) as i32,
+            right: (old.width() as f32 - (rect.pos.x + rect.size.x)).max(0.0) as i32,
+            bottom: (old.height() as f32 - (rect.pos.y + rect.size.y)).max(0.0) as i32,
+        };
         let (view, alloc, origin) = resize_raster_in_alloc(
             &old,
             self.background_alloc.as_ref(),
@@ -3417,6 +3493,8 @@ impl FemtoVgAreaMut {
             src_y,
             new_w,
             new_h,
+            settled,
+            inset,
         )?;
         self.background_alloc = Some(alloc);
         self.background_origin = origin;
@@ -3430,6 +3508,9 @@ impl FemtoVgAreaMut {
     fn adopt_background_image(&mut self, image: Pixbuf) -> Pixbuf {
         self.background_alloc = None;
         self.background_origin = (0, 0);
+        // A different raster has a different edge; re-derive on its
+        // first grow.
+        self.extension_settled = None;
         self.invalidate_background_tiles();
         std::mem::replace(&mut self.background_image, image)
     }
@@ -3462,9 +3543,16 @@ impl FemtoVgAreaMut {
         new_w: f32,
         new_h: f32,
     ) {
-        /// Beyond this the per-tile draw calls stop being cheaper than
-        /// one clean upload.
-        const MAX_TILES: usize = 64;
+        /// Beyond this, rebuild the background as one clean texture
+        /// instead of accumulating strips.
+        ///
+        /// Kept low deliberately. Every extra tile is another boundary
+        /// bilinear sampling cannot cross, and a long run of grows —
+        /// nudging an annotation outward — appends one per event. The
+        /// overlap above stops a boundary showing, but fewer boundaries
+        /// is better than more, and a rebuild is ~20 ms against the
+        /// ~1 ms a grow costs, so it is affordable a few times a second.
+        const MAX_TILES: usize = 8;
 
         // Count strips still queued from earlier grows: several can
         // land between two frames (a keyboard nudge at the image edge
@@ -3529,11 +3617,18 @@ impl FemtoVgAreaMut {
 
         for &(sx, sy, sw, sh) in strips {
             // Clamp to the raster: a strip is derived from float rects
-            // and must never index past the Pixbuf.
-            let x0 = (sx.max(0.0) as usize).min(img_w);
-            let y0 = (sy.max(0.0) as usize).min(img_h);
-            let x1 = (((sx + sw).max(0.0)).ceil() as usize).min(img_w);
-            let y1 = (((sy + sh).max(0.0)).ceil() as usize).min(img_h);
+            // and must never index past the Pixbuf. Inflate by a pixel
+            // first so neighbouring tiles OVERLAP: each tile is its own
+            // texture, and bilinear sampling cannot reach across two of
+            // them, so a boundary between abutting tiles shows as a
+            // seam once the canvas is minified enough for a destination
+            // pixel to span more than one texel. The overlap costs one
+            // row/column per strip and the duplicated pixels are
+            // identical, so whichever tile draws last is right.
+            let x0 = ((sx - 1.0).max(0.0) as usize).min(img_w);
+            let y0 = ((sy - 1.0).max(0.0) as usize).min(img_h);
+            let x1 = (((sx + sw + 1.0).max(0.0)).ceil() as usize).min(img_w);
+            let y1 = (((sy + sh + 1.0).max(0.0)).ceil() as usize).min(img_h);
             if x1 <= x0 || y1 <= y0 {
                 continue;
             }
@@ -4412,7 +4507,10 @@ mod tests {
             }
         }
 
-        let out = super::resize_pixbuf_to_rect(&src, -PAD, -PAD, w + 2 * PAD, h + 2 * PAD).unwrap();
+        let settled = super::image_settled_color(&src);
+        let out =
+            super::resize_pixbuf_to_rect(&src, -PAD, -PAD, w + 2*PAD, h + 2*PAD, settled, Default::default())
+                .unwrap();
 
         // Boundary columns carry each row's own colour.
         for y in (EDGE + BAND / 2..h - EDGE).step_by(BAND as usize) {
@@ -4479,7 +4577,8 @@ mod tests {
         src.put_pixel(0, 30, 255, 0, 0, 255);
         src.put_pixel(1, 30, 255, 0, 0, 255);
 
-        let out = super::resize_pixbuf_to_rect(&src, -8, 0, w + 8, h).unwrap();
+        let settled = super::image_settled_color(&src);
+        let out = super::resize_pixbuf_to_rect(&src, -8, 0, w + 8, h, settled, Default::default()).unwrap();
         let got = super::read_pixel(&out, 0, 30, false);
         assert_eq!((got.0, got.1, got.2), (0x20, 0x30, 0x40));
     }
@@ -4517,6 +4616,10 @@ mod tests {
             (-2, -2, 4, 4),      // small again, in the fresh allocation
         ];
 
+        // Both paths take the SAME settled colour, derived once from the
+        // capture — that is the production contract, and re-deriving it
+        // per step is exactly the drift this pins against.
+        let settled = super::image_settled_color(&src);
         let mut view = src.clone();
         let mut reference = src.clone();
         let mut alloc: Option<Pixbuf> = None;
@@ -4525,10 +4628,20 @@ mod tests {
         for (i, (sx, sy, dw, dh)) in steps.into_iter().enumerate() {
             let (nw, nh) = (view.width() + dw, view.height() + dh);
             let (next_view, next_alloc, next_origin) =
-                super::resize_raster_in_alloc(&view, alloc.as_ref(), origin, sx, sy, nw, nh)
-                    .unwrap();
+                super::resize_raster_in_alloc(
+                    &view,
+                    alloc.as_ref(),
+                    origin,
+                    sx,
+                    sy,
+                    nw,
+                    nh,
+                    settled,
+                    Default::default(),
+                )
+                .unwrap();
             let next_reference =
-                super::resize_pixbuf_to_rect(&reference, sx, sy, nw, nh).unwrap();
+                super::resize_pixbuf_to_rect(&reference, sx, sy, nw, nh, settled, Default::default()).unwrap();
 
             assert_eq!(
                 (next_view.width(), next_view.height()),
@@ -4552,6 +4665,88 @@ mod tests {
         }
     }
 
+    /// A run of small grows — what nudging an annotation outward does —
+    /// must leave the extension seamless.
+    ///
+    /// The regression this pins: the fade from the capture's edge
+    /// colour to the settled colour used to restart inside every strip.
+    /// `edge_line_colors` samples several pixels deep, so each grow
+    /// re-sampled the previous strip's ramp and laid down another one,
+    /// drawing a line per expansion that stacked up along the growing
+    /// edge. The fade is a function of distance from the CAPTURE, so a
+    /// strip beyond it must come out flat.
+    ///
+    /// Needs a capture whose growing edge differs sharply from the
+    /// settled colour, or there is no ramp to repeat and the bug is
+    /// invisible.
+    #[test]
+    fn successive_grows_leave_no_step_between_strips() {
+        let (w, h) = (80, 60);
+        let src = Pixbuf::new(relm4::gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, w, h).unwrap();
+        for y in 0..h {
+            for x in 0..w {
+                // Dark left and top edges against a light everything
+                // else: the pooled settled colour lands light, so the
+                // extension on those two sides has a long way to fade.
+                let v: u8 = if x < 8 || y < 8 { 20 } else { 220 };
+                src.put_pixel(x as u32, y as u32, v, v, v, 255);
+            }
+        }
+
+        let settled = super::image_settled_color(&src);
+        let mut view = src.clone();
+        let mut alloc: Option<Pixbuf> = None;
+        let mut origin = (0, 0);
+        // Mirrors what the renderer passes: how far the raster already
+        // reaches past the capture, which grows with every step.
+        let mut inset = super::CaptureInset::default();
+        const STEP: i32 = 20;
+        const GROWS: i32 = 40;
+        for _ in 0..GROWS {
+            let (v, a, o) = super::resize_raster_in_alloc(
+                &view,
+                alloc.as_ref(),
+                origin,
+                -STEP,
+                -STEP,
+                view.width() + STEP,
+                view.height() + STEP,
+                settled,
+                inset,
+            )
+            .unwrap();
+            view = v;
+            alloc = Some(a);
+            origin = o;
+            inset.left += STEP;
+            inset.top += STEP;
+        }
+
+        // Everything more than one fade from the capture is far field
+        // and must be ONE colour across every strip boundary in it.
+        let far = GROWS * STEP - super::EDGE_FADE_PX - STEP;
+        assert!(far > STEP * 2, "test must span several strips");
+        let first = super::read_pixel(&view, 0, 0, false);
+        for y in 0..far {
+            for x in 0..view.width() {
+                assert_eq!(
+                    super::read_pixel(&view, x, y, false),
+                    first,
+                    "step in the top extension at ({x},{y})"
+                );
+            }
+        }
+        for y in 0..view.height() {
+            for x in 0..far {
+                assert_eq!(
+                    super::read_pixel(&view, x, y, false),
+                    first,
+                    "step in the left extension at ({x},{y})"
+                );
+            }
+        }
+    }
+
     /// An undo snapshot is a view of the same allocation as the raster
     /// that superseded it, so a later grow must not disturb it — it
     /// writes only outside the region the snapshot covers.
@@ -4561,8 +4756,10 @@ mod tests {
         let src = Pixbuf::new(relm4::gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, w, h).unwrap();
         src.fill(0x11223300);
 
+        let settled = super::image_settled_color(&src);
         let (first, alloc, origin) =
-            super::resize_raster_in_alloc(&src, None, (0, 0), -2, -2, w + 4, h + 4).unwrap();
+            super::resize_raster_in_alloc(&src, None, (0,0), -2, -2, w+4, h+4, settled, Default::default())
+                .unwrap();
         let snapshot: Vec<_> = (0..first.height())
             .flat_map(|y| (0..first.width()).map(move |x| (x, y)))
             .map(|(x, y)| super::read_pixel(&first, x, y, false))
@@ -4577,6 +4774,8 @@ mod tests {
             -5,
             first.width() + 10,
             first.height() + 10,
+            settled,
+            Default::default(),
         )
         .unwrap();
 
@@ -4605,8 +4804,16 @@ mod tests {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(200);
-        let out = resize_pixbuf_to_rect(&src, -pad, -pad * 3 / 4, w + 2 * pad, h + pad * 3 / 2)
-            .unwrap();
+        let out = resize_pixbuf_to_rect(
+            &src,
+            -pad,
+            -pad * 3 / 4,
+            w + 2 * pad,
+            h + pad * 3 / 2,
+            super::image_settled_color(&src),
+            Default::default(),
+        )
+        .unwrap();
         let digest = unsafe {
             out.pixels()
                 .iter()
@@ -4661,7 +4868,8 @@ mod tests {
         // A drawable that has spilled 40 px past the right and bottom
         // edges — the shape of a grow triggered mid-drag.
         let start = std::time::Instant::now();
-        let out = resize_pixbuf_to_rect(&src, 0, 0, w + 40, h + 40).unwrap();
+        let settled = super::image_settled_color(&src);
+        let out = resize_pixbuf_to_rect(&src, 0, 0, w + 40, h + 40, settled, Default::default()).unwrap();
         let elapsed = start.elapsed();
         assert_eq!(out.width(), w + 40);
         println!("resize_pixbuf_to_rect {w}x{h} -> +40px: {:.1} ms", elapsed.as_secs_f64() * 1000.0);
@@ -4694,11 +4902,22 @@ mod tests {
         // allocate and copy, and one that re-views an allocation it
         // already has.
         let (view, alloc, origin) =
-            super::resize_raster_in_alloc(&src, None, (0, 0), -4, -4, w + 8, h + 8).unwrap();
+            super::resize_raster_in_alloc(&src, None, (0,0), -4, -4, w+8, h+8, settled, Default::default())
+                .unwrap();
         let start = std::time::Instant::now();
         let (view2, alloc2, origin2) =
-            super::resize_raster_in_alloc(&view, Some(&alloc), origin, -4, -4, w + 16, h + 16)
-                .unwrap();
+            super::resize_raster_in_alloc(
+                &view,
+                Some(&alloc),
+                origin,
+                -4,
+                -4,
+                w + 16,
+                h + 16,
+                settled,
+                Default::default(),
+            )
+            .unwrap();
         println!(
             "    resize_raster (re-view, no copy): {:.1} ms",
             start.elapsed().as_secs_f64() * 1000.0
@@ -4712,6 +4931,8 @@ mod tests {
             -600,
             view2.width() + 1200,
             view2.height() + 1200,
+            settled,
+            Default::default(),
         )
         .unwrap();
         println!(
@@ -4728,6 +4949,7 @@ mod tests {
                 &vec![(1, 2, 3, 255); (h + 40) as usize],
                 (1, 2, 3, 255),
                 super::Anchor::Start,
+                0,
             );
             super::fill_side_band(
                 &dst,
@@ -4737,6 +4959,7 @@ mod tests {
                 &vec![(1, 2, 3, 255); w as usize],
                 (1, 2, 3, 255),
                 super::Anchor::Start,
+                0,
             );
         });
     }
