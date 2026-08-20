@@ -164,6 +164,12 @@ fn spring_back_progress(start: f32, limit: f32, elapsed_ms: f32) -> (f32, bool) 
 /// averaging produced over text-bearing edges.
 const AUTO_EXTEND_EDGE_SAMPLE_DEPTH: i32 = 8;
 
+/// Slack allocated around the background raster so a run of small
+/// grows can re-view the same memory instead of reallocating and
+/// copying. Costs ~15 MB on a 6144x3456 RGB capture, and absorbs a few
+/// hundred single-pixel nudges before the next allocation.
+const RASTER_GROWTH_PAD: i32 = 256;
+
 /// Build a new Pixbuf representing the rectangle `(src_x, src_y,
 /// new_w, new_h)` taken out of `original`'s coordinate space. Where
 /// that rect lies inside `original`, the pixels are copied directly;
@@ -173,6 +179,238 @@ const AUTO_EXTEND_EDGE_SAMPLE_DEPTH: i32 = 8;
 /// Handles pure grow, pure shrink, and any mix (e.g. grow-left while
 /// shrink-right in the same operation). Returns `None` if the new
 /// Pixbuf can't be allocated or `new_w`/`new_h` are non-positive.
+/// Geometry of a raster resize: which part of the old raster survives,
+/// where it lands in the new one, and how thick the extension strip on
+/// each side is.
+///
+/// Split out from the resize itself because two callers need it: the
+/// path that allocates a new raster and copies into it, and the path
+/// that just re-views a larger allocation and so has nothing to copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ResizeLayout {
+    /// Surviving rect in the OLD raster's coordinates.
+    src_x: i32,
+    src_y: i32,
+    copy_w: i32,
+    copy_h: i32,
+    /// Where that rect lands in the new raster.
+    dst_x: i32,
+    dst_y: i32,
+    grow_left: i32,
+    grow_top: i32,
+    grow_right: i32,
+    grow_bottom: i32,
+}
+
+impl ResizeLayout {
+    fn new(src_x: i32, src_y: i32, new_w: i32, new_h: i32, orig_w: i32, orig_h: i32) -> Self {
+        let isec_x = src_x.max(0);
+        let isec_y = src_y.max(0);
+        let isec_w = ((src_x + new_w).min(orig_w) - isec_x).max(0);
+        let isec_h = ((src_y + new_h).min(orig_h) - isec_y).max(0);
+        Self {
+            src_x: isec_x,
+            src_y: isec_y,
+            copy_w: isec_w,
+            copy_h: isec_h,
+            dst_x: isec_x - src_x,
+            dst_y: isec_y - src_y,
+            grow_left: (-src_x).max(0),
+            grow_top: (-src_y).max(0),
+            grow_right: ((src_x + new_w) - orig_w).max(0),
+            grow_bottom: ((src_y + new_h) - orig_h).max(0),
+        }
+    }
+}
+
+/// Paint the extension strips of `dst` from `src`'s edges, per line.
+///
+/// `dst` must already hold the surviving pixels at
+/// `(layout.dst_x, layout.dst_y)` — either copied there, or already
+/// present because `dst` is a re-view of the same allocation.
+fn extend_edges(dst: &Pixbuf, src: &Pixbuf, layout: ResizeLayout) {
+    let ResizeLayout {
+        src_x,
+        src_y,
+        copy_w,
+        copy_h,
+        dst_x,
+        dst_y,
+        grow_left,
+        grow_top,
+        grow_right,
+        grow_bottom,
+    } = layout;
+    if grow_left == 0 && grow_top == 0 && grow_right == 0 && grow_bottom == 0 {
+        return;
+    }
+    let has_alpha = src.has_alpha();
+    let new_w = dst.width();
+    let new_h = dst.height();
+
+    // One colour per line rather than one per side, so the extension
+    // tracks whatever the capture's edge is doing at that point.
+    let left_colors = edge_line_colors(src, Side::Left, has_alpha);
+    let right_colors = edge_line_colors(src, Side::Right, has_alpha);
+    let top_colors = edge_line_colors(src, Side::Top, has_alpha);
+    let bottom_colors = edge_line_colors(src, Side::Bottom, has_alpha);
+
+    // The side strips run alongside the surviving rect, so they consume
+    // the matching slice of that side's colours: a shrink on one axis
+    // means the strip is shorter than the side and starts partway down.
+    let slice = |c: &[Rgba], from: i32, len: i32| -> Vec<Rgba> {
+        c.iter()
+            .skip(from.max(0) as usize)
+            .take(len.max(0) as usize)
+            .copied()
+            .collect()
+    };
+    let rows = |c: &[Rgba]| slice(c, src_y, copy_h);
+    let cols = |c: &[Rgba]| slice(c, src_x, copy_w);
+
+    if grow_left > 0 {
+        fill_rows(dst, 0, dst_y, grow_left, &rows(&left_colors));
+    }
+    if grow_right > 0 {
+        fill_rows(
+            dst,
+            new_w - grow_right,
+            dst_y,
+            grow_right,
+            &rows(&right_colors),
+        );
+    }
+    if grow_top > 0 {
+        fill_band(dst, dst_x, 0, grow_top, &cols(&top_colors));
+    }
+    if grow_bottom > 0 {
+        fill_band(
+            dst,
+            dst_x,
+            new_h - grow_bottom,
+            grow_bottom,
+            &cols(&bottom_colors),
+        );
+    }
+
+    // Corners (where both axes grew). Continue whichever adjacent band
+    // is longer, taking that band's END colour so the corner joins it
+    // without a step.
+    let at = |c: &[Rgba], i: i32| c.get(i.max(0) as usize).copied().unwrap_or((0, 0, 0, 255));
+    let last_row = src_y + copy_h - 1;
+    let last_col = src_x + copy_w - 1;
+    if grow_top > 0 && grow_left > 0 {
+        let c = if grow_top >= grow_left {
+            at(&top_colors, src_x)
+        } else {
+            at(&left_colors, src_y)
+        };
+        fill_rect(dst, 0, 0, grow_left, grow_top, c);
+    }
+    if grow_top > 0 && grow_right > 0 {
+        let c = if grow_top >= grow_right {
+            at(&top_colors, last_col)
+        } else {
+            at(&right_colors, src_y)
+        };
+        fill_rect(dst, new_w - grow_right, 0, grow_right, grow_top, c);
+    }
+    if grow_bottom > 0 && grow_left > 0 {
+        let c = if grow_bottom >= grow_left {
+            at(&bottom_colors, src_x)
+        } else {
+            at(&left_colors, last_row)
+        };
+        fill_rect(dst, 0, new_h - grow_bottom, grow_left, grow_bottom, c);
+    }
+    if grow_bottom > 0 && grow_right > 0 {
+        let c = if grow_bottom >= grow_right {
+            at(&bottom_colors, last_col)
+        } else {
+            at(&right_colors, last_row)
+        };
+        fill_rect(
+            dst,
+            new_w - grow_right,
+            new_h - grow_bottom,
+            grow_right,
+            grow_bottom,
+            c,
+        );
+    }
+}
+
+/// Resize `old` to `(src_x, src_y, new_w, new_h)`, re-viewing `alloc`
+/// when the request still fits inside it and allocating a padded
+/// replacement when it doesn't.
+///
+/// Returns the new view together with the allocation and origin to
+/// remember for next time. The view's pixels are identical to what
+/// `resize_pixbuf_to_rect` would have produced — that equivalence is
+/// what `view_resize_matches_copy_resize` pins down — it just avoids
+/// the copy whenever the surviving pixels are already in place.
+fn resize_raster_in_alloc(
+    old: &Pixbuf,
+    alloc: Option<&Pixbuf>,
+    origin: (i32, i32),
+    src_x: i32,
+    src_y: i32,
+    new_w: i32,
+    new_h: i32,
+) -> Option<(Pixbuf, Pixbuf, (i32, i32))> {
+    if new_w <= 0 || new_h <= 0 {
+        return None;
+    }
+    let layout = ResizeLayout::new(src_x, src_y, new_w, new_h, old.width(), old.height());
+
+    if let Some(alloc) = alloc {
+        let nx = origin.0 + src_x;
+        let ny = origin.1 + src_y;
+        if nx >= 0 && ny >= 0 && nx + new_w <= alloc.width() && ny + new_h <= alloc.height() {
+            let view = alloc.new_subpixbuf(nx, ny, new_w, new_h);
+            // The surviving pixels are already in place, so only the
+            // strips the view newly covers need painting. Every edge
+            // colour is sampled before the first write, which is what
+            // makes reading `old` while writing an overlapping `view`
+            // safe.
+            extend_edges(&view, old, layout);
+            return Some((view, alloc.clone(), (nx, ny)));
+        }
+    }
+
+    // Doesn't fit: allocate with slack on every side so the next
+    // several resizes take the path above, and pay one copy.
+    let pad = RASTER_GROWTH_PAD;
+    let fresh = Pixbuf::new(
+        old.colorspace(),
+        old.has_alpha(),
+        old.bits_per_sample(),
+        new_w + 2 * pad,
+        new_h + 2 * pad,
+    )?;
+    if layout.copy_w > 0 && layout.copy_h > 0 {
+        old.copy_area(
+            layout.src_x,
+            layout.src_y,
+            layout.copy_w,
+            layout.copy_h,
+            &fresh,
+            pad + layout.dst_x,
+            pad + layout.dst_y,
+        );
+    }
+    let view = fresh.new_subpixbuf(pad, pad, new_w, new_h);
+    extend_edges(&view, old, layout);
+    Some((view, fresh, (pad, pad)))
+}
+
+/// Resize by allocating a fresh raster and copying the surviving pixels
+/// into it.
+///
+/// Kept as the reference the view-based path is checked against: it is
+/// the straightforward implementation, so if the two ever disagree it
+/// is the fast one that is wrong.
+#[cfg(test)]
 fn resize_pixbuf_to_rect(
     original: &Pixbuf,
     src_x: i32,
@@ -183,8 +421,6 @@ fn resize_pixbuf_to_rect(
     if new_w <= 0 || new_h <= 0 {
         return None;
     }
-    let orig_w = original.width();
-    let orig_h = original.height();
     let new = Pixbuf::new(
         original.colorspace(),
         original.has_alpha(),
@@ -192,129 +428,29 @@ fn resize_pixbuf_to_rect(
         new_w,
         new_h,
     )?;
-    new.fill(0x000000ff);
-    let has_alpha = original.has_alpha();
-    // One colour per line rather than one per side, so the extension
-    // tracks whatever the capture's edge is doing at that point.
-    let left_colors = edge_line_colors(original, Side::Left, has_alpha);
-    let right_colors = edge_line_colors(original, Side::Right, has_alpha);
-    let top_colors = edge_line_colors(original, Side::Top, has_alpha);
-    let bottom_colors = edge_line_colors(original, Side::Bottom, has_alpha);
-
-    // Grow amounts on each side (0 when that side is shrinking or
-    // unchanged). These delineate the strips of `new` whose source
-    // would be outside `original` and so need an edge-colour fill.
-    let grow_left = (-src_x).max(0);
-    let grow_top = (-src_y).max(0);
-    let grow_right = ((src_x + new_w) - orig_w).max(0);
-    let grow_bottom = ((src_y + new_h) - orig_h).max(0);
-
-    // The copied region's extent inside `new`. The side strips run
-    // alongside it, so they consume the matching slice of the source
-    // edge's colours: a shrink on one axis means the strip is shorter
-    // than the side and starts partway down it.
-    let copy_h = new_h - grow_top - grow_bottom;
-    let copy_w = new_w - grow_left - grow_right;
-    let src_row0 = src_y.max(0) as usize;
-    let src_col0 = src_x.max(0) as usize;
-    let rows = |c: &[Rgba]| -> Vec<Rgba> {
-        c.iter()
-            .skip(src_row0)
-            .take(copy_h.max(0) as usize)
-            .copied()
-            .collect()
-    };
-    let cols = |c: &[Rgba]| -> Vec<Rgba> {
-        c.iter()
-            .skip(src_col0)
-            .take(copy_w.max(0) as usize)
-            .copied()
-            .collect()
-    };
-
-    if grow_left > 0 {
-        fill_rows(&new, 0, grow_top, grow_left, &rows(&left_colors));
-    }
-    if grow_right > 0 {
-        fill_rows(
+    // No clear first: the copy below plus the strips `extend_edges`
+    // paints cover the new raster exactly, which `resize_covers_every_
+    // pixel` pins down.
+    let layout = ResizeLayout::new(
+        src_x,
+        src_y,
+        new_w,
+        new_h,
+        original.width(),
+        original.height(),
+    );
+    if layout.copy_w > 0 && layout.copy_h > 0 {
+        original.copy_area(
+            layout.src_x,
+            layout.src_y,
+            layout.copy_w,
+            layout.copy_h,
             &new,
-            new_w - grow_right,
-            grow_top,
-            grow_right,
-            &rows(&right_colors),
+            layout.dst_x,
+            layout.dst_y,
         );
     }
-    if grow_top > 0 {
-        fill_band(&new, grow_left, 0, grow_top, &cols(&top_colors));
-    }
-    if grow_bottom > 0 {
-        fill_band(
-            &new,
-            grow_left,
-            new_h - grow_bottom,
-            grow_bottom,
-            &cols(&bottom_colors),
-        );
-    }
-
-    // Corners (where both axes grew). Continue whichever adjacent band
-    // is longer, taking that band's END colour so the corner joins it
-    // without a step.
-    let first = |c: &[Rgba], i: usize| c.get(i).copied().unwrap_or((0, 0, 0, 255));
-    let last_row = (src_row0 + copy_h.max(0) as usize).saturating_sub(1);
-    let last_col = (src_col0 + copy_w.max(0) as usize).saturating_sub(1);
-    if grow_top > 0 && grow_left > 0 {
-        let c = if grow_top >= grow_left {
-            first(&top_colors, src_col0)
-        } else {
-            first(&left_colors, src_row0)
-        };
-        fill_rect(&new, 0, 0, grow_left, grow_top, c);
-    }
-    if grow_top > 0 && grow_right > 0 {
-        let c = if grow_top >= grow_right {
-            first(&top_colors, last_col)
-        } else {
-            first(&right_colors, src_row0)
-        };
-        fill_rect(&new, new_w - grow_right, 0, grow_right, grow_top, c);
-    }
-    if grow_bottom > 0 && grow_left > 0 {
-        let c = if grow_bottom >= grow_left {
-            first(&bottom_colors, src_col0)
-        } else {
-            first(&left_colors, last_row)
-        };
-        fill_rect(&new, 0, new_h - grow_bottom, grow_left, grow_bottom, c);
-    }
-    if grow_bottom > 0 && grow_right > 0 {
-        let c = if grow_bottom >= grow_right {
-            first(&bottom_colors, last_col)
-        } else {
-            first(&right_colors, last_row)
-        };
-        fill_rect(
-            &new,
-            new_w - grow_right,
-            new_h - grow_bottom,
-            grow_right,
-            grow_bottom,
-            c,
-        );
-    }
-
-    // Copy the intersection of the requested rect with `original`.
-    let isec_src_x = src_x.max(0);
-    let isec_src_y = src_y.max(0);
-    let isec_end_x = (src_x + new_w).min(orig_w);
-    let isec_end_y = (src_y + new_h).min(orig_h);
-    let isec_w = isec_end_x - isec_src_x;
-    let isec_h = isec_end_y - isec_src_y;
-    if isec_w > 0 && isec_h > 0 {
-        let dst_x = isec_src_x - src_x;
-        let dst_y = isec_src_y - src_y;
-        original.copy_area(isec_src_x, isec_src_y, isec_w, isec_h, &new, dst_x, dst_y);
-    }
+    extend_edges(&new, original, layout);
     Some(new)
 }
 
@@ -677,6 +813,12 @@ fn tile_ranges(total: usize, limit: usize) -> Vec<(usize, usize)> {
 
 pub struct FemtoVgAreaMut {
     background_image: Pixbuf,
+    /// Backing allocation for `background_image` when that is a *view*
+    /// into a larger raster — see `resize_raster`. `None` means the
+    /// image owns its buffer and the next resize must allocate.
+    background_alloc: Option<Pixbuf>,
+    /// Origin of `background_image` inside `background_alloc`.
+    background_origin: (i32, i32),
     background_tiles: Vec<BackgroundTile>,
     /// Image-space rects whose pixels are on the CPU but not yet on the
     /// GPU. Set by an incremental canvas grow, consumed by the next
@@ -1064,6 +1206,8 @@ impl FemtoVGArea {
         );
         self.inner().replace(FemtoVgAreaMut {
             background_image,
+            background_alloc: None,
+            background_origin: (0, 0),
             background_tiles: Vec::new(),
             pending_tile_strips: Vec::new(),
             max_texture_size: 8192,
@@ -1341,7 +1485,7 @@ impl FemtoVgAreaMut {
         // per EVENT for a keyboard nudge, which repeats faster than the
         // frame clock.
         let resized = super::perf::timed("canvas-grow", || {
-            resize_pixbuf_to_rect(&self.background_image, dx_min, dy_min, new_w, new_h)
+            self.resize_raster(dx_min, dy_min, new_w, new_h)
         })?;
         let translation = Vec2D::new(-dx_min as f32, -dy_min as f32);
         self.original_rect.pos += translation;
@@ -1935,8 +2079,7 @@ impl FemtoVgAreaMut {
                 applied_offset,
                 translated_ids,
             } => {
-                let cur_image = std::mem::replace(&mut self.background_image, prev_image);
-                self.invalidate_background_tiles();
+                let cur_image = self.adopt_background_image(prev_image);
                 let translated_set: HashSet<DrawableId> = translated_ids.iter().copied().collect();
                 for s in &mut self.drawables {
                     if translated_set.contains(&s.id) {
@@ -1962,8 +2105,7 @@ impl FemtoVgAreaMut {
                 // recorded). The returned action redoes it: swap the
                 // post-op image back, apply the inverse-of-this (the
                 // forward op) at the resulting (pre-`transform`) dims.
-                let cur_image = std::mem::replace(&mut self.background_image, image);
-                self.invalidate_background_tiles();
+                let cur_image = self.adopt_background_image(image);
                 let cur_rect = std::mem::replace(&mut self.original_rect, original_rect);
                 for s in &mut self.drawables {
                     s.drawable.apply_canvas_transform(transform, w, h);
@@ -2877,8 +3019,7 @@ impl FemtoVgAreaMut {
         // remap the live drawables + the protected rect, and record the
         // undoable op. No history remap needed: the op sits on the undo
         // stack, so LIFO reverses it before any older snapshot is used.
-        let prev_image = std::mem::replace(&mut self.background_image, new_bg);
-        self.invalidate_background_tiles();
+        let prev_image = self.adopt_background_image(new_bg);
         let prev_rect = self.original_rect;
         for s in self.drawables.iter_mut() {
             s.drawable.apply_canvas_transform(t, old_w, old_h);
@@ -2946,8 +3087,7 @@ impl FemtoVgAreaMut {
             self.original_rect = t.map_rect(self.original_rect, old_w, old_h);
             self.record_canvas_op(prev_image, prev_rect, t, w, h);
         }
-        self.background_image = resized;
-        self.invalidate_background_tiles();
+        self.adopt_background_image(resized);
         Some((w, h))
     }
 
@@ -3105,6 +3245,57 @@ impl FemtoVgAreaMut {
         }
 
         Ok(())
+    }
+
+    /// Resize the background raster to `(src_x, src_y, new_w, new_h)`,
+    /// stated relative to the current raster.
+    ///
+    /// Growing used to allocate a whole new raster and `copy_area` the
+    /// old one into it — 16 ms of the ~18 ms an auto-grow costs at
+    /// 6144x3456, paid on every commit or end-of-drag that reaches the
+    /// image edge, and once per frame while a held arrow key nudges a
+    /// drawable there.
+    ///
+    /// The copy exists only because the raster is exactly the logical
+    /// image. So allocate it with slack instead and let
+    /// `background_image` be a *view* into that allocation: a resize
+    /// that still fits re-views the same memory, leaving the surviving
+    /// pixels exactly where they already are, and paints only the newly
+    /// exposed strips. Nothing outside this function sees a difference
+    /// — a sub-Pixbuf reports its own width/height and the parent's
+    /// rowstride, which every reader here already handles.
+    ///
+    /// Undo snapshots stay valid: they hold a view of the same
+    /// allocation, and a later grow writes only *outside* the region
+    /// that view covers.
+    fn resize_raster(&mut self, src_x: i32, src_y: i32, new_w: i32, new_h: i32) -> Option<Pixbuf> {
+        if new_w <= 0 || new_h <= 0 {
+            return None;
+        }
+        let old = self.background_image.clone();
+        let (view, alloc, origin) = resize_raster_in_alloc(
+            &old,
+            self.background_alloc.as_ref(),
+            self.background_origin,
+            src_x,
+            src_y,
+            new_w,
+            new_h,
+        )?;
+        self.background_alloc = Some(alloc);
+        self.background_origin = origin;
+        Some(view)
+    }
+
+    /// Adopt a raster that this type didn't carve out of its own
+    /// allocation (a flip, a rotate, a resample, or an undo restoring
+    /// an earlier one). The allocation is dropped so the next resize
+    /// starts a fresh one rather than assuming an origin into it.
+    fn adopt_background_image(&mut self, image: Pixbuf) -> Pixbuf {
+        self.background_alloc = None;
+        self.background_origin = (0, 0);
+        self.invalidate_background_tiles();
+        std::mem::replace(&mut self.background_image, image)
     }
 
     /// Keep the uploaded background textures across an auto-grow /
@@ -4146,6 +4337,109 @@ mod tests {
         assert_eq!((got.0, got.1, got.2), (0x20, 0x30, 0x40));
     }
 
+    /// The view-based resize must produce exactly the pixels the
+    /// straightforward allocate-and-copy resize would, across a run of
+    /// resizes that exercises both its paths: ones that fit the
+    /// existing allocation (no copy) and ones that outgrow it (realloc
+    /// + copy), interleaved with shrinks that move the view back.
+    #[test]
+    fn view_resize_matches_copy_resize() {
+        let (w, h) = (90, 70);
+        let src = Pixbuf::new(relm4::gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, w, h).unwrap();
+        for y in 0..h {
+            for x in 0..w {
+                src.put_pixel(
+                    x as u32,
+                    y as u32,
+                    (x * 2) as u8,
+                    (y * 3) as u8,
+                    ((x + y) * 5) as u8,
+                    255,
+                );
+            }
+        }
+
+        // (src_x, src_y, dw, dh) applied in sequence. The pad is 256, so
+        // the small steps re-view and the big one forces a realloc.
+        let steps = [
+            (-3, -2, 5, 4),      // grow all sides a little
+            (0, 0, 7, 0),        // grow right only
+            (-4, 0, 4, 6),       // grow left and bottom
+            (2, 1, -2, -1),      // shrink back in
+            (-400, -300, 800, 600), // outgrows the allocation
+            (-2, -2, 4, 4),      // small again, in the fresh allocation
+        ];
+
+        let mut view = src.clone();
+        let mut reference = src.clone();
+        let mut alloc: Option<Pixbuf> = None;
+        let mut origin = (0, 0);
+
+        for (i, (sx, sy, dw, dh)) in steps.into_iter().enumerate() {
+            let (nw, nh) = (view.width() + dw, view.height() + dh);
+            let (next_view, next_alloc, next_origin) =
+                super::resize_raster_in_alloc(&view, alloc.as_ref(), origin, sx, sy, nw, nh)
+                    .unwrap();
+            let next_reference =
+                super::resize_pixbuf_to_rect(&reference, sx, sy, nw, nh).unwrap();
+
+            assert_eq!(
+                (next_view.width(), next_view.height()),
+                (next_reference.width(), next_reference.height()),
+                "step {i} dimensions"
+            );
+            for y in 0..next_reference.height() {
+                for x in 0..next_reference.width() {
+                    assert_eq!(
+                        super::read_pixel(&next_view, x, y, false),
+                        super::read_pixel(&next_reference, x, y, false),
+                        "step {i} at ({x},{y})"
+                    );
+                }
+            }
+
+            view = next_view;
+            alloc = Some(next_alloc);
+            origin = next_origin;
+            reference = next_reference;
+        }
+    }
+
+    /// An undo snapshot is a view of the same allocation as the raster
+    /// that superseded it, so a later grow must not disturb it — it
+    /// writes only outside the region the snapshot covers.
+    #[test]
+    fn resize_leaves_earlier_views_intact() {
+        let (w, h) = (40, 30);
+        let src = Pixbuf::new(relm4::gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, w, h).unwrap();
+        src.fill(0x11223300);
+
+        let (first, alloc, origin) =
+            super::resize_raster_in_alloc(&src, None, (0, 0), -2, -2, w + 4, h + 4).unwrap();
+        let snapshot: Vec<_> = (0..first.height())
+            .flat_map(|y| (0..first.width()).map(move |x| (x, y)))
+            .map(|(x, y)| super::read_pixel(&first, x, y, false))
+            .collect();
+
+        // Grow again from the same allocation.
+        let (_second, _alloc2, _origin2) = super::resize_raster_in_alloc(
+            &first,
+            Some(&alloc),
+            origin,
+            -5,
+            -5,
+            first.width() + 10,
+            first.height() + 10,
+        )
+        .unwrap();
+
+        let after: Vec<_> = (0..first.height())
+            .flat_map(|y| (0..first.width()).map(move |x| (x, y)))
+            .map(|(x, y)| super::read_pixel(&first, x, y, false))
+            .collect();
+        assert_eq!(snapshot, after, "the earlier view was written through");
+    }
+
     /// Checksum of a grown raster, for confirming that a refactor of
     /// the grow path left the produced pixels bit-identical.
     ///
@@ -4244,6 +4538,35 @@ mod tests {
         let dst = Pixbuf::new(relm4::gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, w + 40, h + 40)
             .unwrap();
         t("copy_area", &|| src.copy_area(0, 0, w, h, &dst, 0, 0));
+        // The two resize paths at capture scale: one that has to
+        // allocate and copy, and one that re-views an allocation it
+        // already has.
+        let (view, alloc, origin) =
+            super::resize_raster_in_alloc(&src, None, (0, 0), -4, -4, w + 8, h + 8).unwrap();
+        let start = std::time::Instant::now();
+        let (view2, alloc2, origin2) =
+            super::resize_raster_in_alloc(&view, Some(&alloc), origin, -4, -4, w + 16, h + 16)
+                .unwrap();
+        println!(
+            "    resize_raster (re-view, no copy): {:.1} ms",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+        let start = std::time::Instant::now();
+        let _ = super::resize_raster_in_alloc(
+            &view2,
+            Some(&alloc2),
+            origin2,
+            -600,
+            -600,
+            view2.width() + 1200,
+            view2.height() + 1200,
+        )
+        .unwrap();
+        println!(
+            "    resize_raster (outgrows alloc):   {:.1} ms",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+
         t("fill right+bottom strips", &|| {
             super::fill_rows(&dst, w, 0, 40, &vec![(1, 2, 3, 255); (h + 40) as usize]);
             super::fill_band(&dst, 0, h, 40, &vec![(1, 2, 3, 255); w as usize]);
