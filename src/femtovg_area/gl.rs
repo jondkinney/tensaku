@@ -174,3 +174,59 @@ pub fn verify_readback_matches_screenshot(
         }
     }
 }
+
+/// One-shot uniformity probe, run when `TENSAKU_VERIFY_FLAT=1`.
+///
+/// Reads a horizontal strip straight out of the framebuffer and
+/// reports its colour runs. Point it at a capture that is a single
+/// flat colour: anything but one run means the canvas itself is not
+/// rendering flat. Distinguishes a rendering problem from one
+/// introduced later by the compositor or the screenshot path, which a
+/// screen grab alone cannot.
+pub fn verify_flat_render(canvas: &mut femtovg::Canvas<femtovg::renderer::OpenGl>) {
+    if !std::env::var("TENSAKU_VERIFY_FLAT").is_ok_and(|v| v != "0") {
+        return;
+    }
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    canvas.flush();
+    let (w, h) = (canvas.width() as usize, canvas.height() as usize);
+    for frac in [3, 2] {
+        let y = h / frac;
+        let Some(strip) = read_framebuffer_region(h, 0, y, w, 1) else {
+            continue;
+        };
+        let mut runs: Vec<(usize, usize, RGBA8)> = Vec::new();
+        for (x, px) in strip.buf().iter().enumerate() {
+            match runs.last_mut() {
+                Some(last) if last.2 == *px => last.1 = x,
+                _ => runs.push((x, x, *px)),
+            }
+        }
+        let long: Vec<String> = runs
+            .iter()
+            .filter(|(a, b, _)| b - a > 40)
+            .map(|(a, b, c)| format!("{a}-{b} #{:02X}{:02X}{:02X}", c.r, c.g, c.b))
+            .collect();
+        eprintln!("verify-flat: framebuffer row y={y}: {} runs; long: {long:?}", runs.len());
+        // Alpha matters as much as colour: a canvas that renders the
+        // right RGB but leaves alpha below 255 is composited against
+        // whatever sits behind the window, which shows up as faint
+        // bands tracking the shapes of the windows underneath.
+        let mut alpha_runs: Vec<(usize, usize, u8)> = Vec::new();
+        for (x, px) in strip.buf().iter().enumerate() {
+            match alpha_runs.last_mut() {
+                Some(last) if last.2 == px.a => last.1 = x,
+                _ => alpha_runs.push((x, x, px.a)),
+            }
+        }
+        let alphas: Vec<String> = alpha_runs
+            .iter()
+            .filter(|(a, b, _)| b - a > 40)
+            .map(|(a, b, v)| format!("{a}-{b} a={v}"))
+            .collect();
+        eprintln!("verify-flat: alpha y={y}: {} runs; long: {alphas:?}", alpha_runs.len());
+    }
+}

@@ -1482,6 +1482,19 @@ impl FemtoVGArea {
             if max_texture_size >= 1024 {
                 self.max_texture_size.set(max_texture_size as usize);
             }
+            // `TENSAKU_MAX_TEXTURE=N` forces a smaller limit so the
+            // multi-tile background path can be exercised without a
+            // capture big enough to exceed the real one. Tiling
+            // normally only engages on very long scroll captures, which
+            // makes it easy for a seam between tiles to go unnoticed.
+            if let Some(forced) = std::env::var("TENSAKU_MAX_TEXTURE")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|v| *v >= 64)
+            {
+                eprintln!("tensaku: forcing GL_MAX_TEXTURE_SIZE to {forced}");
+                self.max_texture_size.set(forced);
+            }
             ctx.bind_framebuffer(glow::FRAMEBUFFER, None);
             (renderer, glow::NativeFramebuffer(id))
         };
@@ -2636,6 +2649,7 @@ impl FemtoVgAreaMut {
         }
 
         super::gl::verify_readback_matches_screenshot(canvas);
+        super::gl::verify_flat_render(canvas);
 
         if super::perf::readback_probe() {
             // Both shapes of readback, so the cost of the Blur tool's
