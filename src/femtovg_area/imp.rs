@@ -3932,6 +3932,38 @@ mod tests {
         assert!(hits.iter().all(|h| *h == 0));
     }
 
+    /// Checksum of a grown raster, for confirming that a refactor of
+    /// the grow path left the produced pixels bit-identical.
+    ///
+    ///   TENSAKU_BENCH_IMAGE=/path/to.png \
+    ///     cargo test --release grow_raster_digest -- --ignored --nocapture
+    #[test]
+    #[ignore = "manual; needs TENSAKU_BENCH_IMAGE"]
+    fn grow_raster_digest() {
+        let path = std::env::var("TENSAKU_BENCH_IMAGE")
+            .expect("set TENSAKU_BENCH_IMAGE to a capture to grow");
+        let src = Pixbuf::from_file(&path).expect("loading capture");
+        let (w, h) = (src.width(), src.height());
+        // Grow on all four sides so every fill_rect branch runs,
+        // corners included.
+        let out = resize_pixbuf_to_rect(&src, -200, -150, w + 400, h + 300).unwrap();
+        let digest = unsafe {
+            out.pixels()
+                .iter()
+                .fold(1469598103934665603u64, |acc, b| {
+                    (acc ^ *b as u64).wrapping_mul(1099511628211)
+                })
+        };
+        println!(
+            "grow_raster_digest {}x{} -> {}x{}: {:016x}",
+            w,
+            h,
+            out.width(),
+            out.height(),
+            digest
+        );
+    }
+
     /// Manual benchmark for the canvas auto-grow raster rebuild.
     ///
     /// `auto_resize_for_drawables` runs this on every drag motion
