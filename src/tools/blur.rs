@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use femtovg::{Color, ImageFilter, ImageFlags, ImageId, Paint, Path, imgref::Img, rgb::RGBA8};
 use serde_derive::Deserialize;
 
@@ -67,7 +67,7 @@ impl BlurStyle {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Blur {
     top_left: Vec2D,
     size: Option<Vec2D>,
@@ -80,42 +80,91 @@ pub struct Blur {
     cached_image: RefCell<Option<ImageId>>,
 }
 
+/// A clone starts with an EMPTY cache rather than sharing the
+/// original's `ImageId`.
+///
+/// Two reasons. The obvious one: a copy sits somewhere else, over
+/// different pixels, so the original's blur is the wrong image for it.
+/// The subtle one: a pointer drag rebuilds its working copy from the
+/// original on every motion event and then invalidates it, and if that
+/// copy shared the id it would queue the *committed* drawable's
+/// texture for deletion and leave it rendering garbage.
+impl Clone for Blur {
+    fn clone(&self) -> Self {
+        Self {
+            top_left: self.top_left,
+            size: self.size,
+            style: self.style,
+            blur_style: self.blur_style,
+            editing: self.editing,
+            cached_image: RefCell::new(None),
+        }
+    }
+}
+
+impl Drop for Blur {
+    fn drop(&mut self) {
+        self.invalidate_cache();
+    }
+}
+
 impl Blur {
+    /// Drop the cached image and hand its texture back for deletion.
+    ///
+    /// The `Drawable` mutators are given no canvas, so they can't
+    /// delete it themselves; the renderer drains the queue once per
+    /// frame. Before this existed every invalidation leaked, and a
+    /// blur drag invalidates on every frame.
+    fn invalidate_cache(&self) {
+        if let Some(id) = self.cached_image.borrow_mut().take() {
+            crate::femtovg_area::queue_image_deletion(id);
+        }
+    }
+
+    /// Canvas-pixel rect covered by `(pos, size)`, clamped to the
+    /// framebuffer. `None` when nothing of it is on screen.
+    fn canvas_region(
+        canvas: &femtovg::Canvas<femtovg::renderer::OpenGl>,
+        pos: Vec2D,
+        size: Vec2D,
+    ) -> Option<(usize, usize, usize, usize)> {
+        let transform = canvas.transform();
+        let origin = transform.transform_point(pos.x, pos.y);
+        let extent = size * transform.average_scale();
+        let cw = canvas.width() as f32;
+        let ch = canvas.height() as f32;
+        let x0 = origin.0.floor().clamp(0.0, cw);
+        let y0 = origin.1.floor().clamp(0.0, ch);
+        let x1 = (origin.0 + extent.x).ceil().clamp(0.0, cw);
+        let y1 = (origin.1 + extent.y).ceil().clamp(0.0, ch);
+        let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+        (w > 0 && h > 0).then_some((x0 as usize, y0 as usize, w, h))
+    }
+
     fn blur(
         canvas: &mut femtovg::Canvas<femtovg::renderer::OpenGl>,
         pos: Vec2D,
         size: Vec2D,
         sigma: f32,
     ) -> Result<ImageId> {
-        let img = canvas.screenshot()?;
-
-        let transformed_pos = canvas.transform().transform_point(pos.x, pos.y);
-        let transformed_size = size * canvas.transform().average_scale();
-
-        let (buf, width, height) = img
-            .sub_image(
-                transformed_pos.0 as usize,
-                transformed_pos.1 as usize,
-                (transformed_size.x as usize).max(1),
-                (transformed_size.y as usize).max(1),
-            )
-            .to_contiguous_buf();
-        let sub = Img::new(buf.into_owned(), width, height);
+        let (x, y, w, h) =
+            Self::canvas_region(canvas, pos, size).ok_or_else(|| anyhow!("blur region off-canvas"))?;
+        let sub = crate::femtovg_area::read_framebuffer_region(canvas.height() as usize, x, y, w, h)
+            .ok_or_else(|| anyhow!("framebuffer readback failed"))?;
 
         let src_image_id = canvas.create_image(sub.as_ref(), ImageFlags::empty())?;
-        let dst_image_id = canvas.create_image_empty(
-            sub.width(),
-            sub.height(),
-            femtovg::PixelFormat::Rgba8,
-            ImageFlags::empty(),
-        )?;
+        let dst_image_id =
+            canvas.create_image_empty(w, h, femtovg::PixelFormat::Rgba8, ImageFlags::empty())?;
 
         canvas.filter_image(
             dst_image_id,
             ImageFilter::GaussianBlur { sigma },
             src_image_id,
         );
-        //canvas.delete_image(src_image_id);
+        // `filter_image` records a command rather than running now, so
+        // the source has to outlive this call — hand it to the frame
+        // drain instead of deleting it here.
+        crate::femtovg_area::queue_image_deletion(src_image_id);
 
         Ok(dst_image_id)
     }
@@ -150,13 +199,8 @@ impl Blur {
         size: Vec2D,
         sigma: f32,
     ) -> Result<ImageId> {
-        let transformed_pos = canvas.transform().transform_point(pos.x, pos.y);
-        let transformed_size = size * canvas.transform().average_scale();
-
-        let pos_x = transformed_pos.0 as usize;
-        let pos_y = transformed_pos.1 as usize;
-        let width = (transformed_size.x as usize).max(1);
-        let height = (transformed_size.y as usize).max(1);
+        let (pos_x, pos_y, width, height) = Self::canvas_region(canvas, pos, size)
+            .ok_or_else(|| anyhow!("blur region off-canvas"))?;
 
         let canvas_w = canvas.width() as usize;
         let canvas_h = canvas.height() as usize;
@@ -168,29 +212,29 @@ impl Blur {
             return Ok(canvas.create_image(img.as_ref(), ImageFlags::empty())?);
         }
 
-        let screenshot = canvas.screenshot()?;
-        let (buf_n, _, _) = screenshot
-            .sub_image(pos_x, pos_y - 1, width, 1)
-            .to_contiguous_buf();
-        let (buf_s, _, _) = screenshot
-            .sub_image(pos_x, pos_y + height, width, 1)
-            .to_contiguous_buf();
-        let (buf_w, _, _) = screenshot
-            .sub_image(pos_x - 1, pos_y, 1, height)
-            .to_contiguous_buf();
-        let (buf_e, _, _) = screenshot
-            .sub_image(pos_x + width, pos_y, 1, height)
-            .to_contiguous_buf();
+        // One readback of the rect plus its 1-px fringe, instead of the
+        // whole framebuffer. The fringes are then sliced out of it: row
+        // 0 and row `height + 1` are north/south, columns 0 and
+        // `width + 1` are west/east.
+        let outer =
+            crate::femtovg_area::read_framebuffer_region(canvas_h, pos_x - 1, pos_y - 1, width + 2, height + 2)
+                .ok_or_else(|| anyhow!("framebuffer readback failed"))?;
+        let outer_w = width + 2;
+        let px = outer.buf();
+        let north = |i: usize| px[1 + i];
+        let south = |i: usize| px[(height + 1) * outer_w + 1 + i];
+        let west = |j: usize| px[(j + 1) * outer_w];
+        let east = |j: usize| px[(j + 1) * outer_w + width + 1];
 
         let mut out: Vec<RGBA8> = Vec::with_capacity(width * height);
         let w_f = width as f32;
         let h_f = height as f32;
         for y in 0..height {
             for x in 0..width {
-                let pn = buf_n[x];
-                let ps = buf_s[x];
-                let pw = buf_w[y];
-                let pe = buf_e[y];
+                let pn = north(x);
+                let ps = south(x);
+                let pw = west(y);
+                let pe = east(y);
 
                 let wn = (height - y) as f32 / h_f;
                 let ws = y as f32 / h_f;
@@ -222,6 +266,7 @@ impl Blur {
             ImageFilter::GaussianBlur { sigma },
             src_image_id,
         );
+        crate::femtovg_area::queue_image_deletion(src_image_id);
         Ok(dst_image_id)
     }
 
@@ -254,26 +299,16 @@ impl Blur {
         size: Vec2D,
         cell_px: f32,
     ) -> Result<ImageId> {
-        let img = canvas.screenshot()?;
-
-        let transformed_pos = canvas.transform().transform_point(pos.x, pos.y);
-        let transformed_size = size * canvas.transform().average_scale();
+        let (x, y, src_w, src_h) = Self::canvas_region(canvas, pos, size)
+            .ok_or_else(|| anyhow!("blur region off-canvas"))?;
         let canvas_cell = (cell_px * canvas.transform().average_scale())
             .round()
             .max(2.0) as usize;
 
-        let src_w = (transformed_size.x as usize).max(1);
-        let src_h = (transformed_size.y as usize).max(1);
-
-        let (buf, _, _) = img
-            .sub_image(
-                transformed_pos.0 as usize,
-                transformed_pos.1 as usize,
-                src_w,
-                src_h,
-            )
-            .to_contiguous_buf();
-        let src = buf.as_ref();
+        let sub =
+            crate::femtovg_area::read_framebuffer_region(canvas.height() as usize, x, y, src_w, src_h)
+                .ok_or_else(|| anyhow!("framebuffer readback failed"))?;
+        let src = sub.buf();
 
         let dst_w = src_w.div_ceil(canvas_cell);
         let dst_h = src_h.div_ceil(canvas_cell);
@@ -486,7 +521,7 @@ impl Drawable for Blur {
     fn translate(&mut self, delta: Vec2D) {
         self.top_left += delta;
         // Invalidate the cached blurred image — its sample location changed.
-        self.cached_image.borrow_mut().take();
+        self.invalidate_cache();
     }
 
     fn apply_canvas_transform(&mut self, t: CanvasTransform, w: f32, h: f32) {
@@ -499,7 +534,7 @@ impl Drawable for Blur {
         }
         // Sample location changed — drop the cached blur so it re-samples
         // the transformed background.
-        self.cached_image.borrow_mut().take();
+        self.invalidate_cache();
     }
 
     fn handles(&self) -> Vec<Handle> {
@@ -511,13 +546,13 @@ impl Drawable for Blur {
         let new = bbox_resize(cur, handle, to);
         self.top_left = new.pos;
         self.size = Some(new.size);
-        self.cached_image.borrow_mut().take();
+        self.invalidate_cache();
     }
 
     fn set_style(&mut self, style: Style) {
         self.style = style;
         // Style affects blur sigma → invalidate cache.
-        self.cached_image.borrow_mut().take();
+        self.invalidate_cache();
     }
 
     fn style(&self) -> Option<Style> {
@@ -531,7 +566,7 @@ impl Drawable for Blur {
     fn set_blur_style_on_drawable(&mut self, style: BlurStyle) {
         self.blur_style = style;
         // Algorithm change forces a re-blur.
-        self.cached_image.borrow_mut().take();
+        self.invalidate_cache();
     }
 
     fn tool_type(&self) -> Option<Tools> {

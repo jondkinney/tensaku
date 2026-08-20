@@ -33,8 +33,9 @@
 //!
 //! * `TENSAKU_PERF_SPIN=1` — render continuously instead of on demand.
 //! * `TENSAKU_PERF_EVERY=N` — report every N frames (default 30).
-//! * `TENSAKU_PERF_READBACK=1` — one full-framebuffer readback per
-//!   frame, to price the `glReadPixels` the Blur tool does.
+//! * `TENSAKU_PERF_READBACK=1` — one whole-framebuffer readback and
+//!   one region readback per frame, to price the two shapes of
+//!   `glReadPixels` against each other.
 //!
 //! Output is one averaged line every `REPORT_EVERY` frames on stderr.
 
@@ -212,12 +213,12 @@ pub fn mark() {
     });
 }
 
-/// `TENSAKU_PERF_READBACK=1` performs one full-framebuffer
-/// `Canvas::screenshot` per frame, timed as `readback`. That call is
-/// a synchronous `glReadPixels` of the entire canvas — the same thing
-/// a Blur drawable does every time its cached image is invalidated —
-/// so this measures the per-frame cost a blur drag pays on this
-/// display without needing to drive the mouse.
+/// `TENSAKU_PERF_READBACK=1` performs a whole-framebuffer
+/// `Canvas::screenshot` and a region read per frame, timed as
+/// `readback-full` and `readback-region`. Both are synchronous
+/// `glReadPixels` calls; the first is what the Blur tool used to do on
+/// every frame of a drag, the second is what it does now. Measurable
+/// without driving the mouse.
 pub fn readback_probe() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| enabled() && std::env::var("TENSAKU_PERF_READBACK").is_ok_and(|v| v != "0"))

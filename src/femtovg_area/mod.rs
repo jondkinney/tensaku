@@ -1,3 +1,4 @@
+mod gl;
 mod imp;
 mod perf;
 
@@ -7,6 +8,9 @@ mod perf;
 pub fn perf_timed<T>(label: &'static str, f: impl FnOnce() -> T) -> T {
     perf::timed(label, f)
 }
+
+/// Read a sub-rectangle of the framebuffer — see [`gl`].
+pub use gl::{queue_image_deletion, read_framebuffer_region};
 
 /// RAII variant of [`perf_timed`] for regions with several exits.
 pub fn perf_guard(label: &'static str) -> Option<perf::Guard> {

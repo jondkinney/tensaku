@@ -1938,6 +1938,11 @@ impl FemtoVgAreaMut {
         font: FontId,
     ) -> Result<()> {
         super::perf::begin_frame();
+        // Reclaim textures released since the last frame. Deferred to
+        // here because the `Drawable` mutators that drop cached images
+        // have no canvas, and because the previous frame's draw
+        // commands have flushed by now.
+        super::gl::drain_deleted_images(canvas);
         canvas.set_render_target(RenderTarget::Screen);
         // Publish current DPR so drawables can size CSS-pixel UI
         // (text editing handles, outlines) inside `Drawable::draw`
@@ -2150,8 +2155,18 @@ impl FemtoVgAreaMut {
             canvas.reset_scissor();
         }
 
+        super::gl::verify_readback_matches_screenshot(canvas);
+
         if super::perf::readback_probe() {
-            let _ = super::perf::timed("readback", || canvas.screenshot());
+            // Both shapes of readback, so the cost of the Blur tool's
+            // old whole-framebuffer grab can be read against the region
+            // grab that replaced it.
+            let _ = super::perf::timed("readback-full", || canvas.screenshot());
+            let (rw, rh) = (700.min(canvas.width() as usize), 420.min(canvas.height() as usize));
+            let ch = canvas.height() as usize;
+            let _ = super::perf::timed("readback-region", || {
+                super::gl::read_framebuffer_region(ch, 0, 0, rw, rh)
+            });
         }
 
         super::perf::end_frame(
