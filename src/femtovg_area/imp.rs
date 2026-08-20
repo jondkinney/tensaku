@@ -364,10 +364,36 @@ fn dominant_color(
     )
 }
 
+/// Flood `w`x`h` at `(x, y)` with a solid colour.
+///
+/// Builds one row and memcpys it down the rect. The obvious
+/// `put_pixel` loop costs a GObject call per pixel, which showed up as
+/// ~5 ms of every canvas auto-grow at 6144x3456 — the edge strips a
+/// grow fills are full-width, so the pixel count is large even when
+/// the strip is thin.
 fn fill_rect(p: &Pixbuf, x: i32, y: i32, w: i32, h: i32, (r, g, b, a): (u8, u8, u8, u8)) {
-    for yy in y..(y + h) {
-        for xx in x..(x + w) {
-            p.put_pixel(xx as u32, yy as u32, r, g, b, a);
+    if w <= 0 || h <= 0 || x < 0 || y < 0 {
+        return;
+    }
+    let has_alpha = p.has_alpha();
+    let bpp = if has_alpha { 4 } else { 3 };
+    let stride = p.rowstride() as usize;
+    let pixel: &[u8] = if has_alpha { &[r, g, b, a] } else { &[r, g, b] };
+    let row = pixel.repeat(w as usize);
+    let start_col = x as usize * bpp;
+
+    // SAFETY: `pixels()` hands back the Pixbuf's live buffer. Every
+    // write below stays inside one row's `w` pixels starting at `x`,
+    // and the bounds check above the loop rejects any rect that would
+    // run past the row or the last line.
+    unsafe {
+        let buf = p.pixels();
+        if start_col + row.len() > stride || (y + h) as usize > p.height() as usize {
+            return;
+        }
+        for yy in y..(y + h) {
+            let offset = yy as usize * stride + start_col;
+            buf[offset..offset + row.len()].copy_from_slice(&row);
         }
     }
 }
@@ -2850,10 +2876,23 @@ impl FemtoVgAreaMut {
         let bytes_per_pixel = if image.has_alpha() { 4 } else { 3 };
         let limit = max_texture_size.max(1024);
 
+        // femtovg pins `UNPACK_ROW_LENGTH` to the image width rather
+        // than honouring an `ImgRef`'s stride, so every upload has to
+        // be tightly packed at `tile_w` pixels per row. When a tile
+        // spans the full image width AND the Pixbuf has no row padding
+        // (the usual case — gdk-pixbuf only pads to a 4-byte boundary),
+        // the Pixbuf's own buffer is already in exactly that layout and
+        // we can hand it straight to GL. Otherwise we pack the tile's
+        // rows into a scratch buffer first.
+        let tight_rows = stride == width * bytes_per_pixel;
+        let mut scratch = Vec::<u8>::new();
+
         let mut tiles = Vec::new();
         // SAFETY: `image.pixels()` borrows the pixbuf's live buffer; we
-        // only read from it and copy out. `align_to` on the tightly
-        // packed copy is safe because RGBA<u8>/RGB<u8> are byte arrays.
+        // only read from it. `align_to` is safe on either source
+        // because RGB<u8>/RGBA<u8> are `repr(C)` byte structs with
+        // alignment 1, so the whole slice comes back as the middle
+        // segment with no padding.
         unsafe {
             let src_buffer = image.pixels();
             for (tile_y, tile_h) in tile_ranges(height, limit) {
@@ -2862,29 +2901,25 @@ impl FemtoVgAreaMut {
                         canvas.create_image_empty(tile_w, tile_h, format, ImageFlags::empty())?;
 
                     let row_length = tile_w * bytes_per_pixel;
-                    let mut dst_buffer = Vec::<u8>::with_capacity(row_length * tile_h);
-                    for row in tile_y..tile_y + tile_h {
-                        let src_offset = row * stride + tile_x * bytes_per_pixel;
-                        dst_buffer
-                            .extend_from_slice(&src_buffer[src_offset..src_offset + row_length]);
-                    }
+                    let bytes: &[u8] = if tight_rows && tile_x == 0 && tile_w == width {
+                        &src_buffer[tile_y * stride..(tile_y + tile_h) * stride]
+                    } else {
+                        scratch.clear();
+                        scratch.reserve(row_length * tile_h);
+                        for row in tile_y..tile_y + tile_h {
+                            let src_offset = row * stride + tile_x * bytes_per_pixel;
+                            scratch
+                                .extend_from_slice(&src_buffer[src_offset..src_offset + row_length]);
+                        }
+                        &scratch
+                    };
 
                     if image.has_alpha() {
-                        let img = Img::new_stride(
-                            dst_buffer.align_to::<RGBA<u8>>().1.to_vec(),
-                            tile_w,
-                            tile_h,
-                            tile_w,
-                        );
-                        canvas.update_image(id, ImageSource::Rgba(img.as_ref()), 0, 0)?;
+                        let img = Img::new(bytes.align_to::<RGBA<u8>>().1, tile_w, tile_h);
+                        canvas.update_image(id, ImageSource::Rgba(img), 0, 0)?;
                     } else {
-                        let img = Img::new_stride(
-                            dst_buffer.align_to::<RGB<u8>>().1.to_owned(),
-                            tile_w,
-                            tile_h,
-                            tile_w,
-                        );
-                        canvas.update_image(id, ImageSource::Rgb(img.as_ref()), 0, 0)?;
+                        let img = Img::new(bytes.align_to::<RGB<u8>>().1, tile_w, tile_h);
+                        canvas.update_image(id, ImageSource::Rgb(img), 0, 0)?;
                     }
 
                     tiles.push(BackgroundTile {
@@ -3435,6 +3470,63 @@ mod tests {
         assert_eq!(tile_ranges(3, 0), vec![(0, 1), (1, 1), (2, 1)]);
     }
 
+    /// `fill_rect` writes whole rows through the raw Pixbuf buffer, so
+    /// pin down that it paints exactly the requested rect: correct
+    /// colour inside, untouched outside, and no bleed into the
+    /// neighbouring row (the failure mode if the row stride were
+    /// mishandled). Runs for both a padded RGB stride and RGBA.
+    #[test]
+    fn fill_rect_paints_only_the_requested_rect() {
+        for has_alpha in [false, true] {
+            // Width 5 with 3 bytes per pixel gives a 15-byte row that
+            // gdk-pixbuf pads to 16 — so the RGB case exercises a
+            // stride wider than the pixel data.
+            let p = Pixbuf::new(
+                relm4::gtk::gdk_pixbuf::Colorspace::Rgb,
+                has_alpha,
+                8,
+                5,
+                4,
+            )
+            .unwrap();
+            p.fill(0x000000ff);
+            super::fill_rect(&p, 1, 1, 3, 2, (10, 20, 30, 255));
+
+            for y in 0..4 {
+                for x in 0..5 {
+                    let inside = (1..4).contains(&x) && (1..3).contains(&y);
+                    let expected = if inside {
+                        (10, 20, 30, 255)
+                    } else {
+                        (0, 0, 0, 255)
+                    };
+                    let got = super::read_pixel(&p, x, y, has_alpha);
+                    assert_eq!(
+                        (got.0, got.1, got.2),
+                        (expected.0, expected.1, expected.2),
+                        "has_alpha={has_alpha} at ({x},{y})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Out-of-bounds rects are dropped rather than corrupting the
+    /// neighbouring row or running off the end of the buffer.
+    #[test]
+    fn fill_rect_rejects_out_of_bounds() {
+        let p = Pixbuf::new(relm4::gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, 4, 4).unwrap();
+        p.fill(0x000000ff);
+        super::fill_rect(&p, 3, 0, 4, 1, (255, 0, 0, 255)); // runs past the row
+        super::fill_rect(&p, 0, 3, 1, 4, (255, 0, 0, 255)); // runs past the last line
+        super::fill_rect(&p, -1, 0, 2, 1, (255, 0, 0, 255)); // negative origin
+        for y in 0..4 {
+            for x in 0..4 {
+                assert_eq!(super::read_pixel(&p, x, y, false).0, 0, "at ({x},{y})");
+            }
+        }
+    }
+
     /// Manual benchmark for the canvas auto-grow raster rebuild.
     ///
     /// `auto_resize_for_drawables` runs this on every drag motion
@@ -3472,5 +3564,31 @@ mod tests {
         let elapsed = start.elapsed();
         assert_eq!(out.width(), w + 40);
         println!("resize_pixbuf_to_rect {w}x{h} -> +40px: {:.1} ms", elapsed.as_secs_f64() * 1000.0);
+
+        // Breakdown, so the optimisation targets the part that costs.
+        let t = |label: &str, f: &dyn Fn()| {
+            let start = std::time::Instant::now();
+            f();
+            println!("    {label}: {:.1} ms", start.elapsed().as_secs_f64() * 1000.0);
+        };
+        t("Pixbuf::new + fill", &|| {
+            let n = Pixbuf::new(relm4::gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, w + 40, h + 40)
+                .unwrap();
+            n.fill(0x000000ff);
+        });
+        t("4x dominant_color", &|| {
+            let d = super::AUTO_EXTEND_EDGE_SAMPLE_DEPTH;
+            super::dominant_color(&src, 0, 0, d, h, false);
+            super::dominant_color(&src, w - d, 0, d, h, false);
+            super::dominant_color(&src, 0, 0, w, d, false);
+            super::dominant_color(&src, 0, h - d, w, d, false);
+        });
+        let dst = Pixbuf::new(relm4::gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, w + 40, h + 40)
+            .unwrap();
+        t("copy_area", &|| src.copy_area(0, 0, w, h, &dst, 0, 0));
+        t("fill_rect right+bottom strips", &|| {
+            super::fill_rect(&dst, w, 0, 40, h + 40, (1, 2, 3, 255));
+            super::fill_rect(&dst, 0, h, w, 40, (1, 2, 3, 255));
+        });
     }
 }
