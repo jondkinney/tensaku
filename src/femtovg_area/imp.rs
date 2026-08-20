@@ -452,6 +452,94 @@ struct BackgroundTile {
     h: f32,
 }
 
+/// Tightly-packed bytes for the `(x, y, w, h)` region of a raster.
+///
+/// femtovg pins `UNPACK_ROW_LENGTH` to the image width and ignores an
+/// `ImgRef`'s stride, so every upload has to arrive packed at exactly
+/// `w` pixels per row. When the region spans the full width of a raster
+/// with no row padding it already is that, and borrows; otherwise its
+/// rows are packed into a fresh buffer.
+fn region_bytes(
+    src: &[u8],
+    raster: RasterLayout,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+) -> std::borrow::Cow<'_, [u8]> {
+    let RasterLayout {
+        stride,
+        bytes_per_pixel,
+        width,
+    } = raster;
+    if stride == width * bytes_per_pixel && x == 0 && w == width {
+        return std::borrow::Cow::Borrowed(&src[y * stride..(y + h) * stride]);
+    }
+    let row_length = w * bytes_per_pixel;
+    let mut packed = Vec::with_capacity(row_length * h);
+    for row in y..y + h {
+        let offset = row * stride + x * bytes_per_pixel;
+        packed.extend_from_slice(&src[offset..offset + row_length]);
+    }
+    std::borrow::Cow::Owned(packed)
+}
+
+/// How a raster's bytes are arranged, for [`region_bytes`].
+#[derive(Clone, Copy)]
+struct RasterLayout {
+    /// Bytes per row, which a Pixbuf may pad beyond `width`.
+    stride: usize,
+    bytes_per_pixel: usize,
+    width: usize,
+}
+
+impl RasterLayout {
+    fn of(image: &Pixbuf) -> Self {
+        Self {
+            stride: image.rowstride() as usize,
+            bytes_per_pixel: if image.has_alpha() { 4 } else { 3 },
+            width: image.width() as usize,
+        }
+    }
+}
+
+/// Rects of the new raster that the old one doesn't cover, after a
+/// resize that placed the old raster at `translation` inside a
+/// `new_w` x `new_h` image.
+///
+/// Emitted as full-width bands above and below the old raster plus the
+/// left/right remainder beside it, so the four never overlap — an
+/// overlap would upload the same pixels twice and stack redundant
+/// tiles. Shrinking sides contribute nothing; a pure shrink returns
+/// none.
+fn background_grow_strips(
+    translation: Vec2D,
+    old_w: f32,
+    old_h: f32,
+    new_w: f32,
+    new_h: f32,
+) -> Vec<(f32, f32, f32, f32)> {
+    let (ox, oy) = (translation.x, translation.y);
+    // The old raster clipped to the new one — bands are measured
+    // against what is actually still visible, not where it nominally
+    // sits, so a simultaneous grow on one axis and shrink on the other
+    // can't emit a band that overlaps the copied region.
+    let top = oy.clamp(0.0, new_h);
+    let bottom = (oy + old_h).clamp(0.0, new_h);
+    let left = ox.clamp(0.0, new_w);
+    let right = (ox + old_w).clamp(0.0, new_w);
+
+    [
+        (0.0, 0.0, new_w, top),
+        (0.0, bottom, new_w, new_h - bottom),
+        (0.0, top, left, bottom - top),
+        (right, top, new_w - right, bottom - top),
+    ]
+    .into_iter()
+    .filter(|(_, _, w, h)| *w > 0.0 && *h > 0.0)
+    .collect()
+}
+
 /// Split `total` into consecutive `(start, len)` ranges of at most
 /// `limit` each. Ranges are non-empty; a zero `total` yields none.
 fn tile_ranges(total: usize, limit: usize) -> Vec<(usize, usize)> {
@@ -469,6 +557,10 @@ fn tile_ranges(total: usize, limit: usize) -> Vec<(usize, usize)> {
 pub struct FemtoVgAreaMut {
     background_image: Pixbuf,
     background_tiles: Vec<BackgroundTile>,
+    /// Image-space rects whose pixels are on the CPU but not yet on the
+    /// GPU. Set by an incremental canvas grow, consumed by the next
+    /// `render_background_image`. Empty means the tile set is current.
+    pending_tile_strips: Vec<(f32, f32, f32, f32)>,
     /// Propagated from the GL context via `ensure_canvas`; see
     /// `FemtoVGArea::max_texture_size`. Defaults to a conservative
     /// 8192 until the real limit is known.
@@ -852,6 +944,7 @@ impl FemtoVGArea {
         self.inner().replace(FemtoVgAreaMut {
             background_image,
             background_tiles: Vec::new(),
+            pending_tile_strips: Vec::new(),
             max_texture_size: 8192,
             original_rect,
             transparent_background_id: None,
@@ -1139,8 +1232,10 @@ impl FemtoVgAreaMut {
                 translated_ids.push(s.id);
             }
         }
+        let old_w = cur_w;
+        let old_h = cur_h;
         self.background_image = resized;
-        self.background_tiles.clear();
+        self.reuse_background_tiles(translation, old_w, old_h, new_w as f32, new_h as f32);
 
         let resize = UndoAction::ResizeCanvas {
             prev_image,
@@ -1720,7 +1815,7 @@ impl FemtoVgAreaMut {
                 translated_ids,
             } => {
                 let cur_image = std::mem::replace(&mut self.background_image, prev_image);
-                self.background_tiles.clear();
+                self.invalidate_background_tiles();
                 let translated_set: HashSet<DrawableId> = translated_ids.iter().copied().collect();
                 for s in &mut self.drawables {
                     if translated_set.contains(&s.id) {
@@ -1747,7 +1842,7 @@ impl FemtoVgAreaMut {
                 // post-op image back, apply the inverse-of-this (the
                 // forward op) at the resulting (pre-`transform`) dims.
                 let cur_image = std::mem::replace(&mut self.background_image, image);
-                self.background_tiles.clear();
+                self.invalidate_background_tiles();
                 let cur_rect = std::mem::replace(&mut self.original_rect, original_rect);
                 for s in &mut self.drawables {
                     s.drawable.apply_canvas_transform(transform, w, h);
@@ -2662,7 +2757,7 @@ impl FemtoVgAreaMut {
         // undoable op. No history remap needed: the op sits on the undo
         // stack, so LIFO reverses it before any older snapshot is used.
         let prev_image = std::mem::replace(&mut self.background_image, new_bg);
-        self.background_tiles.clear();
+        self.invalidate_background_tiles();
         let prev_rect = self.original_rect;
         for s in self.drawables.iter_mut() {
             s.drawable.apply_canvas_transform(t, old_w, old_h);
@@ -2731,7 +2826,7 @@ impl FemtoVgAreaMut {
             self.record_canvas_op(prev_image, prev_rect, t, w, h);
         }
         self.background_image = resized;
-        self.background_tiles.clear();
+        self.invalidate_background_tiles();
         Some((w, h))
     }
 
@@ -2803,10 +2898,12 @@ impl FemtoVgAreaMut {
     ) -> Result<()> {
         if self.background_tiles.is_empty() {
             // Profiled: a full CPU→GPU re-upload of the screenshot.
-            // Anything that clears `background_tiles` (canvas grow /
-            // shrink, flip, rotate, undo of those) pays it on the next
+            // Anything that invalidates the tile set outright (flip,
+            // rotate, resample, undo of those) pays it on the next
             // frame, and its cost scales with the capture's pixel
-            // count.
+            // count. An auto-grow does NOT land here — it reuses the
+            // existing textures and only uploads its new strips below.
+            self.pending_tile_strips.clear();
             self.background_tiles = super::perf::timed("bg-upload", || {
                 Self::upload_background_tiles(
                     canvas,
@@ -2814,6 +2911,14 @@ impl FemtoVgAreaMut {
                     self.max_texture_size,
                 )
             })?;
+        } else if !self.pending_tile_strips.is_empty() {
+            let strips = std::mem::take(&mut self.pending_tile_strips);
+            let image = self.background_image.clone();
+            let limit = self.max_texture_size;
+            let new_tiles = super::perf::timed("bg-upload-strip", || {
+                Self::upload_background_strips(canvas, &image, limit, &strips)
+            })?;
+            self.background_tiles.extend(new_tiles);
         }
 
         let transparency_bg_id = match self.transparent_background_id {
@@ -2858,8 +2963,20 @@ impl FemtoVgAreaMut {
         }
 
         for tile in &self.background_tiles {
+            // Clip the drawn rect to the live image. After a shrink a
+            // reused tile can overhang the raster, and painting it
+            // whole would spill background pixels outside the canvas.
+            // The paint keeps the tile's full geometry, so the texture
+            // still samples at the right offset for the clipped path.
+            let x0 = tile.x.max(0.0);
+            let y0 = tile.y.max(0.0);
+            let x1 = (tile.x + tile.w).min(w);
+            let y1 = (tile.y + tile.h).min(h);
+            if x1 <= x0 || y1 <= y0 {
+                continue;
+            }
             let mut tile_path = Path::new();
-            tile_path.rect(tile.x, tile.y, tile.w, tile.h);
+            tile_path.rect(x0, y0, x1 - x0, y1 - y0);
             canvas.fill_path(
                 &tile_path,
                 &Paint::image(tile.id, tile.x, tile.y, tile.w, tile.h, 0f32, 1f32),
@@ -2867,6 +2984,177 @@ impl FemtoVgAreaMut {
         }
 
         Ok(())
+    }
+
+    /// Keep the uploaded background textures across an auto-grow /
+    /// shrink instead of re-uploading the whole capture.
+    ///
+    /// A resize only ever moves the old raster within the new one (by
+    /// `translation`) and exposes fresh strips around it — the old
+    /// pixels are unchanged. Tiles carry their own image-space rect, so
+    /// shifting those rects re-registers the existing textures at their
+    /// new coordinates for free, and only the newly exposed strips need
+    /// uploading. At 6144x3456 that is the difference between a ~23 ms
+    /// whole-image upload and a fraction of a millisecond, on an
+    /// operation a keyboard nudge at the image edge repeats at key-repeat
+    /// rate.
+    ///
+    /// Shrink needs no work here: `render_background_image` clips each
+    /// tile's *path* to the image, and the paint keeps its own
+    /// geometry, so the texture still samples correctly.
+    ///
+    /// Falls back to a full rebuild when there is nothing uploaded yet,
+    /// or when a long grow sequence has accumulated more strips than is
+    /// worth tracking.
+    fn reuse_background_tiles(
+        &mut self,
+        translation: Vec2D,
+        old_w: f32,
+        old_h: f32,
+        new_w: f32,
+        new_h: f32,
+    ) {
+        /// Beyond this the per-tile draw calls stop being cheaper than
+        /// one clean upload.
+        const MAX_TILES: usize = 64;
+
+        // Count strips still queued from earlier grows: several can
+        // land between two frames (a keyboard nudge at the image edge
+        // outruns the frame clock), and each becomes a tile.
+        if self.background_tiles.is_empty()
+            || self.background_tiles.len() + self.pending_tile_strips.len() + 4 > MAX_TILES
+            || self.max_texture_size == 0
+        {
+            self.invalidate_background_tiles();
+            return;
+        }
+
+        for tile in &mut self.background_tiles {
+            tile.x += translation.x;
+            tile.y += translation.y;
+        }
+        // Queued strips are image-space rects too, so they move with
+        // everything else when a grow prepends a top/left band.
+        for strip in &mut self.pending_tile_strips {
+            strip.0 += translation.x;
+            strip.1 += translation.y;
+        }
+
+        self.pending_tile_strips.extend(background_grow_strips(
+            translation,
+            old_w,
+            old_h,
+            new_w,
+            new_h,
+        ));
+    }
+
+    /// Drop every uploaded background texture so the next render
+    /// re-uploads from scratch. For changes that rewrite the raster's
+    /// contents (flip, rotate, resample, undo of those) rather than
+    /// just extending it.
+    fn invalidate_background_tiles(&mut self) {
+        // Hand the textures back rather than just dropping the ids —
+        // `ImageId` is a plain handle, so clearing the vec on its own
+        // leaked one texture per tile on every flip, rotate, resample
+        // or undo of those.
+        for tile in self.background_tiles.drain(..) {
+            super::gl::queue_image_deletion(tile.id);
+        }
+        self.pending_tile_strips.clear();
+    }
+
+    /// Upload just `strips` (image-space rects) as additional tiles,
+    /// each split to respect `max_texture_size`. Used by the
+    /// incremental grow path, where everything except these rects is
+    /// already resident on the GPU.
+    fn upload_background_strips(
+        canvas: &mut femtovg::Canvas<femtovg::renderer::OpenGl>,
+        image: &Pixbuf,
+        max_texture_size: usize,
+        strips: &[(f32, f32, f32, f32)],
+    ) -> Result<Vec<BackgroundTile>> {
+        let img_w = image.width() as usize;
+        let img_h = image.height() as usize;
+        let limit = max_texture_size.max(1024);
+        let mut tiles = Vec::new();
+
+        for &(sx, sy, sw, sh) in strips {
+            // Clamp to the raster: a strip is derived from float rects
+            // and must never index past the Pixbuf.
+            let x0 = (sx.max(0.0) as usize).min(img_w);
+            let y0 = (sy.max(0.0) as usize).min(img_h);
+            let x1 = (((sx + sw).max(0.0)).ceil() as usize).min(img_w);
+            let y1 = (((sy + sh).max(0.0)).ceil() as usize).min(img_h);
+            if x1 <= x0 || y1 <= y0 {
+                continue;
+            }
+            for (ty, th) in tile_ranges(y1 - y0, limit) {
+                for (tx, tw) in tile_ranges(x1 - x0, limit) {
+                    tiles.extend(Self::upload_region(
+                        canvas,
+                        image,
+                        x0 + tx,
+                        y0 + ty,
+                        tw,
+                        th,
+                    )?);
+                }
+            }
+        }
+        Ok(tiles)
+    }
+
+    /// Upload `image`'s `(x, y, w, h)` region as one tile.
+    ///
+    /// femtovg pins `UNPACK_ROW_LENGTH` to the image width and ignores
+    /// an `ImgRef`'s stride, so the upload has to be tightly packed at
+    /// `w` pixels per row. When the region spans the full image width
+    /// of a Pixbuf with no row padding the Pixbuf's buffer already is
+    /// that layout and goes straight to GL; otherwise its rows are
+    /// packed into `scratch` first.
+    fn upload_region(
+        canvas: &mut femtovg::Canvas<femtovg::renderer::OpenGl>,
+        image: &Pixbuf,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+    ) -> Result<Option<BackgroundTile>> {
+        if w == 0 || h == 0 {
+            return Ok(None);
+        }
+        let format = if image.has_alpha() {
+            PixelFormat::Rgba8
+        } else {
+            PixelFormat::Rgb8
+        };
+        let id = canvas.create_image_empty(w, h, format, ImageFlags::empty())?;
+
+        // SAFETY: `pixels()` borrows the Pixbuf's live buffer and we only
+        // read from it. `align_to` is safe on either source because
+        // RGB<u8>/RGBA<u8> are `repr(C)` byte structs with alignment 1,
+        // so the whole slice comes back as the middle segment.
+        unsafe {
+            let src = image.pixels();
+            let bytes = region_bytes(src, RasterLayout::of(image), x, y, w, h);
+            let bytes: &[u8] = &bytes;
+            if image.has_alpha() {
+                let img = Img::new(bytes.align_to::<RGBA<u8>>().1, w, h);
+                canvas.update_image(id, ImageSource::Rgba(img), 0, 0)?;
+            } else {
+                let img = Img::new(bytes.align_to::<RGB<u8>>().1, w, h);
+                canvas.update_image(id, ImageSource::Rgb(img), 0, 0)?;
+            }
+        }
+
+        Ok(Some(BackgroundTile {
+            id,
+            x: x as f32,
+            y: y as f32,
+            w: w as f32,
+            h: h as f32,
+        }))
     }
 
     /// Upload `image` as a grid of GPU tiles no larger than
@@ -2887,8 +3175,6 @@ impl FemtoVgAreaMut {
 
         let width = image.width() as usize;
         let height = image.height() as usize;
-        let stride = image.rowstride() as usize; // bytes per row
-        let bytes_per_pixel = if image.has_alpha() { 4 } else { 3 };
         let limit = max_texture_size.max(1024);
 
         // femtovg pins `UNPACK_ROW_LENGTH` to the image width rather
@@ -2899,9 +3185,6 @@ impl FemtoVgAreaMut {
         // the Pixbuf's own buffer is already in exactly that layout and
         // we can hand it straight to GL. Otherwise we pack the tile's
         // rows into a scratch buffer first.
-        let tight_rows = stride == width * bytes_per_pixel;
-        let mut scratch = Vec::<u8>::new();
-
         let mut tiles = Vec::new();
         // SAFETY: `image.pixels()` borrows the pixbuf's live buffer; we
         // only read from it. `align_to` is safe on either source
@@ -2915,19 +3198,9 @@ impl FemtoVgAreaMut {
                     let id =
                         canvas.create_image_empty(tile_w, tile_h, format, ImageFlags::empty())?;
 
-                    let row_length = tile_w * bytes_per_pixel;
-                    let bytes: &[u8] = if tight_rows && tile_x == 0 && tile_w == width {
-                        &src_buffer[tile_y * stride..(tile_y + tile_h) * stride]
-                    } else {
-                        scratch.clear();
-                        scratch.reserve(row_length * tile_h);
-                        for row in tile_y..tile_y + tile_h {
-                            let src_offset = row * stride + tile_x * bytes_per_pixel;
-                            scratch
-                                .extend_from_slice(&src_buffer[src_offset..src_offset + row_length]);
-                        }
-                        &scratch
-                    };
+                    let bytes =
+                        region_bytes(src_buffer, RasterLayout::of(image), tile_x, tile_y, tile_w, tile_h);
+                    let bytes: &[u8] = &bytes;
 
                     if image.has_alpha() {
                         let img = Img::new(bytes.align_to::<RGBA<u8>>().1, tile_w, tile_h);
@@ -3450,7 +3723,7 @@ impl FemtoVgAreaMut {
 
 #[cfg(test)]
 mod tests {
-    use super::{Pixbuf, resize_pixbuf_to_rect, tile_ranges};
+    use super::{Pixbuf, Vec2D, resize_pixbuf_to_rect, tile_ranges};
 
     #[test]
     fn tile_ranges_covers_exactly_once() {
@@ -3540,6 +3813,123 @@ mod tests {
                 assert_eq!(super::read_pixel(&p, x, y, false).0, 0, "at ({x},{y})");
             }
         }
+    }
+
+    /// `region_bytes` feeds GL directly, so a wrong offset shows up as
+    /// a sheared or shifted patch of screenshot. Check it against a
+    /// naive per-pixel reference for both the borrowing fast path
+    /// (full width, no row padding) and the packing path (sub-width,
+    /// and/or a padded stride).
+    #[test]
+    fn region_bytes_matches_a_naive_reference() {
+        const BPP: usize = 3;
+        let width = 7;
+        let height = 5;
+        for pad in [0usize, 2] {
+            let stride = width * BPP + pad;
+            // Distinct value per (x, y, channel) so any misalignment shows.
+            let mut src = vec![0u8; stride * height];
+            for y in 0..height {
+                for x in 0..width {
+                    for c in 0..BPP {
+                        src[y * stride + x * BPP + c] = (y * 40 + x * 5 + c) as u8;
+                    }
+                }
+            }
+            for (x, y, w, h) in [
+                (0, 0, width, height), // fast path when pad == 0
+                (0, 1, width, 3),
+                (2, 1, 4, 3),
+                (width - 1, height - 1, 1, 1),
+            ] {
+                let layout = super::RasterLayout {
+                    stride,
+                    bytes_per_pixel: BPP,
+                    width,
+                };
+                let got = super::region_bytes(&src, layout, x, y, w, h);
+                let mut want = Vec::with_capacity(w * h * BPP);
+                for row in y..y + h {
+                    for col in x..x + w {
+                        for c in 0..BPP {
+                            want.push(src[row * stride + col * BPP + c]);
+                        }
+                    }
+                }
+                assert_eq!(&got[..], &want[..], "pad={pad} rect=({x},{y},{w},{h})");
+            }
+        }
+    }
+
+    /// The strips an incremental grow uploads must exactly cover the
+    /// part of the new raster the old one doesn't, and must not overlap
+    /// each other — a gap leaves stale background on screen, an overlap
+    /// stacks redundant tiles. Verified by rasterising the strips onto
+    /// a grid and comparing against the old raster's footprint.
+    type Strips = Vec<(f32, f32, f32, f32)>;
+
+    fn strip_coverage(
+        t: Vec2D,
+        old_w: i32,
+        old_h: i32,
+        new_w: i32,
+        new_h: i32,
+    ) -> (Vec<u8>, Strips) {
+        let strips =
+            super::background_grow_strips(t, old_w as f32, old_h as f32, new_w as f32, new_h as f32);
+        let mut hits = vec![0u8; (new_w * new_h) as usize];
+        for &(x, y, w, h) in &strips {
+            for py in (y as i32)..((y + h) as i32) {
+                for px in (x as i32)..((x + w) as i32) {
+                    if (0..new_w).contains(&px) && (0..new_h).contains(&py) {
+                        hits[(py * new_w + px) as usize] += 1;
+                    }
+                }
+            }
+        }
+        (hits, strips)
+    }
+
+    #[test]
+    fn grow_strips_cover_exactly_the_new_region() {
+        // (translation, old size, new size) — grow on each side, on
+        // both, an asymmetric grow, and a grow-plus-shrink.
+        let cases = [
+            (Vec2D::new(0.0, 0.0), 10, 8, 14, 8),   // right only
+            (Vec2D::new(0.0, 0.0), 10, 8, 10, 12),  // bottom only
+            (Vec2D::new(3.0, 0.0), 10, 8, 13, 8),   // left only
+            (Vec2D::new(0.0, 2.0), 10, 8, 10, 10),  // top only
+            (Vec2D::new(3.0, 2.0), 10, 8, 16, 13),  // all four
+            (Vec2D::new(0.0, 2.0), 10, 8, 14, 11),  // top + right
+            (Vec2D::new(0.0, 0.0), 10, 8, 14, 6),   // grow x, shrink y
+        ];
+        for (t, ow, oh, nw, nh) in cases {
+            let (hits, strips) = strip_coverage(t, ow, oh, nw, nh);
+            for py in 0..nh {
+                for px in 0..nw {
+                    // Inside the old raster's new position => already on
+                    // the GPU, must NOT be re-uploaded. Outside => must
+                    // be uploaded exactly once.
+                    let in_old = px >= t.x as i32
+                        && px < t.x as i32 + ow
+                        && py >= t.y as i32
+                        && py < t.y as i32 + oh;
+                    let want = if in_old { 0 } else { 1 };
+                    assert_eq!(
+                        hits[(py * nw + px) as usize],
+                        want,
+                        "({px},{py}) for {t:?} {ow}x{oh} -> {nw}x{nh}, strips {strips:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn grow_strips_are_empty_for_a_pure_shrink() {
+        let (hits, strips) = strip_coverage(Vec2D::new(0.0, 0.0), 10, 8, 6, 5);
+        assert!(strips.is_empty(), "{strips:?}");
+        assert!(hits.iter().all(|h| *h == 0));
     }
 
     /// Manual benchmark for the canvas auto-grow raster rebuild.
