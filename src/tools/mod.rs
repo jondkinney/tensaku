@@ -664,9 +664,27 @@ pub enum PanelSwatch {
 /// inside any `render_glow` impl that wants a halo of constant on-screen
 /// thickness.
 pub fn halo_in_image_units(canvas: &Canvas<OpenGl>, device_pixel_ratio: f32) -> f32 {
-    let img_to_canvas = canvas.transform().average_scale().max(0.0001);
-    let css_to_image = device_pixel_ratio / img_to_canvas;
-    HALO_PAD * css_to_image
+    // Image px per canvas px. 1.0 is the 100% view.
+    let zoom = canvas.transform().average_scale().max(0.0001);
+    // A constant on-screen halo is right when zoomed IN — the halo is
+    // UI, and UI shouldn't grow with the artwork. Zoomed OUT the same
+    // rule turns against us: the halo keeps its screen width while the
+    // annotation shrinks, so below roughly half scale it outweighs the
+    // thing it decorates. On a tapered arrow, whose tail is *designed*
+    // to vanish to a point, the result is a long blue hairline with no
+    // visible arrow inside it — which reads as a rendering fault
+    // rather than as a selection.
+    //
+    // So hold it constant only while zooming in, and let it shrink
+    // with the artwork past 100%, down to a floor that keeps a
+    // selection perceptible on a heavily zoomed-out canvas.
+    halo_css_pad(zoom) * device_pixel_ratio / zoom
+}
+
+/// On-screen halo width (CSS px) at a given zoom — see
+/// [`halo_in_image_units`], which converts it back into image units.
+fn halo_css_pad(zoom: f32) -> f32 {
+    (HALO_PAD * zoom.min(1.0)).max(MIN_HALO_PAD)
 }
 
 /// Selection accent colour (used for handles + glow + hover cursor halo).
@@ -689,6 +707,11 @@ pub const GLOW_COLOR: femtovg::Color = femtovg::Color {
 /// scale it via `halo_in_image_units` so the on-screen size is constant
 /// regardless of zoom or DPR.
 pub const HALO_PAD: f32 = 4.0;
+
+/// Floor for the halo's on-screen width (CSS pixels). Below this a
+/// selection stops being readable at all, so a heavily zoomed-out
+/// canvas keeps a thin trace rather than nothing.
+pub const MIN_HALO_PAD: f32 = 1.0;
 
 /// Visual shape used by the SelectionOverlay to render a handle.
 /// Round is the standard "resize a side/corner" affordance;
@@ -1280,6 +1303,47 @@ impl From<command_line::Tools> for Tools {
             command_line::Tools::Blur => Self::Blur,
             command_line::Tools::Highlight => Self::Highlighter,
             command_line::Tools::Brush => Self::Brush,
+        }
+    }
+}
+
+#[cfg(test)]
+mod halo_tests {
+    use super::{HALO_PAD, MIN_HALO_PAD, halo_css_pad};
+
+    /// Zooming IN must not fatten the halo: it is UI, and UI keeps its
+    /// screen size.
+    #[test]
+    fn halo_is_constant_on_screen_when_zoomed_in() {
+        for zoom in [1.0, 1.5, 4.0, 20.0] {
+            assert_eq!(halo_css_pad(zoom), HALO_PAD, "zoom {zoom}");
+        }
+    }
+
+    /// Zooming OUT must shrink it with the artwork. Holding it
+    /// constant is what made a selected annotation read as a stray
+    /// blue line: at 42% a 4 px halo wrapped an arrow only a pixel or
+    /// so wide, so the selection outweighed the annotation.
+    #[test]
+    fn halo_shrinks_with_the_artwork_when_zoomed_out() {
+        assert_eq!(halo_css_pad(0.5), HALO_PAD * 0.5);
+        assert_eq!(halo_css_pad(0.42), HALO_PAD * 0.42);
+        // Strictly decreasing, so there is no zoom at which zooming
+        // out further makes the selection heavier.
+        let mut prev = halo_css_pad(1.0);
+        for zoom in [0.9, 0.75, 0.6, 0.5, 0.4, 0.3] {
+            let cur = halo_css_pad(zoom);
+            assert!(cur < prev, "zoom {zoom}: {cur} !< {prev}");
+            prev = cur;
+        }
+    }
+
+    /// ...but never to nothing, or a selection becomes invisible on a
+    /// heavily zoomed-out canvas.
+    #[test]
+    fn halo_never_falls_below_the_floor() {
+        for zoom in [0.2, 0.05, 0.001] {
+            assert_eq!(halo_css_pad(zoom), MIN_HALO_PAD, "zoom {zoom}");
         }
     }
 }
