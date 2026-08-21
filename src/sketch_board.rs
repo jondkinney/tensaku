@@ -3738,7 +3738,8 @@ impl SketchBoard {
         //      the ghost appears exactly where the stamp would land
         //      and nowhere else.
         if self.set_marker_ghost(
-            (self.active_tool_type() == Tools::Marker && cursor.is_none()).then_some(image_pos),
+            (self.active_tool_type() == Tools::Marker && cursor.is_none())
+                .then(|| self.ghost_badge_pos(image_pos)),
         ) {
             self.refresh_screen();
         }
@@ -3798,6 +3799,25 @@ impl SketchBoard {
         self.renderer.set_cursor_from_name(cursor);
     }
 
+    /// Where the ghost badge sits for a pointer at `image_pos`: up and
+    /// left of it, so the cursor — a system cursor, which can't be
+    /// nudged out of the way — doesn't sit on the number.
+    ///
+    /// The badge is stamped where the ghost is drawn, not where the
+    /// pointer is, so this offset costs nothing in honesty: what you
+    /// see is exactly what lands. A fixed nudge in screen pixels, so
+    /// it clears the cursor identically at any zoom.
+    fn ghost_badge_pos(&self, image_pos: Vec2D) -> Vec2D {
+        const GHOST_LEAD_CSS: f32 = 16.0;
+        let render_scale = self.renderer.current_render_scale();
+        if render_scale <= 0.0 {
+            return image_pos;
+        }
+        let dpr = crate::femtovg_area::current_device_pixel_ratio();
+        let lead = GHOST_LEAD_CSS * dpr / render_scale;
+        Vec2D::new(image_pos.x - lead, image_pos.y - lead)
+    }
+
     /// Park the Counter's ghost badge at `pos`, or clear it with
     /// `None`. Returns whether the canvas needs a redraw.
     fn set_marker_ghost(&mut self, pos: Option<Vec2D>) -> bool {
@@ -3823,8 +3843,8 @@ impl SketchBoard {
             Tools::Pointer | Tools::Crop => None,
             // The counter's ghost badge already shows what lands and
             // where, so the cursor's job is just "click to place" —
-            // the pointing hand, not a crosshair aiming at a preview
-            // that is right there under it.
+            // the desktop's own pointing hand, at the size and theme
+            // every other cursor on screen uses.
             Tools::Marker => Some("pointer"),
             _ => Some("crosshair"),
         }

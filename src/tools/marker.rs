@@ -312,8 +312,15 @@ impl Tool for MarkerTool {
         match event.type_ {
             MouseEventType::Click => {
                 if event.button == MouseButton::Primary {
+                    // Land exactly where the ghost was drawn. The ghost
+                    // sits offset from the pointer so the cursor doesn't
+                    // cover its number, and a badge that ignored that
+                    // offset would jump on click — the preview would be
+                    // showing one place and the stamp landing in
+                    // another.
+                    let pos = self.ghost.as_ref().map_or(event.pos, |g| g.pos);
                     let marker = Marker {
-                        pos: event.pos,
+                        pos,
                         scale: 1.0,
                         number: *self.next_number.borrow(),
                         style: self.style,
