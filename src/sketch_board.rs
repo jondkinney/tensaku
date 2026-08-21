@@ -3806,9 +3806,11 @@ impl SketchBoard {
     /// The badge is stamped where the ghost is drawn, not where the
     /// pointer is, so this offset costs nothing in honesty: what you
     /// see is exactly what lands. A fixed nudge in screen pixels, so
-    /// it clears the cursor identically at any zoom.
+    /// it clears the cursor identically at any zoom — just far enough
+    /// to uncover the number, near enough that the badge still reads
+    /// as held by the pointer rather than floating away from it.
     fn ghost_badge_pos(&self, image_pos: Vec2D) -> Vec2D {
-        const GHOST_LEAD_CSS: f32 = 16.0;
+        const GHOST_LEAD_CSS: f32 = 9.0;
         let render_scale = self.renderer.current_render_scale();
         if render_scale <= 0.0 {
             return image_pos;
