@@ -274,11 +274,28 @@ impl Selection {
 /// inside the selection preserves scroll targeting while favoring the
 /// lower-right page/scrollbar gutter, where links and hover UI are
 /// least likely.
-fn pointer_park_target(selection: Selection, scale: i32) -> (i32, i32) {
-    let scale = scale.max(1);
-    let x = (selection.x + selection.w - 30.0).max(selection.x + 1.0) as i32;
-    let y = (selection.y + selection.h - 60.0).max(selection.y + 1.0) as i32;
-    (x * scale, y * scale)
+///
+/// `scale` is the output's real (possibly fractional) device scale.
+/// GTK's integer `scale_factor()` must not be used here: it rounds a
+/// fractional scale up (1.6 → 2), which lands the warp past the
+/// selection — or clean off the screen.
+fn pointer_park_target(selection: Selection, scale: f64) -> (i32, i32) {
+    let scale = if scale > 0.0 { scale } else { 1.0 };
+    let x = (selection.x + selection.w - 30.0).max(selection.x + 1.0);
+    let y = (selection.y + selection.h - 60.0).max(selection.y + 1.0);
+    ((x * scale).round() as i32, (y * scale).round() as i32)
+}
+
+/// Device pixels per logical pixel for the overlay's output — the
+/// factor `pointer_park_target` needs. Hyprland reports the true
+/// fractional scale; elsewhere GTK's integer factor is the best
+/// available answer.
+fn output_device_scale(output_name: Option<&str>, widget_scale_factor: i32) -> f64 {
+    output_name
+        .and_then(crate::display::hyprland_monitor_named)
+        .map(|monitor| monitor.scale as f64)
+        .filter(|scale| *scale > 0.0)
+        .unwrap_or_else(|| widget_scale_factor.max(1) as f64)
 }
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
@@ -1786,9 +1803,10 @@ fn park_pointer_then_resume_auto(
     handshake: auto_scroll::CaptureHandshake,
     cycle: u64,
 ) {
-    let (cursor_x, cursor_y) = pointer_park_target(selection, window.scale_factor().max(1));
-    let stop = Arc::new(AtomicBool::new(false));
     let output_name = state.borrow().output_name.clone();
+    let scale = output_device_scale(output_name.as_deref(), window.scale_factor());
+    let (cursor_x, cursor_y) = pointer_park_target(selection, scale);
+    let stop = Arc::new(AtomicBool::new(false));
     if let Err(error) = auto_scroll::focus_underlying_once(
         Arc::clone(&stop),
         cursor_x,
@@ -3203,10 +3221,10 @@ fn start_auto_scroll_at(
     // the selected application. After this single placement the pointer
     // is the user's again — moving it out pauses the capture rather
     // than fighting a re-park.
-    let scale = clicked_btn.scale_factor().max(1);
+    let output_name = state.borrow().output_name.clone();
+    let scale = output_device_scale(output_name.as_deref(), clicked_btn.scale_factor());
     let sel = state.borrow().selection;
     let (cursor_x, cursor_y) = pointer_park_target(sel, scale);
-    let output_name = state.borrow().output_name.clone();
 
     let state_w = Rc::clone(state);
     let window_w = window.clone();
@@ -4288,9 +4306,30 @@ mod tests {
                     w: 200.0,
                     h: 300.0,
                 },
-                2,
+                2.0,
             ),
             (360, 520)
+        );
+    }
+
+    /// A fractional output scale (a 1.6× monitor) must reach the warp
+    /// as-is. Rounding it up to 2 — which GTK's integer scale factor
+    /// does — lands the pointer 25% past the selection, or off the
+    /// screen entirely.
+    #[test]
+    fn pointer_park_target_honors_fractional_scales() {
+        assert_eq!(
+            pointer_park_target(
+                Selection {
+                    x: 1000.0,
+                    y: 500.0,
+                    w: 500.0,
+                    h: 600.0,
+                },
+                1.6,
+            ),
+            // (1500 - 30) * 1.6, (1100 - 60) * 1.6
+            (2352, 1664)
         );
     }
 
@@ -4304,7 +4343,7 @@ mod tests {
                     w: 20.0,
                     h: 30.0,
                 },
-                0,
+                0.0,
             ),
             (11, 21)
         );
