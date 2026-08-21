@@ -930,6 +930,10 @@ fn build_overlay(
     // they render fine. Overlay children sized via halign+valign+margins are
     // pickable by the same allocation that draws them.
     let prompt = build_prompt_pill();
+    // The prompt is words, and it overlaps the surface a drag can start
+    // on — a press landing on it must fall through to the drawing area.
+    // The action and capturing pills hold real buttons and stay pickable.
+    prompt.set_can_target(false);
     let action_pill = build_action_pill();
     let capturing_controls = build_capturing_pill();
     let capturing_pill = capturing_controls.pill.clone();
@@ -956,6 +960,13 @@ fn build_overlay(
         let guide = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         guide.add_css_class("capture-crosshair");
         guide.set_visible(false);
+        // Never a pick target. The guides sit exactly under the pointer,
+        // and as overlay children they are siblings of the drawing area,
+        // not descendants — a guide that takes the pick swallows the
+        // press the drag gesture is listening for on the drawing area,
+        // and resets the cursor from its crosshair to the window default
+        // every time the pointer comes to rest on a line.
+        guide.set_can_target(false);
         overlay.add_overlay(&guide);
         guide
     });
@@ -978,6 +989,10 @@ fn build_overlay(
     readout.set_halign(gtk::Align::Start);
     readout.set_valign(gtk::Align::Start);
     readout.set_visible(false);
+    // Words, not a control: it chases the dragged corner, a fast drag
+    // overruns it, and a pill that takes the pick mid-drag flickers the
+    // cursor. Same sibling problem as the guides above.
+    readout.set_can_target(false);
     overlay.add_overlay(&readout);
 
     action_pill.set_visible(false);

@@ -526,6 +526,8 @@ fn layout_grips(state: &State, rect: Rect) {
         .fixed
         .move_(&state.readout, centre_x - pill_w as f64 / 2.0, row_y);
     state.readout.set_visible(row_fits);
+    // Settled: the pill is the shutter again and needs its click back.
+    state.readout.set_can_target(true);
 }
 
 fn hide_grips(state: &State) {
@@ -551,6 +553,11 @@ fn layout_readout(state: &State, rect: Rect) {
         .readout_label
         .set_text(&format!("{} × {}", rect.width, rect.height));
     state.readout.set_visible(true);
+    // Mid-drag it is a number chasing the corner, and a fast drag
+    // overruns it — it must not take the pick (and its hand cursor)
+    // from the surface. It gets its click back when the drag settles
+    // and `layout_grips` makes it the shutter.
+    state.readout.set_can_target(false);
 
     let (_, width, _, _) = state.readout.measure(gtk::Orientation::Horizontal, -1);
     let (_, height, _, _) = state.readout.measure(gtk::Orientation::Vertical, width);
