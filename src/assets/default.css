@@ -538,17 +538,9 @@ dropdown.compact-control > button.combo {
   background: transparent;
 }
 
-/* The compositor draws the border and the shadow around a floating
-   window, so this is only the mat the picture sits on. Two frames
-   around one picture is one frame too many. */
-.pin-frame {
-  background: rgba(28, 28, 30, 0.94);
-  padding: 6px;
-}
-
-.pin-window picture {
-  border-radius: 7px;
-}
+/* Nothing around the picture: the compositor draws the border and the
+   shadow around a floating window, and a mat or a rounded corner of
+   our own would be a second frame inside the first. */
 
 .pin-controls {
   background: rgba(0, 0, 0, 0.55);
