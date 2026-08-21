@@ -145,6 +145,22 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
     // once it has a surface for the compositor to match on.
     let desktop = Desktop::detect();
     if desktop.places_windows() {
+        // Closing a pin leaves a hole in the column, and the survivors
+        // drop down to fill it. The pin that is leaving does the
+        // re-stacking on its way out: placement is title-addressed
+        // compositor IPC, so any process can move any pin, and the
+        // leaving one is the only one that knows a gap just opened.
+        //
+        // On close-request, not destroy: closing this window hides it
+        // and keeps the process (and the editor behind it) alive, so
+        // destroy does not fire until the process winds down — long
+        // after the gap opened.
+        let own_title = pin_title();
+        window.connect_close_request(move |_| {
+            close_column_gaps(desktop, &own_title);
+            gtk::glib::Propagation::Proceed
+        });
+
         let slot = next_slot(desktop);
         window.connect_map(move |_| {
             // Not immediately: `map` is this side's word for "shown",
@@ -163,7 +179,7 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
                         gtk::glib::ControlFlow::Break
                     };
                 }
-                desktop.arrange(slot);
+                desktop.arrange(&pin_title(), slot);
                 gtk::glib::ControlFlow::Break
             });
         });
@@ -324,21 +340,19 @@ impl Desktop {
         self != Desktop::Unknown
     }
 
-    /// Float this pin, show it on every workspace, and put it in
-    /// `slot`.
+    /// Float the pin titled `title`, show it on every workspace, and
+    /// put it in `slot`.
     ///
     /// Floating first in both: a tiled window has no position of its
     /// own to set.
-    fn arrange(self, slot: i32) {
-        let Some((screen_w, screen_h)) = self.screen_size() else {
+    fn arrange(self, title: &str, slot: i32) {
+        let Some(screen) = self.screen_size() else {
             return;
         };
-        let (frame_w, frame_h) = pin_size();
-        let x = screen_w - EDGE_MARGIN - frame_w;
-        let y = screen_h - EDGE_MARGIN - frame_h - slot * pin_step();
+        let (x, y) = slot_origin(screen, slot);
         match self {
             Desktop::Hyprland => {
-                let selector = format!("window = \"title:^({})$\"", pin_title());
+                let selector = format!("window = \"title:^({title})$\"");
                 hypr_dispatch(&format!("hl.dsp.window.float({{ {selector} }})"));
                 hypr_dispatch(&format!("hl.dsp.window.pin({{ {selector} }})"));
                 hypr_dispatch(&format!(
@@ -347,9 +361,28 @@ impl Desktop {
             }
             Desktop::Sway => {
                 sway_command(&format!(
-                    "[title=\"^{}$\"] floating enable, sticky enable, \
-                     move absolute position {x} {y}",
-                    pin_title()
+                    "[title=\"^{title}$\"] floating enable, sticky enable, \
+                     move absolute position {x} {y}"
+                ));
+            }
+            Desktop::Unknown => {}
+        }
+    }
+
+    /// Move the pin titled `title` — not necessarily this process's
+    /// own — to `(x, y)`. It is already floating and pinned from when
+    /// it opened, so only the position needs saying.
+    fn move_pin(self, title: &str, x: i32, y: i32) {
+        match self {
+            Desktop::Hyprland => {
+                let selector = format!("window = \"title:^({title})$\"");
+                hypr_dispatch(&format!(
+                    "hl.dsp.window.move({{ x = {x}, y = {y}, relative = false, {selector} }})"
+                ));
+            }
+            Desktop::Sway => {
+                sway_command(&format!(
+                    "[title=\"^{title}$\"] move absolute position {x} {y}"
                 ));
             }
             Desktop::Unknown => {}
@@ -387,8 +420,9 @@ impl Desktop {
         }
     }
 
-    /// Where every pin currently sits, in logical pixels.
-    fn pin_rects(self) -> Vec<(i32, i32, i32, i32)> {
+    /// Where every pin currently sits, in logical pixels, by title —
+    /// the title is how a move addresses one pin and not the others.
+    fn pin_rects(self) -> Vec<(String, (i32, i32, i32, i32))> {
         match self {
             Desktop::Hyprland => hyprland_pin_rects(),
             Desktop::Sway => sway_pin_rects(),
@@ -435,7 +469,7 @@ fn sway_query(kind: &str) -> Option<String> {
 /// The tree is nested, so this walks it: a floating pin hangs off a
 /// workspace's floating list rather than sitting beside the tiled
 /// windows.
-fn sway_pin_rects() -> Vec<(i32, i32, i32, i32)> {
+fn sway_pin_rects() -> Vec<(String, (i32, i32, i32, i32))> {
     let Some(text) = sway_query("get_tree") else {
         return Vec::new();
     };
@@ -445,17 +479,17 @@ fn sway_pin_rects() -> Vec<(i32, i32, i32, i32)> {
     let mut found = Vec::new();
     let mut pending = vec![tree];
     while let Some(node) = pending.pop() {
-        if node
+        if let Some(name) = node
             .get("name")
             .and_then(|n| n.as_str())
-            .is_some_and(|name| name.starts_with(PIN_TITLE))
+            .filter(|name| name.starts_with(PIN_TITLE))
             && let Some(rect) = node.get("rect")
         {
             let field = |key: &str| rect.get(key)?.as_i64().map(|v| v as i32);
             if let (Some(x), Some(y), Some(w), Some(h)) =
                 (field("x"), field("y"), field("width"), field("height"))
             {
-                found.push((x, y, w, h));
+                found.push((name.to_owned(), (x, y, w, h)));
             }
         }
         for key in ["nodes", "floating_nodes"] {
@@ -534,13 +568,70 @@ fn next_slot(desktop: Desktop) -> i32 {
     let occupied: Vec<i32> = desktop
         .pin_rects()
         .into_iter()
-        .filter_map(|rect| slot_of(rect, screen))
+        .filter_map(|(_, rect)| slot_of(rect, screen))
         .collect();
     first_free_slot(&occupied)
 }
 
+/// Top-left corner of `slot` in the pin column, on a screen of this
+/// size. `slot_of` is its inverse: a pin moved here is recognised as
+/// occupying the slot.
+fn slot_origin(screen: (i32, i32), slot: i32) -> (i32, i32) {
+    let (frame_w, frame_h) = pin_size();
+    (
+        screen.0 - EDGE_MARGIN - frame_w,
+        screen.1 - EDGE_MARGIN - frame_h - slot * pin_step(),
+    )
+}
+
+/// The moves that close the gaps in the pin column: every pin still in
+/// a slot drops to the lowest slots, keeping its order. Pins already
+/// where they belong are skipped — each move is an IPC round trip.
+fn compaction_moves(mut column: Vec<(String, i32)>) -> Vec<(String, i32)> {
+    column.sort_by_key(|entry| entry.1);
+    column
+        .into_iter()
+        .enumerate()
+        .filter(|(index, (_, slot))| *slot != *index as i32)
+        .map(|(index, (title, _))| (title, index as i32))
+        .collect()
+}
+
+/// A pin has closed: re-stack the survivors into the lowest slots so
+/// the column has no holes, in the order they already had.
+///
+/// `own_title` is filtered out rather than trusted to be gone: the
+/// compositor may still list the window whose destruction this call is
+/// reacting to.
+fn close_column_gaps(desktop: Desktop, own_title: &str) {
+    compact_column(desktop, Some(own_title));
+}
+
+/// Re-stack every pin sitting in a slot into the lowest slots, keeping
+/// their order. Pins dragged out of the column have no slot and are
+/// left where they were put; `excluded_title` names one to leave out
+/// even if it still shows in a slot — the pin that is closing.
+fn compact_column(desktop: Desktop, excluded_title: Option<&str>) {
+    let Some(screen) = desktop.screen_size() else {
+        eprintln!("pin: cannot re-stack, screen size unknown");
+        return;
+    };
+    let column: Vec<(String, i32)> = desktop
+        .pin_rects()
+        .into_iter()
+        .filter(|(title, _)| Some(title.as_str()) != excluded_title)
+        .filter_map(|(title, rect)| slot_of(rect, screen).map(|slot| (title, slot)))
+        .collect();
+    eprintln!("pin: re-stacking, {} pin(s) in the column", column.len());
+    for (title, slot) in compaction_moves(column) {
+        let (x, y) = slot_origin(screen, slot);
+        eprintln!("pin: dropping '{title}' into slot {slot}");
+        desktop.move_pin(&title, x, y);
+    }
+}
+
 /// Every pin Hyprland knows about, with its geometry.
-fn hyprland_pin_rects() -> Vec<(i32, i32, i32, i32)> {
+fn hyprland_pin_rects() -> Vec<(String, (i32, i32, i32, i32))> {
     let Ok(output) = std::process::Command::new("hyprctl")
         .args(["-j", "clients"])
         .output()
@@ -557,20 +648,18 @@ fn hyprland_pin_rects() -> Vec<(i32, i32, i32, i32)> {
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|client| {
-            client
+        .filter_map(|client| {
+            let title = client
                 .get("title")
                 .and_then(|t| t.as_str())
-                .is_some_and(|title| title.starts_with(PIN_TITLE))
-        })
-        .filter_map(|client| {
+                .filter(|title| title.starts_with(PIN_TITLE))?;
             let pair = |key: &str| {
                 let v = client.get(key)?.as_array()?;
                 Some((v.first()?.as_i64()? as i32, v.get(1)?.as_i64()? as i32))
             };
             let (x, y) = pair("at")?;
             let (w, h) = pair("size")?;
-            Some((x, y, w, h))
+            Some((title.to_owned(), (x, y, w, h)))
         })
         .collect()
 }
@@ -784,8 +873,8 @@ fn target_origin(gesture: &gtk::GestureClick) -> Option<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DRAG_ICON_MAX, EDGE_MARGIN, cover_thumbnail, first_free_slot, fit_within, pin_size,
-        pin_step, slot_of,
+        DRAG_ICON_MAX, EDGE_MARGIN, compaction_moves, cover_thumbnail, first_free_slot, fit_within,
+        pin_size, pin_step, slot_of, slot_origin,
     };
     use relm4::gtk::gdk_pixbuf::{Colorspace, Pixbuf};
 
@@ -917,5 +1006,131 @@ mod tests {
         assert_eq!(first_free_slot(&[0, 1]), 2);
         assert_eq!(first_free_slot(&[0, 2]), 1);
         assert_eq!(first_free_slot(&[1, 2]), 0);
+    }
+
+    /// Closing a pin drops the survivors down over the hole it left,
+    /// in the order they already had.
+    #[test]
+    fn survivors_drop_to_close_the_gap() {
+        let column = vec![
+            ("bottom".to_owned(), 0),
+            ("middle".to_owned(), 2),
+            ("top".to_owned(), 3),
+        ];
+        assert_eq!(
+            compaction_moves(column),
+            vec![("middle".to_owned(), 1), ("top".to_owned(), 2)]
+        );
+    }
+
+    /// A column with no holes stays put — every move is a compositor
+    /// round trip, and one to where a pin already sits buys nothing.
+    #[test]
+    fn a_compact_column_is_left_alone() {
+        let column = vec![("upper".to_owned(), 1), ("lower".to_owned(), 0)];
+        assert!(compaction_moves(column).is_empty());
+    }
+
+    /// End-to-end against the real compositor: three windows wearing
+    /// pin titles go into slots, the middle one closes, and the top
+    /// one drops down. Run it by hand inside a Hyprland session:
+    /// `cargo test a_closed_pins_survivors_restack -- --ignored --nocapture`
+    /// (it opens and closes three small windows on the current screen).
+    #[test]
+    #[ignore = "drives the live compositor"]
+    fn a_closed_pins_survivors_restack() {
+        use super::{Desktop, close_column_gaps, slot_origin};
+        use relm4::gtk::{self, prelude::*};
+
+        let desktop = Desktop::detect();
+        assert!(desktop.places_windows(), "needs a Hyprland or Sway session");
+        gtk::init().expect("gtk init");
+        let pump = |millis: u64| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(millis);
+            while std::time::Instant::now() < deadline {
+                while gtk::glib::MainContext::default().iteration(false) {}
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+
+        let titles: Vec<String> = (0..3).map(|n| format!("Tensaku Pin 90000{n}")).collect();
+        let (w, h) = pin_size();
+        let windows: Vec<gtk::Window> = titles
+            .iter()
+            .map(|title| {
+                let window = gtk::Window::builder()
+                    .resizable(false)
+                    .decorated(false)
+                    .title(title)
+                    .default_width(w)
+                    .default_height(h)
+                    .build();
+                window.present();
+                window
+            })
+            .collect();
+        pump(400);
+        for (slot, title) in titles.iter().enumerate() {
+            desktop.arrange(title, slot as i32);
+        }
+        pump(400);
+
+        let screen = desktop.screen_size().expect("screen size");
+        let slots_by_title = |wanted: &[&String]| -> Vec<Option<i32>> {
+            let rects = desktop.pin_rects();
+            wanted
+                .iter()
+                .map(|title| {
+                    rects
+                        .iter()
+                        .find(|(t, _)| t == *title)
+                        .and_then(|(_, rect)| slot_of(*rect, screen))
+                })
+                .collect()
+        };
+        assert_eq!(
+            slots_by_title(&titles.iter().collect::<Vec<_>>()),
+            vec![Some(0), Some(1), Some(2)],
+            "placement into slots failed — rects: {:?}, expected origins: {:?}",
+            desktop.pin_rects(),
+            (0..3).map(|s| slot_origin(screen, s)).collect::<Vec<_>>()
+        );
+
+        // The middle pin closes the way a real one does: close-request
+        // runs the re-stack in the closing pin's own process. (Not
+        // destroy — closing only hides the window, and destroy waits
+        // for the process to wind down.)
+        {
+            let own_title = titles[1].clone();
+            windows[1].connect_close_request(move |_| {
+                close_column_gaps(desktop, &own_title);
+                gtk::glib::Propagation::Proceed
+            });
+        }
+        windows[1].close();
+        pump(600);
+
+        let after = slots_by_title(&[&titles[0], &titles[2]]);
+        for window in &windows {
+            window.destroy();
+        }
+        pump(100);
+        assert_eq!(
+            after,
+            vec![Some(0), Some(1)],
+            "survivors did not close the gap"
+        );
+    }
+
+    /// `slot_origin` and `slot_of` agree, so a pin moved down a slot is
+    /// recognised as occupying it by the next capture.
+    #[test]
+    fn a_restacked_pin_lands_in_its_slot() {
+        let screen = (3072, 1728);
+        let (w, h) = pin_size();
+        for slot in 0..3 {
+            let (x, y) = slot_origin(screen, slot);
+            assert_eq!(slot_of((x, y, w, h), screen), Some(slot));
+        }
     }
 }
