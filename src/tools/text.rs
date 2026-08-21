@@ -223,17 +223,16 @@ impl TextBackground {
 /// the text so the look holds at every size.
 const OUTLINE_WIDTH_RATIO: f32 = 0.17;
 
-/// The ink that reads against `color`: white behind dark text, black
-/// behind light. Same luminance rule the counter badge uses to pick
-/// its digit colour.
-/// <https://en.wikipedia.org/wiki/Luma_(video)>
-fn outline_color(color: femtovg::Color) -> femtovg::Color {
-    let luminance = 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b;
-    if luminance > 0.5 {
-        femtovg::Color::rgba(0, 0, 0, 235)
-    } else {
-        femtovg::Color::rgba(255, 255, 255, 235)
-    }
+/// The outline colour: white, whatever the text is.
+///
+/// A luminance rule would flip it to black behind pale text, which is
+/// tidier in theory and wrong in practice — screenshots are mostly
+/// light UI, and a black halo reads as a drop shadow rather than as
+/// the crisp cut-out the style is for. White is also what makes an
+/// annotation in any accent colour hold together over a busy
+/// background.
+fn outline_color() -> femtovg::Color {
+    femtovg::Color::rgba(255, 255, 255, 235)
 }
 
 #[derive(Clone, Debug)]
@@ -934,7 +933,7 @@ impl Drawable for Text {
         // that.
         let outline_paint = if matches!(self.background, TextBackground::Outlined) {
             let mut paint = base_paint.clone();
-            paint.set_color(outline_color(self.style.color.into()));
+            paint.set_color(outline_color());
             let font_size = self
                 .style
                 .size
