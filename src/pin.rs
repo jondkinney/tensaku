@@ -41,6 +41,14 @@ const PIN_SIDE: i32 = 168;
 /// sitting on it.
 const PIN_PADDING: i32 = 6;
 
+/// The move handle's tooltip, named because the drag hides it and has
+/// to put it back.
+const MOVE_TOOLTIP: &str = "Move this pin";
+
+/// The preview's tooltip, hidden while a drag-out is in flight for the
+/// same reason.
+const PICTURE_TOOLTIP: &str = "Click to open in the editor · Drag into another app to paste it";
+
 /// Gap between stacked pins.
 const PIN_GAP: i32 = 12;
 
@@ -170,9 +178,7 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
 
     // The picture is the shot: clicking it opens the shot, dragging it
     // carries the shot somewhere.
-    picture.set_tooltip_text(Some(
-        "Click to open in the editor · Drag into another app to paste it",
-    ));
+    picture.set_tooltip_text(Some(PICTURE_TOOLTIP));
     picture.set_cursor_from_name(Some("pointer"));
     install_drag_out(&picture, image, saved_path_for_drag);
     {
@@ -364,7 +370,7 @@ fn build_controls(window: &gtk::Window, bottom_margin: i32, actions: PinActions)
     // face trails the pointer instead of following it — and the
     // picture has better things to answer for: a click opens the shot,
     // a drag carries it into another app.
-    let move_handle = button("re-order-dots-horizontal-regular", "Move this pin");
+    let move_handle = button("re-order-dots-horizontal-regular", MOVE_TOOLTIP);
     move_handle.add_css_class("pin-drag-handle");
     install_move(window, &move_handle, bottom_margin);
     controls.append(&move_handle);
@@ -427,6 +433,17 @@ fn install_drag_out(handle: &gtk::Picture, image: &Pixbuf, saved_path: Option<St
             source.set_icon(Some(&icon), icon_w / 2, icon_h / 2);
         });
     }
+    {
+        // Same tooltip problem as the move handle: a drag-out leaves
+        // the pointer over a picture that is now carrying something,
+        // and the tooltip follows it around.
+        let handle_begin = handle.clone();
+        source.connect_drag_begin(move |_, _| handle_begin.set_has_tooltip(false));
+        let handle_end = handle.clone();
+        source.connect_drag_end(move |_, _, _| {
+            handle_end.set_tooltip_text(Some(PICTURE_TOOLTIP));
+        });
+    }
     handle.add_controller(source);
 }
 
@@ -463,39 +480,48 @@ fn fit_within(width: i32, height: i32, max: i32) -> (i32, i32) {
 /// right margin. The margins are held here rather than read back
 /// because `LayerShell` exposes no getter for them.
 fn install_move(window: &gtk::Window, target: &gtk::Button, bottom_margin: i32) {
-    // Gesture deltas arrive in logical pixels; layer-shell margins are
-    // applied in device ones. On a 2x display that made the pin travel
-    // half as far as the pointer, which reads as the window lagging
-    // rather than as a unit mismatch.
-    let scale = crate::display::hyprland_focused_monitor()
-        .map(|m| m.scale as f64)
-        .unwrap_or(1.0)
-        .max(0.0001);
     let right = Rc::new(Cell::new(EDGE_MARGIN));
     let bottom = Rc::new(Cell::new(bottom_margin));
-    let start = Rc::new(Cell::new((EDGE_MARGIN, bottom_margin)));
 
     let drag = gtk::GestureDrag::new();
     {
-        let right = right.clone();
-        let bottom = bottom.clone();
-        let start = start.clone();
-        drag.connect_drag_begin(move |_, _, _| start.set((right.get(), bottom.get())));
-    }
-    {
+        // A moving window can't be dragged from a fixed reference.
+        // The gesture measures its delta inside this window's own
+        // coordinates, so every step the window takes is subtracted
+        // from the next reading: applied against the position the drag
+        // started from, the window catches up, the delta falls back to
+        // zero, and it springs to where it began — which is the lag,
+        // and the shake.
+        //
+        // Applying each reading to the CURRENT position instead is
+        // self-correcting: moving the window zeroes the delta, so the
+        // next reading is exactly the new pointer motion and nothing
+        // else.
         let window = window.clone();
         let right = right.clone();
         let bottom = bottom.clone();
         drag.connect_drag_update(move |_, dx, dy| {
-            let (start_right, start_bottom) = start.get();
             // Clamped at zero so a drag can't push the pin off the
-            // screen edge it is anchored to and out of reach.
-            let new_right = (start_right - (dx * scale).round() as i32).max(0);
-            let new_bottom = (start_bottom - (dy * scale).round() as i32).max(0);
+            // edge it is anchored to and out of reach.
+            let new_right = (right.get() - dx.round() as i32).max(0);
+            let new_bottom = (bottom.get() - dy.round() as i32).max(0);
             right.set(new_right);
             bottom.set(new_bottom);
             window.set_margin(Edge::Right, new_right);
             window.set_margin(Edge::Bottom, new_bottom);
+        });
+    }
+    {
+        // The window slides out from under the pointer while dragging,
+        // which GTK reads as a fresh hover on every step: the tooltip
+        // pops back and jitters along beside the pin.
+        let target_begin = target.clone();
+        drag.connect_drag_begin(move |_, _, _| target_begin.set_has_tooltip(false));
+    }
+    {
+        let target_end = target.clone();
+        drag.connect_drag_end(move |_, _, _| {
+            target_end.set_tooltip_text(Some(MOVE_TOOLTIP));
         });
     }
     target.add_controller(drag);
