@@ -28,6 +28,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::capture::Rect;
+use crate::scroll_capture::{ResizeHandle, Selection, hit_test_handle};
 use crate::windows::{WindowTarget, visible_windows, window_at};
 
 /// Gap between the hint pill and the bottom of the screen. Matches the
@@ -120,6 +121,11 @@ struct State {
     /// The rectangle being dragged, or the last one dragged.
     selection: Option<Rect>,
     dragging: bool,
+    /// The handle a drag grabbed, when it started on the edge of an
+    /// existing selection — a restored region is meant to be adjusted,
+    /// not replaced by whatever you drag next.
+    resize_handle: Option<ResizeHandle>,
+    resize_anchor: Selection,
     windows: Vec<WindowTarget>,
     /// The window under the pointer while in window mode.
     hovered: Option<WindowTarget>,
@@ -195,6 +201,8 @@ fn build_overlay(
         origin: (0.0, 0.0),
         selection: None,
         dragging: false,
+        resize_handle: None,
+        resize_anchor: Selection::default(),
         windows: visible_windows(),
         hovered: None,
     }));
@@ -340,7 +348,14 @@ fn layout_shade(state: &State) {
     state.outline.set_size_request(w as i32, h as i32);
     state.fixed.move_(&state.outline, x, y);
     state.outline.set_visible(w >= 1.0 && h >= 1.0);
-    layout_readout(state, rect);
+    // Only while a drag is in flight: a restored region is a framing,
+    // not a measurement, and the pill would sit over the picture
+    // announcing a number nobody asked for.
+    if state.dragging {
+        layout_readout(state, rect);
+    } else {
+        state.readout.set_visible(false);
+    }
     // Once there is a rectangle, it is the thing being aimed — the
     // guides would just be two more lines over it.
     layout_crosshair(state, false);
@@ -482,7 +497,16 @@ fn install_pointer(
             let mut state = state.borrow_mut();
             state.origin = (x, y);
             state.dragging = true;
-            state.selection = None;
+            // Starting on the edge of the current selection adjusts
+            // it; starting anywhere else replaces it.
+            state.resize_handle = state
+                .selection
+                .map(selection_of)
+                .and_then(|sel| hit_test_handle(sel, x, y));
+            match state.resize_handle {
+                Some(_) => state.resize_anchor = state.selection.map(selection_of).unwrap_or_default(),
+                None => state.selection = None,
+            }
         });
     }
     {
@@ -493,7 +517,16 @@ fn install_pointer(
                 return;
             }
             let origin = state.origin;
-            state.selection = Some(rect_between(origin, (origin.0 + dx, origin.1 + dy)));
+            state.pointer = (origin.0 + dx, origin.1 + dy);
+            state.selection = Some(match state.resize_handle {
+                Some(handle) => rect_of(handle.apply(
+                    state.resize_anchor,
+                    origin,
+                    origin.0 + dx,
+                    origin.1 + dy,
+                )),
+                None => rect_between(origin, (origin.0 + dx, origin.1 + dy)),
+            });
             layout_shade(&state);
         });
     }
@@ -505,6 +538,14 @@ fn install_pointer(
             let choice = {
                 let mut state = state.borrow_mut();
                 state.dragging = false;
+                let resized = state.resize_handle.take().is_some();
+                // A resize adjusts the rectangle; it doesn't commit it.
+                // Otherwise nudging a restored region by a pixel would
+                // fire the capture before it was right.
+                if resized {
+                    layout_shade(&state);
+                    return;
+                }
                 match state.mode {
                     // A click in window mode takes what it points at.
                     Mode::Window => committed_region(&state),
@@ -579,6 +620,7 @@ fn install_keys(
                 state.pointer = (x + w, y + h);
                 hint.set_text(state.mode.hint());
                 layout_shade(&state);
+                apply_cursor(&cursor_target, Mode::Area);
                 gtk::glib::Propagation::Stop
             }
             gdk::Key::space => {
@@ -633,6 +675,27 @@ pub fn readout_position(
         x.clamp(0.0, (screen.0 - readout.0).max(0.0)),
         y.clamp(0.0, (screen.1 - readout.1).max(0.0)),
     )
+}
+
+/// The scroll overlay's `Selection` for a `Rect`, and back. The two
+/// overlays measure the same thing in the same units; only the type
+/// differs, and the resize maths lives on `Selection`.
+fn selection_of(rect: Rect) -> Selection {
+    Selection {
+        x: rect.x as f64,
+        y: rect.y as f64,
+        w: rect.width as f64,
+        h: rect.height as f64,
+    }
+}
+
+fn rect_of(sel: Selection) -> Rect {
+    Rect {
+        x: sel.x.round() as i32,
+        y: sel.y.round() as i32,
+        width: sel.w.round() as i32,
+        height: sel.h.round() as i32,
+    }
 }
 
 /// Normalise two corners into a rectangle, whichever way it was dragged.
