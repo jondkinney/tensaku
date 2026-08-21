@@ -30,6 +30,10 @@ use std::rc::Rc;
 use crate::capture::Rect;
 use crate::windows::{WindowTarget, visible_windows, window_at};
 
+/// Gap between the hint pill and the bottom of the screen. Matches the
+/// scrolling capture's prompt, which sits at the same height.
+const HINT_MARGIN_BOTTOM: i32 = 48;
+
 /// Ignore drags this small: a click that wobbles by a pixel is a click,
 /// and capturing a 3×2 region helps nobody.
 const MIN_DRAG: f64 = 8.0;
@@ -250,8 +254,12 @@ fn build_overlay(
     // instructions are the only thing to read before a drag starts, so
     // they belong where the eye already is rather than in a corner it
     // has to find.
+    // Along the bottom: the instructions are read once and then they
+    // are in the way, and the middle of the screen is exactly where
+    // the aiming happens.
     hint_pill.set_halign(gtk::Align::Center);
-    hint_pill.set_valign(gtk::Align::Center);
+    hint_pill.set_valign(gtk::Align::End);
+    hint_pill.set_margin_bottom(HINT_MARGIN_BOTTOM);
     overlay.add_overlay(&hint_pill);
     window.set_child(Some(&overlay));
 

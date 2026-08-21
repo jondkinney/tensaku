@@ -22,6 +22,10 @@ mod stitch;
 /// same tool asking the same question, and a difference in weight
 /// reads as a difference in kind.
 const BACKDROP_ALPHA: f64 = 0.45;
+
+/// Gap between the prompt pill and the bottom of the screen. Matches
+/// the area capture's hint, which sits at the same height.
+const PROMPT_MARGIN_BOTTOM: f64 = 48.0;
 const BRACKET_LEN: f64 = 22.0;
 const BRACKET_WIDTH: f64 = 3.0;
 const PILL_GAP: f64 = 18.0;
@@ -1222,7 +1226,10 @@ fn build_overlay(
         drawing.connect_resize(move |_, w, h| {
             let (pw, ph) = pill_natural_size(&prompt_w);
             let x = ((w as f64 - pw) / 2.0).max(0.0);
-            let y = ((h as f64 - ph) / 2.0).max(0.0);
+            // Along the bottom rather than centred: the instructions
+            // are read once, and the middle of the screen is where the
+            // region being chosen actually is.
+            let y = (h as f64 - ph - PROMPT_MARGIN_BOTTOM).max(0.0);
             prompt_w.set_margin_start(x as i32);
             prompt_w.set_margin_top(y as i32);
         });
