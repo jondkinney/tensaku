@@ -5575,8 +5575,12 @@ impl Component for SketchBoard {
                 ToolUpdateResult::Unmodified
             }
             SketchBoardInput::CommitEvent(txt) => {
-                self.handle_text_commit(txt, sender);
-                ToolUpdateResult::Unmodified
+                // Propagate the result: single-letter keys mostly act
+                // by sending further inputs and return `Unmodified`,
+                // but `r` / `e` on a selected shape return the edit
+                // itself, and dropping it here would compute the fill
+                // toggle and throw it away.
+                self.handle_text_commit(txt, sender)
             }
             SketchBoardInput::Refresh => ToolUpdateResult::Redraw,
             SketchBoardInput::Exit => {
