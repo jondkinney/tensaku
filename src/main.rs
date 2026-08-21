@@ -2284,13 +2284,18 @@ fn start_gui(image: Pixbuf) -> Result<()> {
 /// capture free: at the moment of the switch, nothing has been
 /// captured yet.
 fn run_region_capture() -> Result<()> {
-    let monitor = crate::display::hyprland_focused_monitor();
-    let output = monitor.as_ref().map(|m| m.name.clone());
-    let image = match region_capture::run()? {
+    let output = crate::display::hyprland_focused_monitor().map(|m| m.name);
+    // Take the picture BEFORE the overlay exists. Capturing afterwards
+    // means racing the compositor to unmap a layer surface, and losing
+    // that race puts the selection UI in the screenshot.
+    let frozen = capture::capture_output(output.as_deref())?;
+    let image = match region_capture::run(frozen.clone())? {
         region_capture::RegionOutcome::Cancelled => return Ok(()),
-        region_capture::RegionOutcome::Fullscreen => capture::capture_output(output.as_deref())?,
+        region_capture::RegionOutcome::Fullscreen => frozen,
         region_capture::RegionOutcome::Region(rect) => {
-            capture::capture_region(rect, output.as_deref())?
+            // Already in the capture's own pixels, so this is a crop
+            // rather than a second trip to the compositor.
+            frozen.new_subpixbuf(rect.x, rect.y, rect.width, rect.height)
         }
         region_capture::RegionOutcome::Scroll => {
             let park_pointer = APP_CONFIG

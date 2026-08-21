@@ -10,12 +10,19 @@
 //! scrolling capture", because by the time it has answered, the
 //! decision is already made.
 //!
-//! Nothing is captured here. The overlay returns a choice and the
-//! caller takes the picture — which is what lets S hand over cleanly,
-//! and what keeps the overlay itself out of every shot.
+//! The picture is taken BEFORE the overlay appears, and the overlay
+//! selects on that frozen image. Capturing afterwards means racing the
+//! compositor to unmap a layer surface, and losing that race bakes
+//! this overlay's own hint line into the screenshot. Capturing first
+//! makes it impossible: the shot predates the overlay.
+//!
+//! It also gives the frozen-screen feel every capture tool has —
+//! what you selected is what you saw, even if a video kept playing
+//! underneath.
 
 use anyhow::{Result, anyhow};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+use relm4::gtk::gdk_pixbuf::Pixbuf;
 use relm4::gtk::{self, gdk, prelude::*};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -27,18 +34,17 @@ use crate::windows::{WindowTarget, visible_windows, window_at};
 /// and capturing a 3×2 region helps nobody.
 const MIN_DRAG: f64 = 8.0;
 
-/// Settle time after the overlay's surface goes away, before the
-/// caller takes the picture. Matches the scroll-capture overlay's
-/// figure — about two frames at 60 Hz, which is what it takes for the
-/// compositor to have composited a screen without us in it.
-const OVERLAY_GONE_SETTLE_MS: u64 = 34;
 
 /// What the user chose.
+///
+/// Rectangles are in the captured image's own pixels, not the
+/// overlay's logical ones — the overlay knows both and the caller
+/// would have to go looking for the monitor's scale to convert.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RegionOutcome {
-    /// Capture this rectangle of the focused output.
+    /// Crop the capture to this rectangle.
     Region(Rect),
-    /// Capture the whole focused output.
+    /// Keep the whole capture.
     Fullscreen,
     /// Start over in scrolling capture.
     Scroll,
@@ -73,6 +79,13 @@ impl Mode {
 }
 
 struct State {
+    /// The screen as it was when the overlay went up.
+    frozen: Pixbuf,
+    /// Image pixels per logical pixel, learned at draw time — the
+    /// overlay is laid out in logical units and the capture is in
+    /// device ones, and on a 2x display those differ by exactly the
+    /// factor that would otherwise halve every selection.
+    image_scale: f64,
     mode: Mode,
     /// Where the current drag started, in overlay coordinates.
     origin: (f64, f64),
@@ -84,43 +97,8 @@ struct State {
     hovered: Option<WindowTarget>,
 }
 
-/// Take the overlay down and let the screen settle without it.
-///
-/// A layer surface doesn't vanish the instant the window closes: the
-/// compositor has to process the unmap and composite a frame without
-/// it. Capturing before that bakes this overlay's own hint line into
-/// the screenshot — which is exactly what a capture tool must never
-/// do.
-///
-/// Two frame ticks then a short settle, the same barrier the
-/// scroll-capture overlay uses before it arms screencopy. The ticks
-/// prove a frame was submitted and completed; the settle covers the
-/// compositor's own repaint.
-fn dismiss(window: &gtk::ApplicationWindow) {
-    window.set_visible(false);
-    let saw_first_tick = Rc::new(std::cell::Cell::new(false));
-    let window_for_close = window.clone();
-    window.add_tick_callback(move |_, _| {
-        if !saw_first_tick.replace(true) {
-            return gtk::glib::ControlFlow::Continue;
-        }
-        let window_for_close = window_for_close.clone();
-        gtk::glib::timeout_add_local_once(
-            std::time::Duration::from_millis(OVERLAY_GONE_SETTLE_MS),
-            move || {
-                // Round-trip the Wayland connection so the unmap is
-                // processed before the caller's screencopy asks for a
-                // frame over its own connection.
-                gtk::prelude::WidgetExt::display(&window_for_close).sync();
-                window_for_close.close();
-            },
-        );
-        gtk::glib::ControlFlow::Break
-    });
-}
-
-/// Show the overlay and wait for a choice.
-pub fn run() -> Result<RegionOutcome> {
+/// Show the overlay over `frozen` and wait for a choice.
+pub fn run(frozen: Pixbuf) -> Result<RegionOutcome> {
     let shared: Rc<RefCell<RegionOutcome>> = Rc::new(RefCell::new(RegionOutcome::Cancelled));
 
     let app = gtk::Application::builder()
@@ -130,7 +108,7 @@ pub fn run() -> Result<RegionOutcome> {
 
     {
         let shared = Rc::clone(&shared);
-        app.connect_activate(move |app| build_overlay(app, &shared));
+        app.connect_activate(move |app| build_overlay(app, &shared, frozen.clone()));
     }
 
     let exit_code = app.run_with_args::<&str>(&[]);
@@ -140,12 +118,18 @@ pub fn run() -> Result<RegionOutcome> {
     Ok(shared.borrow().clone())
 }
 
-fn build_overlay(app: &gtk::Application, shared: &Rc<RefCell<RegionOutcome>>) {
+fn build_overlay(
+    app: &gtk::Application,
+    shared: &Rc<RefCell<RegionOutcome>>,
+    frozen: Pixbuf,
+) {
     // Windows are read once, at the moment the overlay goes up. The
     // screen is frozen behind it from the user's point of view, so a
     // list that shifted underneath would snap to something that is no
     // longer where it was drawn.
     let state = Rc::new(RefCell::new(State {
+        frozen,
+        image_scale: 1.0,
         mode: Mode::Area,
         origin: (0.0, 0.0),
         selection: None,
@@ -200,7 +184,26 @@ fn build_overlay(app: &gtk::Application, shared: &Rc<RefCell<RegionOutcome>>) {
 fn install_draw(drawing: &gtk::DrawingArea, state: &Rc<RefCell<State>>) {
     let state = Rc::clone(state);
     drawing.set_draw_func(move |_, ctx, width, height| {
-        let state = state.borrow();
+        let mut state = state.borrow_mut();
+        if width < 1 || height < 1 {
+            return;
+        }
+        // The capture is in device pixels and the overlay is laid out
+        // in logical ones. Learn the ratio here, where both are known,
+        // and record it for the selection to convert with.
+        let scale = state.frozen.width() as f64 / width as f64;
+        state.image_scale = scale;
+
+        // The frozen screen, then a sheet over it. Painting the
+        // capture rather than leaving the surface transparent is what
+        // makes the selection show what was there when you pressed the
+        // key, rather than whatever moved since.
+        ctx.save().ok();
+        ctx.scale(1.0 / scale, 1.0 / scale);
+        ctx.set_source_pixbuf(&state.frozen, 0.0, 0.0);
+        let _ = ctx.paint();
+        ctx.restore().ok();
+
         ctx.set_source_rgba(0.0, 0.0, 0.0, 0.45);
         let _ = ctx.paint();
 
@@ -213,16 +216,17 @@ fn install_draw(drawing: &gtk::DrawingArea, state: &Rc<RefCell<State>>) {
             rect.width as f64,
             rect.height as f64,
         );
-        if w < 1.0 || h < 1.0 || width < 1 || height < 1 {
+        if w < 1.0 || h < 1.0 {
             return;
         }
-        // Clear rather than fill: what shows through is the desktop
-        // itself, so the selection previews the actual capture instead
-        // of a lightened impression of it.
+        // Repaint the capture inside the selection, undimmed, so the
+        // rectangle previews exactly the pixels it will keep.
         ctx.save().ok();
-        ctx.set_operator(gtk::cairo::Operator::Clear);
         ctx.rectangle(x, y, w, h);
-        let _ = ctx.fill();
+        ctx.clip();
+        ctx.scale(1.0 / scale, 1.0 / scale);
+        ctx.set_source_pixbuf(&state.frozen, 0.0, 0.0);
+        let _ = ctx.paint();
         ctx.restore().ok();
 
         ctx.set_source_rgba(1.0, 1.0, 1.0, 0.9);
@@ -243,6 +247,28 @@ fn pending_rect(state: &State) -> Option<Rect> {
             height: w.height as i32,
         }),
     }
+}
+
+/// Convert a logical-pixel rectangle into the captured image's own
+/// pixels, clamped to the image so a drag off the edge still crops.
+fn to_image_rect(rect: Rect, scale: f64, frozen: &Pixbuf) -> Rect {
+    let x = ((rect.x as f64 * scale).round() as i32).clamp(0, frozen.width());
+    let y = ((rect.y as f64 * scale).round() as i32).clamp(0, frozen.height());
+    let width = ((rect.width as f64 * scale).round() as i32).clamp(0, frozen.width() - x);
+    let height = ((rect.height as f64 * scale).round() as i32).clamp(0, frozen.height() - y);
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+/// The choice a commit would make right now, in image pixels.
+fn committed_region(state: &State) -> Option<RegionOutcome> {
+    let rect = pending_rect(state)?;
+    let rect = to_image_rect(rect, state.image_scale, &state.frozen);
+    (rect.width > 0 && rect.height > 0).then_some(RegionOutcome::Region(rect))
 }
 
 fn install_pointer(
@@ -305,25 +331,18 @@ fn install_pointer(
                 state.dragging = false;
                 match state.mode {
                     // A click in window mode takes what it points at.
-                    Mode::Window => state.hovered.as_ref().map(|w| {
-                        RegionOutcome::Region(Rect {
-                            x: w.x as i32,
-                            y: w.y as i32,
-                            width: w.width as i32,
-                            height: w.height as i32,
-                        })
-                    }),
+                    Mode::Window => committed_region(&state),
                     // A drag too small to be deliberate isn't a region.
                     Mode::Area if dx.abs() < MIN_DRAG && dy.abs() < MIN_DRAG => {
                         state.selection = None;
                         None
                     }
-                    Mode::Area => state.selection.map(RegionOutcome::Region),
+                    Mode::Area => committed_region(&state),
                 }
             };
             if let Some(choice) = choice {
                 *shared.borrow_mut() = choice;
-                dismiss(&window);
+                window.close();
             }
         });
     }
@@ -346,7 +365,7 @@ fn install_keys(
     keys.connect_key_pressed(move |_, key, _, _| {
         let finish = |outcome: RegionOutcome| {
             *shared.borrow_mut() = outcome;
-            dismiss(&window_for_keys);
+            window_for_keys.close();
             gtk::glib::Propagation::Stop
         };
         match key {
@@ -356,7 +375,7 @@ fn install_keys(
             // this a mode switch rather than a retake.
             gdk::Key::s | gdk::Key::S => finish(RegionOutcome::Scroll),
             gdk::Key::Return | gdk::Key::KP_Enter => {
-                let choice = pending_rect(&state.borrow()).map(RegionOutcome::Region);
+                let choice = committed_region(&state.borrow());
                 match choice {
                     Some(choice) => finish(choice),
                     None => gtk::glib::Propagation::Stop,
@@ -439,7 +458,8 @@ fn install_css(app: &gtk::Application) {
 
 #[cfg(test)]
 mod tests {
-    use super::{MIN_DRAG, Mode, rect_between};
+    use super::{MIN_DRAG, Mode, Rect, rect_between, to_image_rect};
+    use relm4::gtk::gdk_pixbuf::{Colorspace, Pixbuf};
 
     /// Dragging up-left has to produce the same rectangle as dragging
     /// down-right across the same two points.
@@ -467,6 +487,45 @@ mod tests {
 
     /// A drag under the threshold isn't a region — the same rounding
     /// the drag-end uses, so a click that wobbles stays a click.
+    /// A 2x display hands back a capture twice the overlay's logical
+    /// size, and a selection that ignored that would crop a quarter of
+    /// what was outlined.
+    #[test]
+    fn a_selection_converts_into_the_captures_own_pixels() {
+        let frozen = Pixbuf::new(Colorspace::Rgb, true, 8, 6144, 3456).unwrap();
+        let rect = to_image_rect(
+            Rect {
+                x: 100,
+                y: 50,
+                width: 400,
+                height: 200,
+            },
+            2.0,
+            &frozen,
+        );
+        assert_eq!((rect.x, rect.y), (200, 100));
+        assert_eq!((rect.width, rect.height), (800, 400));
+    }
+
+    /// A drag that runs off the edge crops to the edge rather than
+    /// asking for pixels the capture doesn't have.
+    #[test]
+    fn a_selection_past_the_edge_is_clamped() {
+        let frozen = Pixbuf::new(Colorspace::Rgb, true, 8, 1000, 800).unwrap();
+        let rect = to_image_rect(
+            Rect {
+                x: 900,
+                y: 700,
+                width: 400,
+                height: 400,
+            },
+            1.0,
+            &frozen,
+        );
+        assert_eq!(rect.x + rect.width, 1000);
+        assert_eq!(rect.y + rect.height, 800);
+    }
+
     #[test]
     fn a_click_is_not_a_tiny_region() {
         let wobble = rect_between((100.0, 100.0), (100.0 + MIN_DRAG - 1.0, 102.0));
