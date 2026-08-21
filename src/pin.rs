@@ -21,16 +21,20 @@
 
 use crate::ui::toolbars::RobustTooltipExt;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+use relm4::gtk::gdk_pixbuf::InterpType;
 use relm4::gtk::{self, gdk_pixbuf::Pixbuf, prelude::*};
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
-/// Width of a pinned capture, in CSS pixels. Height follows the
-/// image's aspect. Big enough to tell one shot from another, small
-/// enough to leave the desktop usable — a pin is a reminder of what
-/// you took, not a window to work in.
-const PIN_WIDTH: i32 = 186;
+/// Side of a pinned capture, in CSS pixels.
+///
+/// Square whatever the shot's shape: pins stack, and a column of
+/// mismatched heights is one that has to be laid out rather than
+/// counted. The image fills the square and centre-crops, so a wide
+/// capture shows its middle instead of becoming a letterboxed sliver
+/// too small to recognise.
+const PIN_SIDE: i32 = 168;
 
 /// Frame around the preview: the pin needs an edge of its own or it
 /// reads as a picture lying loose on the desktop rather than a thing
@@ -106,8 +110,9 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
     // Stack above whatever is already pinned instead of landing on
     // top of it. Each capture is its own process, so the count comes
     // from the compositor rather than from a shared list.
-    let (width, height) = scaled_size(image.width(), image.height());
-    let bottom = EDGE_MARGIN + stacked_pins() * (height + PIN_PADDING * 2 + PIN_GAP);
+    // Every pin is the same square, so each new one sits exactly one
+    // step above the last rather than needing anyone's height.
+    let bottom = EDGE_MARGIN + stacked_pins() * (PIN_SIDE + PIN_PADDING * 2 + PIN_GAP);
     window.set_margin(Edge::Right, EDGE_MARGIN);
     window.set_margin(Edge::Bottom, bottom);
     // OnDemand rather than Exclusive: the pin should never swallow the
@@ -115,19 +120,16 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
     // has to reach it once it is clicked.
     window.set_keyboard_mode(KeyboardMode::OnDemand);
 
-    window.set_default_size(width + PIN_PADDING * 2, height + PIN_PADDING * 2);
+    window.set_default_size(PIN_SIDE + PIN_PADDING * 2, PIN_SIDE + PIN_PADDING * 2);
 
-    // Scale the pixels down rather than asking the widget to shrink
+    // Scale the pixels here rather than asking the widget to shrink
     // them. A `Picture`'s natural size is its image's, so a 6K capture
     // asked for a 6K surface and the compositor clamped it — which is
     // why a pin showed a corner at full size instead of the shot.
-    let preview = image
-        .scale_simple(width, height, gtk::gdk_pixbuf::InterpType::Bilinear)
-        .unwrap_or_else(|| image.clone());
+    let preview = cover_thumbnail(image, PIN_SIDE);
     let picture = gtk::Picture::for_pixbuf(&preview);
     picture.set_can_shrink(true);
-    picture.set_keep_aspect_ratio(true);
-    picture.set_size_request(width, height);
+    picture.set_size_request(PIN_SIDE, PIN_SIDE);
 
     let frame = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     frame.add_css_class("pin-frame");
@@ -136,7 +138,16 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(&frame));
 
-    let controls = build_controls(&window, image, actions);
+    // The picture and the Edit button do the same thing, so they share
+    // one callback rather than each getting a copy of the intent.
+    let saved_path_for_drag = actions.saved_path.clone();
+    let edit_for_picture = std::rc::Rc::new(actions.on_edit);
+    let edit_for_controls = edit_for_picture.clone();
+    let actions = PinActions {
+        on_edit: Box::new(move || edit_for_controls()),
+        ..actions
+    };
+    let controls = build_controls(&window, actions);
     overlay.add_overlay(&controls);
 
     let (toast_label, toast) = build_toast();
@@ -156,7 +167,20 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
     }
     overlay.add_controller(motion);
 
-    install_drag(&window, &overlay);
+    // The picture is the shot: clicking it opens the shot, dragging it
+    // carries the shot somewhere.
+    install_drag_out(&picture, image, saved_path_for_drag);
+    {
+        let edit = edit_for_picture;
+        let click = gtk::GestureClick::new();
+        click.connect_released(move |gesture, count, _, _| {
+            if count == 1 {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                edit();
+            }
+        });
+        picture.add_controller(click);
+    }
 
     window.set_child(Some(&overlay));
     window.present();
@@ -216,21 +240,29 @@ fn stacked_pins() -> i32 {
     text.matches(PIN_NAMESPACE).count() as i32
 }
 
-/// Fit `PIN_WIDTH` while keeping the capture's aspect, and never let a
-/// very tall shot (a scroll capture) grow past a screenful.
-fn scaled_size(image_width: i32, image_height: i32) -> (i32, i32) {
-    let width = PIN_WIDTH.min(image_width.max(1));
-    let height = (width as f64 * image_height.max(1) as f64 / image_width.max(1) as f64)
-        .round()
-        .max(1.0) as i32;
-    // A long stitch pinned at its full aspect would run off the screen;
-    // cap it and let the picture letterbox instead.
-    let capped = height.min(PIN_WIDTH * 3);
-    (width, capped)
+/// A square thumbnail of `image` that fills `side` and centre-crops,
+/// the way CSS `object-fit: cover` does.
+///
+/// Fitting inside the square would letterbox a wide capture down to a
+/// sliver, and a pin you can't recognise is one you have to open to
+/// identify.
+fn cover_thumbnail(image: &Pixbuf, side: i32) -> Pixbuf {
+    let (w, h) = (image.width().max(1), image.height().max(1));
+    let scale = (side as f64 / w as f64).max(side as f64 / h as f64);
+    let scaled_w = ((w as f64 * scale).round() as i32).max(side);
+    let scaled_h = ((h as f64 * scale).round() as i32).max(side);
+    let Some(scaled) = image.scale_simple(scaled_w, scaled_h, InterpType::Bilinear) else {
+        return image.clone();
+    };
+    // Take the middle: a capture's edges are where its chrome is, and
+    // its middle is what it was taken of.
+    let x = ((scaled_w - side) / 2).max(0);
+    let y = ((scaled_h - side) / 2).max(0);
+    scaled.new_subpixbuf(x, y, side.min(scaled_w), side.min(scaled_h))
 }
 
 /// The hover toolbar: edit, copy, copy path, close.
-fn build_controls(window: &gtk::Window, image: &Pixbuf, actions: PinActions) -> gtk::Box {
+fn build_controls(window: &gtk::Window, actions: PinActions) -> gtk::Box {
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     controls.add_css_class("pin-controls");
     controls.set_halign(gtk::Align::End);
@@ -255,20 +287,18 @@ fn build_controls(window: &gtk::Window, image: &Pixbuf, actions: PinActions) -> 
         on_copy,
         on_copy_path,
         path_known,
-        saved_path,
+        saved_path: _,
     } = actions;
 
-    // Drag-out handle. It needs a control of its own because the image
-    // itself already drags — that moves the pin — and one gesture
-    // can't mean both "take this file somewhere" and "put this window
-    // somewhere".
-    let drag_out = button(
-        "re-order-dots-horizontal-regular",
-        "Drag out to another app",
-    );
-    drag_out.add_css_class("pin-drag-handle");
-    install_drag_out(&drag_out, image, saved_path);
-    controls.append(&drag_out);
+    // Moving the pin lives here rather than on the picture. A layer
+    // surface moves by its margins, so a window dragged by its whole
+    // face trails the pointer instead of following it — and the
+    // picture has better things to answer for: a click opens the shot,
+    // a drag carries it into another app.
+    let move_handle = button("re-order-dots-horizontal-regular", "Move this pin");
+    move_handle.add_css_class("pin-drag-handle");
+    install_move(window, &move_handle);
+    controls.append(&move_handle);
 
     let edit = button("pen-regular", "Edit again");
     edit.connect_clicked(move |_| on_edit());
@@ -303,7 +333,7 @@ fn build_controls(window: &gtk::Window, image: &Pixbuf, actions: PinActions) -> 
 /// or an upload field wants, and the image itself, which is what a
 /// chat window or an editor takes. An unsaved pin has no file to
 /// offer, so it drags the image alone rather than a path to nothing.
-fn install_drag_out(handle: &gtk::Button, image: &Pixbuf, saved_path: Option<String>) {
+fn install_drag_out(handle: &gtk::Picture, image: &Pixbuf, saved_path: Option<String>) {
     let texture = gtk::gdk::Texture::for_pixbuf(image);
     let source = gtk::DragSource::new();
     source.set_actions(gtk::gdk::DragAction::COPY);
@@ -356,14 +386,14 @@ fn fit_within(width: i32, height: i32, max: i32) -> (i32, i32) {
     )
 }
 
-/// Drag the pin around by its image.
+/// Drag the pin around by its handle.
 ///
 /// A layer surface is positioned by its anchor margins, not by the
 /// compositor, so a drag has to move those margins itself — and both
 /// anchors are on the far edges, so a rightward drag *shrinks* the
 /// right margin. The margins are held here rather than read back
 /// because `LayerShell` exposes no getter for them.
-fn install_drag(window: &gtk::Window, target: &gtk::Overlay) {
+fn install_move(window: &gtk::Window, target: &gtk::Button) {
     let right = Rc::new(Cell::new(EDGE_MARGIN));
     let bottom = Rc::new(Cell::new(EDGE_MARGIN));
     let start = Rc::new(Cell::new((EDGE_MARGIN, EDGE_MARGIN)));
@@ -396,7 +426,8 @@ fn install_drag(window: &gtk::Window, target: &gtk::Overlay) {
 
 #[cfg(test)]
 mod tests {
-    use super::{DRAG_ICON_MAX, PIN_GAP, PIN_PADDING, PIN_WIDTH, fit_within, scaled_size};
+    use super::{DRAG_ICON_MAX, PIN_GAP, PIN_PADDING, PIN_SIDE, cover_thumbnail, fit_within};
+    use relm4::gtk::gdk_pixbuf::{Colorspace, Pixbuf};
 
     /// The pointer carries a token, not the capture: a 6K shot has to
     /// come down to something a pointer can drag.
@@ -422,34 +453,29 @@ mod tests {
         assert_eq!(fit_within(80, 40, DRAG_ICON_MAX), (80, 40));
     }
 
+    /// The preview fills its square and crops rather than fitting
+    /// inside it: a wide capture letterboxed into a sliver is
+    /// unrecognisable, which defeats having a pin at all.
     #[test]
-    fn a_pin_keeps_the_capture_aspect() {
-        let (w, h) = scaled_size(1600, 900);
-        assert_eq!(w, PIN_WIDTH);
-        assert_eq!(h, (PIN_WIDTH as f64 * 900.0 / 1600.0).round() as i32);
+    fn a_wide_capture_fills_the_square() {
+        let wide = Pixbuf::new(Colorspace::Rgb, true, 8, 1600, 400).unwrap();
+        let thumb = cover_thumbnail(&wide, PIN_SIDE);
+        assert_eq!((thumb.width(), thumb.height()), (PIN_SIDE, PIN_SIDE));
     }
 
-    /// A shot narrower than the pin shouldn't be blown up to fill it.
+    /// A tall stitch is cropped to its middle for the same reason.
     #[test]
-    fn a_small_capture_stays_its_own_size() {
-        let (w, h) = scaled_size(120, 60);
-        assert_eq!((w, h), (120, 60));
-    }
-
-    /// A long scroll capture is capped rather than running off screen.
-    #[test]
-    fn a_long_stitch_is_capped() {
-        let (_, h) = scaled_size(1000, 40_000);
-        assert_eq!(h, PIN_WIDTH * 3);
+    fn a_tall_capture_fills_the_square() {
+        let tall = Pixbuf::new(Colorspace::Rgb, true, 8, 600, 9000).unwrap();
+        let thumb = cover_thumbnail(&tall, PIN_SIDE);
+        assert_eq!((thumb.width(), thumb.height()), (PIN_SIDE, PIN_SIDE));
     }
 
     /// Pins stack clear of each other, so a second one doesn't bury
-    /// the first — the whole point of seeing both is telling them
-    /// apart.
+    /// the first — seeing both is the point of stacking them.
     #[test]
     fn stacked_pins_do_not_overlap() {
-        let (_, height) = scaled_size(1600, 900);
-        let step = height + PIN_PADDING * 2 + PIN_GAP;
-        assert!(step > height + PIN_PADDING * 2);
+        let step = PIN_SIDE + PIN_PADDING * 2 + PIN_GAP;
+        assert!(step > PIN_SIDE + PIN_PADDING * 2);
     }
 }

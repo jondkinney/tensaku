@@ -1248,6 +1248,25 @@ impl SketchBoard {
         dirs.place_state_file(SAVE_AS_LAST_DIR_FILE).ok()
     }
 
+    /// `untitled-N.png`, where N is one past the highest already in
+    /// `dir`. Counting from what is there rather than from one means a
+    /// second save doesn't land on the first, and a directory full of
+    /// them still numbers forward after some are deleted.
+    fn next_untitled_name(dir: &Path) -> String {
+        let highest = fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let stem = name.strip_suffix(".png")?;
+                stem.strip_prefix("untitled-")?.parse::<u32>().ok()
+            })
+            .max()
+            .unwrap_or(0);
+        format!("untitled-{}.png", highest + 1)
+    }
+
     fn save_as_initial_dir(
         last_dir_file: Option<&Path>,
         configured_output_path: Option<&Path>,
@@ -1352,10 +1371,15 @@ impl SketchBoard {
             Self::save_as_last_dir_file().as_deref(),
             configured_output_path.as_deref(),
         );
+        // A configured output name is an explicit choice, so it wins.
+        // Otherwise suggest the next untitled: an empty name box means
+        // typing one from scratch every time, and a fixed suggestion
+        // means overwriting yesterday's shot.
         let suggested_filename = configured_output_path
             .as_deref()
             .and_then(Path::file_name)
-            .map(|name| name.to_string_lossy().into_owned());
+            .map(|name| name.to_string_lossy().into_owned())
+            .or_else(|| initial_dir.as_deref().map(Self::next_untitled_name));
 
         let data = match pixbuf.save_to_bufferv("png", &Vec::new()) {
             Ok(d) => d,
