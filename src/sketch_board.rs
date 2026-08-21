@@ -3598,7 +3598,13 @@ impl SketchBoard {
             }
             Some(Tools::Text) => {
                 use crate::tools::TextBackground;
-                let order = [TextBackground::Rounded, TextBackground::Plain];
+                // Same order as the dropdown, so the wheel and the
+                // menu agree about what comes next.
+                let order = [
+                    TextBackground::Rounded,
+                    TextBackground::Outlined,
+                    TextBackground::Plain,
+                ];
                 let current = self.cycle_seed_text();
                 let next = wrap_cycle(&order, current, steps);
                 if next == current {
