@@ -23,7 +23,9 @@ use crate::ui::toolbars::RobustTooltipExt;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use relm4::gtk::gdk_pixbuf::InterpType;
 use relm4::gtk::{self, gdk_pixbuf::Pixbuf, prelude::*};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -49,13 +51,12 @@ const MOVE_TOOLTIP: &str = "Move this pin";
 /// same reason.
 const PICTURE_TOOLTIP: &str = "Click to open in the editor · Drag into another app to paste it";
 
-/// How often a dragged pin asks where the pointer is.
+/// How often the follower thread reads the pointer.
 ///
-/// Twice a frame at 60Hz. The cost is a socket round-trip, which is
-/// sub-millisecond; the win is that a step is never more than half a
-/// frame stale before it is drawn, which is the difference between a
-/// pin that feels attached to the pointer and one that trails it.
-const FOLLOW_INTERVAL: Duration = Duration::from_millis(8);
+/// Far faster than a frame, because it costs nothing on the UI thread:
+/// whatever the compositor answers, the freshest reading is already
+/// waiting when the next frame asks for it.
+const POLL_INTERVAL: Duration = Duration::from_millis(2);
 
 /// Gap between stacked pins.
 const PIN_GAP: i32 = 12;
@@ -482,48 +483,61 @@ fn fit_within(width: i32, height: i32, max: i32) -> (i32, i32) {
 fn install_move(window: &gtk::Window, target: &gtk::Button, bottom_margin: i32) {
     let right = Rc::new(Cell::new(EDGE_MARGIN));
     let bottom = Rc::new(Cell::new(bottom_margin));
-    let dragging = Rc::new(Cell::new(false));
 
     let press = gtk::GestureClick::new();
     {
         let window = window.clone();
         let right = right.clone();
         let bottom = bottom.clone();
-        let dragging = dragging.clone();
         press.connect_pressed(move |_, _, _, _| {
-            // Where the pointer is and where the pin is, both in the
-            // compositor's own coordinates. Everything after this is
-            // arithmetic on those two.
             let Some(origin) = crate::hypr::cursor_position() else {
                 return;
             };
-            if dragging.replace(true) {
-                return;
+            let start = (right.get(), bottom.get());
+
+            // The pointer is read on a thread of its own. Asking for
+            // it inline stalled the UI thread for five milliseconds at
+            // the ninetieth percentile — the compositor answers slowly
+            // exactly when it is busy, which is precisely when we have
+            // just asked it to move a window. Off-thread, the answer
+            // is always waiting and never in the way.
+            let cursor = Arc::new(CursorFollow::new(origin));
+            {
+                let cursor = Arc::clone(&cursor);
+                std::thread::spawn(move || {
+                    while cursor.following.load(Ordering::Relaxed) {
+                        if let Some((x, y)) = crate::hypr::cursor_position() {
+                            cursor.x.store(x, Ordering::Relaxed);
+                            cursor.y.store(y, Ordering::Relaxed);
+                        }
+                        std::thread::sleep(POLL_INTERVAL);
+                    }
+                });
             }
 
-            let start = (right.get(), bottom.get());
-            let window = window.clone();
             let right = right.clone();
             let bottom = bottom.clone();
-            let dragging = dragging.clone();
-            // A timer, not motion events: the pointer leaves the
-            // handle the moment the window lags behind it, and a drag
-            // that stops when it falls behind is exactly the drag that
-            // was falling behind.
-            gtk::glib::timeout_add_local(FOLLOW_INTERVAL, move || {
-                if !dragging.get() {
+            let cursor_for_tick = Arc::clone(&cursor);
+            // On the frame clock rather than a timer: a margin can
+            // only take effect on a frame, so setting it more often
+            // than that is work the compositor throws away, and
+            // setting it on any other cadence means landing a step
+            // late.
+            window.add_tick_callback(move |window, _| {
+                if !cursor_for_tick.following.load(Ordering::Relaxed) {
+                    crate::ui::toolbars::dismiss_active_tooltip();
                     return gtk::glib::ControlFlow::Break;
                 }
-                // Every tick, because the pointer never leaves the
-                // handle during a drag: nothing else would take the
-                // tooltip down, and it would tag along beside the pin.
+                // Every frame: the pointer never leaves the handle
+                // during a drag, so nothing else takes the tooltip
+                // down.
                 crate::ui::toolbars::dismiss_active_tooltip();
-                let Some((x, y)) = crate::hypr::cursor_position() else {
-                    return gtk::glib::ControlFlow::Continue;
-                };
-                // Anchored bottom-right, so a rightward move shrinks
-                // the right margin. Clamped so a pin can't be pushed
-                // off the edge it hangs from and out of reach.
+
+                let x = cursor_for_tick.x.load(Ordering::Relaxed);
+                let y = cursor_for_tick.y.load(Ordering::Relaxed);
+                // Anchored bottom-right, so moving right shrinks the
+                // right margin. Clamped so a pin can't be pushed off
+                // the edge it hangs from and out of reach.
                 let new_right = (start.0 - (x - origin.0)).max(0);
                 let new_bottom = (start.1 - (y - origin.1)).max(0);
                 if (new_right, new_bottom) != (right.get(), bottom.get()) {
@@ -534,22 +548,55 @@ fn install_move(window: &gtk::Window, target: &gtk::Button, bottom_margin: i32) 
                 }
                 gtk::glib::ControlFlow::Continue
             });
+            // The gesture's own end, and a pointer that leaves without
+            // one — a compositor grab ending, the window outrunning the
+            // pointer — both have to stop the follow, or the pin
+            // chases the cursor forever.
+            let stop = Arc::clone(&cursor);
+            RELEASE.with(|slot| *slot.borrow_mut() = Some(stop));
         });
     }
     {
-        let dragging = dragging.clone();
-        press.connect_released(move |_, _, _, _| dragging.set(false));
+        press.connect_released(|_, _, _, _| stop_following());
     }
-    // A pointer that leaves without a release — the window outrunning
-    // it, a compositor grab ending — must still finish the drag, or
-    // the pin follows the cursor forever.
     {
-        let dragging = dragging.clone();
         let cancel = gtk::EventControllerMotion::new();
-        cancel.connect_leave(move |_| dragging.set(false));
+        cancel.connect_leave(|_| stop_following());
         target.add_controller(cancel);
     }
     target.add_controller(press);
+}
+
+/// The pointer position a drag is following, shared with the thread
+/// that reads it.
+struct CursorFollow {
+    x: AtomicI32,
+    y: AtomicI32,
+    following: AtomicBool,
+}
+
+impl CursorFollow {
+    fn new(origin: (i32, i32)) -> Self {
+        Self {
+            x: AtomicI32::new(origin.0),
+            y: AtomicI32::new(origin.1),
+            following: AtomicBool::new(true),
+        }
+    }
+}
+
+thread_local! {
+    /// The drag in progress, so a release or a stray leave can end it.
+    /// One pin per process, and one drag at a time within it.
+    static RELEASE: RefCell<Option<Arc<CursorFollow>>> = const { RefCell::new(None) };
+}
+
+fn stop_following() {
+    RELEASE.with(|slot| {
+        if let Some(cursor) = slot.borrow_mut().take() {
+            cursor.following.store(false, Ordering::Relaxed);
+        }
+    });
 }
 
 #[cfg(test)]
