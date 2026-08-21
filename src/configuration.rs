@@ -934,6 +934,9 @@ impl Configuration {
         if let Some(v) = command_line.scroll_capture_test {
             self.scroll_capture_test = Some(v);
         }
+        if command_line.capture {
+            self.capture = true;
+        }
         if command_line.scroll_capture {
             self.scroll_capture = true;
         }
