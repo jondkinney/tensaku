@@ -34,6 +34,12 @@ const PIN_WIDTH: i32 = 280;
 /// Gap between the pin and the screen edge it starts anchored to.
 const EDGE_MARGIN: i32 = 24;
 
+/// Longest edge of the picture that follows the pointer during a
+/// drag-out. A drag icon is a token for what is being carried, not a
+/// copy of it — handing GTK the full-size texture makes the pointer
+/// drag a whole 6K capture across the screen.
+const DRAG_ICON_MAX: i32 = 256;
+
 /// How long a confirmation stays up. Long enough to read two words,
 /// short enough that it doesn't sit on the image.
 const TOAST_MS: u64 = 1400;
@@ -275,14 +281,39 @@ fn install_drag_out(handle: &gtk::Button, image: &Pixbuf, saved_path: Option<Str
     };
     source.set_content(Some(&provider));
 
-    // The dragged image follows the pointer, so the drop lands where
-    // the picture is rather than where an invisible hotspot happens to
-    // be. Scaled down for the same reason a drag icon always is.
-    let (icon_w, icon_h) = scaled_size(image.width(), image.height());
-    source.connect_drag_begin(move |source, _| {
-        source.set_icon(Some(&texture), icon_w / 2, icon_h / 2);
-    });
+    // A thumbnail, held under the pointer's middle so the drop lands
+    // where the picture is.
+    if let Some((icon, icon_w, icon_h)) = drag_icon(image) {
+        source.connect_drag_begin(move |source, _| {
+            source.set_icon(Some(&icon), icon_w / 2, icon_h / 2);
+        });
+    }
     handle.add_controller(source);
+}
+
+/// A thumbnail of `image` for the pointer to carry, with its size.
+/// `None` if the scale fails, in which case the drag runs without an
+/// icon — better a plain pointer than the full capture.
+fn drag_icon(image: &Pixbuf) -> Option<(gtk::gdk::Texture, i32, i32)> {
+    let (w, h) = fit_within(image.width(), image.height(), DRAG_ICON_MAX);
+    let scaled = image.scale_simple(w, h, relm4::gtk::gdk_pixbuf::InterpType::Bilinear)?;
+    Some((gtk::gdk::Texture::for_pixbuf(&scaled), w, h))
+}
+
+/// Scale `(width, height)` down so its longest edge is at most `max`,
+/// keeping the aspect. Never scales up.
+fn fit_within(width: i32, height: i32, max: i32) -> (i32, i32) {
+    let width = width.max(1);
+    let height = height.max(1);
+    let longest = width.max(height);
+    if longest <= max {
+        return (width, height);
+    }
+    let ratio = max as f64 / longest as f64;
+    (
+        ((width as f64 * ratio).round() as i32).max(1),
+        ((height as f64 * ratio).round() as i32).max(1),
+    )
 }
 
 /// Drag the pin around by its image.
@@ -325,7 +356,31 @@ fn install_drag(window: &gtk::Window, target: &gtk::Overlay) {
 
 #[cfg(test)]
 mod tests {
-    use super::{PIN_WIDTH, scaled_size};
+    use super::{DRAG_ICON_MAX, PIN_WIDTH, fit_within, scaled_size};
+
+    /// The pointer carries a token, not the capture: a 6K shot has to
+    /// come down to something a pointer can drag.
+    #[test]
+    fn a_drag_icon_is_a_thumbnail() {
+        let (w, h) = fit_within(6144, 3456, DRAG_ICON_MAX);
+        assert_eq!(w.max(h), DRAG_ICON_MAX);
+        assert_eq!(h, (DRAG_ICON_MAX as f64 * 3456.0 / 6144.0).round() as i32);
+    }
+
+    /// A tall capture is bounded by its height, not its width.
+    #[test]
+    fn a_tall_capture_fits_by_its_longest_edge() {
+        let (w, h) = fit_within(400, 4000, DRAG_ICON_MAX);
+        assert_eq!(h, DRAG_ICON_MAX);
+        assert!(w < DRAG_ICON_MAX);
+    }
+
+    /// Something already small keeps its size rather than being blown
+    /// up to fill the icon.
+    #[test]
+    fn a_small_capture_is_left_alone() {
+        assert_eq!(fit_within(80, 40, DRAG_ICON_MAX), (80, 40));
+    }
 
     #[test]
     fn a_pin_keeps_the_capture_aspect() {
