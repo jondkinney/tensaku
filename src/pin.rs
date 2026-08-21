@@ -110,9 +110,10 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
     // Stack above whatever is already pinned instead of landing on
     // top of it. Each capture is its own process, so the count comes
     // from the compositor rather than from a shared list.
-    // Every pin is the same square, so each new one sits exactly one
-    // step above the last rather than needing anyone's height.
-    let bottom = EDGE_MARGIN + stacked_pins() * (PIN_SIDE + PIN_PADDING * 2 + PIN_GAP);
+    // Every pin is the same square, so a slot is just an index —
+    // and the lowest free one, so a pin dragged out of the column
+    // leaves its place for the next.
+    let bottom = EDGE_MARGIN + next_slot() * pin_step();
     window.set_margin(Edge::Right, EDGE_MARGIN);
     window.set_margin(Edge::Bottom, bottom);
     // OnDemand rather than Exclusive: the pin should never swallow the
@@ -147,7 +148,7 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
         on_edit: Box::new(move || edit_for_controls()),
         ..actions
     };
-    let controls = build_controls(&window, actions);
+    let controls = build_controls(&window, bottom, actions);
     overlay.add_overlay(&controls);
 
     let (toast_label, toast) = build_toast();
@@ -169,6 +170,10 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
 
     // The picture is the shot: clicking it opens the shot, dragging it
     // carries the shot somewhere.
+    picture.set_tooltip_text(Some(
+        "Click to open in the editor · Drag into another app to paste it",
+    ));
+    picture.set_cursor_from_name(Some("pointer"));
     install_drag_out(&picture, image, saved_path_for_drag);
     {
         let edit = edit_for_picture;
@@ -221,13 +226,48 @@ fn build_toast() -> (gtk::Label, Toast) {
 /// Layer-surface namespace, so pins can count each other.
 const PIN_NAMESPACE: &str = "tensaku-pin";
 
-/// How many pins are already on screen.
+/// How far apart stacked pins sit, centre to centre.
+fn pin_step() -> i32 {
+    PIN_SIDE + PIN_PADDING * 2 + PIN_GAP
+}
+
+/// The slot a pin at `rect` is sitting in, or `None` if it isn't in
+/// one — because it has been dragged somewhere else.
 ///
-/// Asks the compositor rather than keeping a count: every capture is a
-/// separate process, and a file of slots would go stale the first time
-/// one crashed. A compositor that can't be asked answers zero, and the
-/// new pin lands in the corner like the first one.
-fn stacked_pins() -> i32 {
+/// A moved pin gives its slot back. Counting pins instead would keep
+/// stacking above one that is no longer there, leaving a hole at the
+/// bottom of the column and pushing new pins off the top of the
+/// screen.
+fn slot_of(rect: (i32, i32, i32, i32), screen: (i32, i32)) -> Option<i32> {
+    /// A pin within a few pixels of a slot is in it: margins round to
+    /// integers and compositors report what they rounded to.
+    const TOLERANCE: i32 = 4;
+    let side = PIN_SIDE + PIN_PADDING * 2;
+    let (x, y, _, _) = rect;
+    if (x - (screen.0 - EDGE_MARGIN - side)).abs() > TOLERANCE {
+        return None;
+    }
+    let base = screen.1 - EDGE_MARGIN - side;
+    let step = pin_step();
+    let index = ((base - y) as f64 / step as f64).round() as i32;
+    let expected = base - index * step;
+    (index >= 0 && (y - expected).abs() <= TOLERANCE).then_some(index)
+}
+
+/// The lowest slot nothing is sitting in.
+fn first_free_slot(occupied: &[i32]) -> i32 {
+    (0..).find(|slot| !occupied.contains(slot)).unwrap_or(0)
+}
+
+/// Which slot a new pin should take.
+///
+/// Asks the compositor where the existing pins actually are, rather
+/// than keeping a count: every capture is a separate process, a file
+/// of slots would go stale the first time one crashed, and a count
+/// can't tell a pin that has been dragged away from one that hasn't.
+/// A compositor that can't be asked answers zero, and the new pin
+/// lands in the corner like the first one.
+fn next_slot() -> i32 {
     let Ok(output) = std::process::Command::new("hyprctl")
         .args(["-j", "layers"])
         .output()
@@ -237,7 +277,36 @@ fn stacked_pins() -> i32 {
     let Ok(text) = String::from_utf8(output.stdout) else {
         return 0;
     };
-    text.matches(PIN_NAMESPACE).count() as i32
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return 0;
+    };
+    let Some(monitor) = crate::display::hyprland_focused_monitor() else {
+        return 0;
+    };
+    // The monitor reports device pixels; layers are placed in logical
+    // ones, which is the space the margins are in too.
+    let scale = (monitor.scale as f64).max(0.0001);
+    let screen = (
+        (monitor.width as f64 / scale).round() as i32,
+        (monitor.height as f64 / scale).round() as i32,
+    );
+
+    let occupied: Vec<i32> = json
+        .as_object()
+        .into_iter()
+        .flat_map(|monitors| monitors.values())
+        .filter_map(|monitor| monitor.get("levels")?.as_object())
+        .flat_map(|levels| levels.values())
+        .filter_map(|layers| layers.as_array())
+        .flatten()
+        .filter(|layer| layer.get("namespace").and_then(|n| n.as_str()) == Some(PIN_NAMESPACE))
+        .filter_map(|layer| {
+            let field = |key: &str| layer.get(key)?.as_i64().map(|v| v as i32);
+            Some((field("x")?, field("y")?, field("w")?, field("h")?))
+        })
+        .filter_map(|rect| slot_of(rect, screen))
+        .collect();
+    first_free_slot(&occupied)
 }
 
 /// A square thumbnail of `image` that fills `side` and centre-crops,
@@ -262,7 +331,7 @@ fn cover_thumbnail(image: &Pixbuf, side: i32) -> Pixbuf {
 }
 
 /// The hover toolbar: edit, copy, copy path, close.
-fn build_controls(window: &gtk::Window, actions: PinActions) -> gtk::Box {
+fn build_controls(window: &gtk::Window, bottom_margin: i32, actions: PinActions) -> gtk::Box {
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     controls.add_css_class("pin-controls");
     controls.set_halign(gtk::Align::End);
@@ -297,7 +366,7 @@ fn build_controls(window: &gtk::Window, actions: PinActions) -> gtk::Box {
     // a drag carries it into another app.
     let move_handle = button("re-order-dots-horizontal-regular", "Move this pin");
     move_handle.add_css_class("pin-drag-handle");
-    install_move(window, &move_handle);
+    install_move(window, &move_handle, bottom_margin);
     controls.append(&move_handle);
 
     let edit = button("pen-regular", "Edit again");
@@ -393,10 +462,18 @@ fn fit_within(width: i32, height: i32, max: i32) -> (i32, i32) {
 /// anchors are on the far edges, so a rightward drag *shrinks* the
 /// right margin. The margins are held here rather than read back
 /// because `LayerShell` exposes no getter for them.
-fn install_move(window: &gtk::Window, target: &gtk::Button) {
+fn install_move(window: &gtk::Window, target: &gtk::Button, bottom_margin: i32) {
+    // Gesture deltas arrive in logical pixels; layer-shell margins are
+    // applied in device ones. On a 2x display that made the pin travel
+    // half as far as the pointer, which reads as the window lagging
+    // rather than as a unit mismatch.
+    let scale = crate::display::hyprland_focused_monitor()
+        .map(|m| m.scale as f64)
+        .unwrap_or(1.0)
+        .max(0.0001);
     let right = Rc::new(Cell::new(EDGE_MARGIN));
-    let bottom = Rc::new(Cell::new(EDGE_MARGIN));
-    let start = Rc::new(Cell::new((EDGE_MARGIN, EDGE_MARGIN)));
+    let bottom = Rc::new(Cell::new(bottom_margin));
+    let start = Rc::new(Cell::new((EDGE_MARGIN, bottom_margin)));
 
     let drag = gtk::GestureDrag::new();
     {
@@ -413,8 +490,8 @@ fn install_move(window: &gtk::Window, target: &gtk::Button) {
             let (start_right, start_bottom) = start.get();
             // Clamped at zero so a drag can't push the pin off the
             // screen edge it is anchored to and out of reach.
-            let new_right = (start_right - dx.round() as i32).max(0);
-            let new_bottom = (start_bottom - dy.round() as i32).max(0);
+            let new_right = (start_right - (dx * scale).round() as i32).max(0);
+            let new_bottom = (start_bottom - (dy * scale).round() as i32).max(0);
             right.set(new_right);
             bottom.set(new_bottom);
             window.set_margin(Edge::Right, new_right);
@@ -426,7 +503,10 @@ fn install_move(window: &gtk::Window, target: &gtk::Button) {
 
 #[cfg(test)]
 mod tests {
-    use super::{DRAG_ICON_MAX, PIN_GAP, PIN_PADDING, PIN_SIDE, cover_thumbnail, fit_within};
+    use super::{
+        DRAG_ICON_MAX, EDGE_MARGIN, PIN_PADDING, PIN_SIDE, cover_thumbnail, first_free_slot,
+        fit_within, pin_step, slot_of,
+    };
     use relm4::gtk::gdk_pixbuf::{Colorspace, Pixbuf};
 
     /// The pointer carries a token, not the capture: a 6K shot has to
@@ -475,7 +555,41 @@ mod tests {
     /// the first — seeing both is the point of stacking them.
     #[test]
     fn stacked_pins_do_not_overlap() {
-        let step = PIN_SIDE + PIN_PADDING * 2 + PIN_GAP;
-        assert!(step > PIN_SIDE + PIN_PADDING * 2);
+        assert!(pin_step() > PIN_SIDE + PIN_PADDING * 2);
+    }
+
+    /// A pin sitting in the column is recognised as being in its slot,
+    /// so the next one goes above it rather than on it.
+    #[test]
+    fn a_pin_in_the_column_holds_its_slot() {
+        let screen = (3072, 1728);
+        let side = PIN_SIDE + PIN_PADDING * 2;
+        let x = screen.0 - EDGE_MARGIN - side;
+        let base = screen.1 - EDGE_MARGIN - side;
+        assert_eq!(slot_of((x, base, side, side), screen), Some(0));
+        assert_eq!(slot_of((x, base - pin_step(), side, side), screen), Some(1));
+    }
+
+    /// A pin dragged out of the column gives its slot back: stacking
+    /// above where it used to be would leave a hole at the bottom and
+    /// walk new pins off the top of the screen.
+    #[test]
+    fn a_moved_pin_frees_its_slot() {
+        let screen = (3072, 1728);
+        let side = PIN_SIDE + PIN_PADDING * 2;
+        let x = screen.0 - EDGE_MARGIN - side;
+        let base = screen.1 - EDGE_MARGIN - side;
+        // Dragged left, and dragged up between two slots.
+        assert_eq!(slot_of((x - 300, base, side, side), screen), None);
+        assert_eq!(slot_of((x, base - pin_step() / 2, side, side), screen), None);
+    }
+
+    /// The next pin takes the lowest gap, not the top of the pile.
+    #[test]
+    fn the_lowest_free_slot_wins() {
+        assert_eq!(first_free_slot(&[]), 0);
+        assert_eq!(first_free_slot(&[0, 1]), 2);
+        assert_eq!(first_free_slot(&[0, 2]), 1);
+        assert_eq!(first_free_slot(&[1, 2]), 0);
     }
 }
