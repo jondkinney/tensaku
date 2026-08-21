@@ -67,7 +67,7 @@ impl ArrowStyle {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Arrow {
     start: Vec2D,
     end: Option<Vec2D>,
@@ -76,6 +76,12 @@ pub struct Arrow {
     /// User-overridden Bezier control point for curved/double arrows. `None`
     /// means "compute the default perpendicular-offset control point."
     curve_control: Option<Vec2D>,
+    /// Canvas zoom (image px -> canvas px) captured at draw time, used
+    /// only to keep the tapered TAIL from disappearing when zoomed out
+    /// — see `drawn_body_back_width`. Nothing else about the arrow
+    /// depends on it: the head and the body width at the head are the
+    /// shipped geometry at every zoom.
+    draw_zoom: std::cell::Cell<f32>,
 }
 
 #[derive(Default)]
@@ -112,6 +118,7 @@ impl Tool for ArrowTool {
                     style: self.style,
                     arrow_style: self.arrow_style,
                     curve_control: None,
+                    draw_zoom: std::cell::Cell::new(1.0),
                 });
                 ToolUpdateResult::Redraw
             }
@@ -219,6 +226,32 @@ const FANCY_WING_HEIGHT_RATIO: f32 = 0.22;
 const CURVE_AMOUNT: f32 = 0.25;
 
 impl Arrow {
+    /// Record the canvas zoom this arrow is about to be drawn at.
+    /// Called by `draw` and `render_glow` alike so the halo brackets
+    /// the same shape the fill paints.
+    fn sync_draw_zoom(&self, canvas: &femtovg::Canvas<femtovg::renderer::OpenGl>) {
+        self.draw_zoom
+            .set(canvas.transform().average_scale().max(0.0001));
+    }
+
+    /// Tail width to draw at, which is the ONLY dimension that varies
+    /// with zoom.
+    ///
+    /// `Standard` tapers to a point at the tail by design, so on a
+    /// canvas that has auto-grown far past the capture the tail thins
+    /// below a pixel and the arrow reads as a stray line. Holding the
+    /// tail at the on-screen width it has at 1:1 keeps it present
+    /// without touching the head or the body width at the head — those
+    /// stay exactly as shipped, at every zoom.
+    ///
+    /// Inert at and above 1:1 by construction, and capped at the body's
+    /// width at the head so a heavy zoom-out can only flatten the taper
+    /// to parallel-sided, never invert it into a wedge.
+    fn drawn_body_back_width(&self) -> f32 {
+        let zoom = self.draw_zoom.get().clamp(0.0001, 1.0);
+        (self.body_back_width() / zoom).min(self.body_max_width())
+    }
+
     /// Length of the arrowhead along the shaft (tip → back of head triangle).
     /// Pointy uses a slightly longer head than Standard (per-style table).
     fn head_length(&self) -> f32 {
@@ -405,7 +438,7 @@ impl Arrow {
     /// widens the body uniformly — `solid_filled_path` insets the path by
     /// this amount so the visible body_max still matches `body_max_width`.
     fn rounded_outline_stroke(&self) -> f32 {
-        self.body_back_width()
+        self.drawn_body_back_width()
     }
 
     /// Paint configured for the rounded outline overlay applied on top of the
@@ -485,7 +518,7 @@ impl Arrow {
         let (stroke_compensation, back_half_width) = if round_corners {
             (self.rounded_outline_stroke(), 0.0)
         } else {
-            (0.0, self.body_back_width() * 0.5)
+            (0.0, self.drawn_body_back_width() * 0.5)
         };
         let path = self.solid_filled_path(
             length,
@@ -574,6 +607,7 @@ impl Drawable for Arrow {
         _font: FontId,
         _bounds: (Vec2D, Vec2D),
     ) -> Result<()> {
+        self.sync_draw_zoom(canvas);
         let Some(end) = self.end else {
             return Ok(());
         };
@@ -748,6 +782,7 @@ impl Drawable for Arrow {
         _bounds: (Vec2D, Vec2D),
         device_pixel_ratio: f32,
     ) -> Result<()> {
+        self.sync_draw_zoom(canvas);
         let Some(end) = self.end else {
             return Ok(());
         };
@@ -783,7 +818,7 @@ impl Drawable for Arrow {
                         FANCY_WING_HEIGHT_RATIO,
                         0.0,
                         0.0,
-                        self.body_back_width() * 0.5,
+                        self.drawn_body_back_width() * 0.5,
                     ),
                     _ => {
                         let stroke = self.rounded_outline_stroke();
@@ -840,5 +875,60 @@ impl Drawable for Arrow {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tail_tests {
+    /// The rule `drawn_body_back_width` applies, isolated: hold the
+    /// tail at its 1:1 on-screen width as the canvas zooms out, capped
+    /// at the body's width at the head.
+    fn tail(natural: f32, body_max: f32, zoom: f32) -> f32 {
+        (natural / zoom.clamp(0.0001, 1.0)).min(body_max)
+    }
+
+    // Size Small: 2.5 px tail, 7.0 px body at the head.
+    const TAIL: f32 = 2.5;
+    const BODY: f32 = 7.0;
+
+    /// At 1:1 and above, the shipped geometry is untouched. This is the
+    /// property that matters most: zooming in must not fatten a tail,
+    /// and 100% must render exactly what shipped.
+    #[test]
+    fn inert_at_and_above_one_to_one() {
+        for zoom in [1.0, 1.5, 4.0, 20.0] {
+            assert_eq!(tail(TAIL, BODY, zoom), TAIL, "zoom {zoom}");
+        }
+    }
+
+    /// Zoomed out, the tail holds its 1:1 on-screen width rather than
+    /// shrinking with the canvas — until the cap.
+    #[test]
+    fn holds_its_on_screen_width_when_zoomed_out() {
+        for zoom in [0.8, 0.5, 0.39] {
+            let on_screen = tail(TAIL, BODY, zoom) * zoom;
+            assert!((on_screen - TAIL).abs() < 1e-4, "zoom {zoom}: {on_screen}");
+        }
+    }
+
+    /// The cap holds however far out we go, so the taper can flatten to
+    /// parallel-sided but never invert into a wedge wider than the head
+    /// intersection.
+    #[test]
+    fn never_exceeds_the_body_width_at_the_head() {
+        for zoom in [0.3, 0.1, 0.01, 0.0001] {
+            assert!(tail(TAIL, BODY, zoom) <= BODY, "zoom {zoom}");
+        }
+    }
+
+    /// Monotonic: zooming further out never thins the tail.
+    #[test]
+    fn never_thins_as_zoom_falls() {
+        let mut prev = tail(TAIL, BODY, 1.0);
+        for zoom in [0.9, 0.7, 0.5, 0.3, 0.1] {
+            let cur = tail(TAIL, BODY, zoom);
+            assert!(cur >= prev, "zoom {zoom}: {cur} < {prev}");
+            prev = cur;
+        }
     }
 }
