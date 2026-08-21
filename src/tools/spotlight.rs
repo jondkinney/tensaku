@@ -198,6 +198,15 @@ impl Drawable for SpotlightKind {
         }
     }
 
+    /// Border-only picking: a spotlight covers the whole area it dims, so its interior must stay
+    /// available to whichever drawing tool is armed. See
+    /// `Drawable::edge_hit_test`.
+    fn edge_hit_test(&self, point: Vec2D, tolerance: f32) -> bool {
+        self.bounds()
+            .map(|b| super::bbox_edge_hit(b, point, tolerance))
+            .unwrap_or(false)
+    }
+
     fn hit_test(&self, point: Vec2D, tolerance: f32) -> bool {
         match self {
             SpotlightKind::Block(_) => {

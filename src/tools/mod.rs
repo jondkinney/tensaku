@@ -439,6 +439,28 @@ pub trait Drawable: DrawableClone + Debug {
             .unwrap_or(false)
     }
 
+    /// Whether `point` hits this drawable's *border* rather than its
+    /// interior.
+    ///
+    /// Only meaningful for drawables with a large opaque body — a
+    /// filled shape, a blur, a spotlight, a pasted image, a text pill.
+    /// Those cover enough canvas that treating every interior pixel as
+    /// "grab me" makes the area under them unusable for drawing: you
+    /// cannot start a text annotation inside a filled rectangle,
+    /// because the click selects the rectangle instead.
+    ///
+    /// So while a drawing tool is armed, only a border hit grabs the
+    /// annotation and the interior passes through to that tool. The
+    /// Pointer tool is unaffected — it selects anywhere, which is what
+    /// it is for.
+    ///
+    /// Defaults to `hit_test`, which is right for everything thin: a
+    /// line, an arrow, a brush stroke and a counter have no interior
+    /// distinct from their edge, so their whole body stays grabbable.
+    fn edge_hit_test(&self, point: Vec2D, tolerance: f32) -> bool {
+        self.hit_test(point, tolerance)
+    }
+
     /// Translate the drawable by `delta` (image coordinates).
     /// Default is a no-op so non-movable drawables (e.g. crop overlays) don't need
     /// to implement it.
@@ -685,6 +707,36 @@ pub fn halo_in_image_units(canvas: &Canvas<OpenGl>, device_pixel_ratio: f32) -> 
 /// [`halo_in_image_units`], which converts it back into image units.
 fn halo_css_pad(zoom: f32) -> f32 {
     (HALO_PAD * zoom.min(1.0)).max(MIN_HALO_PAD)
+}
+
+/// Picking slack for a border grab, in image pixels before zoom
+/// scaling. Deliberately fatter than [`HIT_TOLERANCE`]: the border is
+/// now the *only* way to grab a large annotation while a drawing tool
+/// is armed, so it has to be forgiving to aim at.
+pub const EDGE_HIT_TOLERANCE: f32 = 14.0;
+
+/// Whether `point` falls in the band straddling `rect`'s perimeter.
+///
+/// Inside and outside by `tolerance` both count, so the target is
+/// `2 * tolerance` wide and a slightly-missed grab still lands.
+pub fn bbox_edge_hit(rect: Rect, point: Vec2D, tolerance: f32) -> bool {
+    if !rect.inflated(tolerance).contains(point) {
+        return false;
+    }
+    // Inside the deflated rect is the interior proper — a miss. A rect
+    // thinner than the band has no interior left, so every hit on it is
+    // an edge hit.
+    let inner = Rect {
+        pos: Vec2D::new(rect.pos.x + tolerance, rect.pos.y + tolerance),
+        size: Vec2D::new(
+            rect.size.x - 2.0 * tolerance,
+            rect.size.y - 2.0 * tolerance,
+        ),
+    };
+    if inner.size.x <= 0.0 || inner.size.y <= 0.0 {
+        return true;
+    }
+    !inner.contains(point)
 }
 
 /// Selection accent colour (used for handles + glow + hover cursor halo).
@@ -1596,5 +1648,70 @@ mod canvas_transform_tests {
         // size swaps under a quarter turn; result is canonical (non-negative).
         close(m.size, v(15.0, 20.0));
         assert!(m.size.x >= 0.0 && m.size.y >= 0.0);
+    }
+}
+
+#[cfg(test)]
+mod edge_hit_tests {
+    use super::{EDGE_HIT_TOLERANCE, HIT_TOLERANCE, bbox_edge_hit};
+    use crate::math::{Rect, Vec2D};
+
+    fn rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
+        Rect::new(Vec2D::new(x, y), Vec2D::new(w, h))
+    }
+
+    /// The interior of a large annotation is NOT an edge hit — that is
+    /// the whole point: it stays available to the armed drawing tool.
+    #[test]
+    fn the_interior_is_not_an_edge() {
+        let r = rect(100.0, 100.0, 400.0, 300.0);
+        for p in [(300.0, 250.0), (150.0, 150.0), (450.0, 350.0)] {
+            assert!(
+                !bbox_edge_hit(r, Vec2D::new(p.0, p.1), EDGE_HIT_TOLERANCE),
+                "{p:?} should be interior"
+            );
+        }
+    }
+
+    /// The border grabs from either side, so a slightly-missed aim
+    /// still lands. The band is 2x the tolerance wide.
+    #[test]
+    fn the_border_grabs_from_inside_and_outside() {
+        let r = rect(100.0, 100.0, 400.0, 300.0);
+        let t = EDGE_HIT_TOLERANCE;
+        for p in [
+            (100.0, 250.0),       // exactly on the left edge
+            (100.0 + t - 1.0, 250.0), // just inside it
+            (100.0 - t + 1.0, 250.0), // just outside it
+            (300.0, 100.0),       // top edge
+            (500.0, 400.0),       // bottom-right corner
+        ] {
+            assert!(bbox_edge_hit(r, Vec2D::new(p.0, p.1), t), "{p:?} should grab");
+        }
+    }
+
+    /// Well outside is a miss — the fat target must not make a large
+    /// annotation grabbable from across the canvas.
+    #[test]
+    fn far_outside_is_a_miss() {
+        let r = rect(100.0, 100.0, 400.0, 300.0);
+        assert!(!bbox_edge_hit(r, Vec2D::new(50.0, 250.0), EDGE_HIT_TOLERANCE));
+    }
+
+    /// An annotation thinner than the band has no interior left, so
+    /// every hit on it grabs — a thin shape must not become
+    /// ungrabbable just because it is thinner than the tolerance.
+    #[test]
+    fn a_thin_annotation_is_grabbable_throughout() {
+        let sliver = rect(100.0, 100.0, 400.0, 6.0);
+        assert!(bbox_edge_hit(sliver, Vec2D::new(300.0, 103.0), EDGE_HIT_TOLERANCE));
+    }
+
+    /// The grab target is deliberately fatter than ordinary picking,
+    /// since the border is now the only way to grab a large annotation
+    /// while a tool is armed.
+    #[test]
+    fn the_border_target_is_fatter_than_ordinary_picking() {
+        const { assert!(EDGE_HIT_TOLERANCE > HIT_TOLERANCE) };
     }
 }

@@ -173,6 +173,15 @@ impl Drawable for PastedImage {
         Some(Rect::new(self.pos, self.size))
     }
 
+    /// Border-only picking: a pasted image is fully opaque, so its interior must stay
+    /// available to whichever drawing tool is armed. See
+    /// `Drawable::edge_hit_test`.
+    fn edge_hit_test(&self, point: Vec2D, tolerance: f32) -> bool {
+        self.bounds()
+            .map(|b| super::bbox_edge_hit(b, point, tolerance))
+            .unwrap_or(false)
+    }
+
     fn hit_test(&self, point: Vec2D, tolerance: f32) -> bool {
         Rect::new(self.pos, self.size)
             .inflated(tolerance)

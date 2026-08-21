@@ -518,6 +518,15 @@ impl Drawable for Blur {
         self.size.map(|s| Rect::new(self.top_left, s))
     }
 
+    /// Border-only picking: a blur is opaque over whatever it hides, so
+    /// its interior must stay available to whichever drawing tool is
+    /// armed. See `Drawable::edge_hit_test`.
+    fn edge_hit_test(&self, point: Vec2D, tolerance: f32) -> bool {
+        self.bounds()
+            .map(|b| super::bbox_edge_hit(b, point, tolerance))
+            .unwrap_or(false)
+    }
+
     fn translate(&mut self, delta: Vec2D) {
         self.top_left += delta;
         // Invalidate the cached blurred image — its sample location changed.

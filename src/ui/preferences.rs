@@ -846,29 +846,7 @@ pub fn open<W: IsA<gtk::Widget>>(
     });
     outer.append(&invert_scroll_check);
 
-    let select_any_check = gtk::CheckButton::builder()
-        .label("Click any annotation to select it")
-        .tooltip_text(
-            "When on, clicking any existing annotation selects it no matter which \
-             tool is active. When off, only the active tool's annotations are \
-             selectable and clicking elsewhere starts a new annotation.",
-        )
-        .active(APP_CONFIG.read().select_any_annotation())
-        .build();
-    select_any_check.connect_toggled(|btn| {
-        let value = btn.is_active();
-        let current = APP_CONFIG.read().select_any_annotation();
-        if value == current {
-            return;
-        }
-        let result = APP_CONFIG.write().save_select_any_annotation(value);
-        if let Err(error) = result {
-            eprintln!("Warning: could not save select-any-annotation: {error}");
-            btn.set_active(current);
-        }
-    });
-    outer.append(&select_any_check);
-
+    
     let close_on_esc_check = gtk::CheckButton::builder()
         .label("Close window on Esc")
         .active(APP_CONFIG.read().close_on_esc())

@@ -73,9 +73,6 @@ pub struct PersistedState {
     pub invert_scrolling: Option<bool>,
     /// Legacy Preferences value; migrated to `config.toml` at startup.
     #[serde(default)]
-    pub select_any_annotation: Option<bool>,
-    /// Legacy Preferences value; migrated to `config.toml` at startup.
-    #[serde(default)]
     pub close_on_esc: Option<bool>,
     /// Legacy Preferences value; migrated to `config.toml` at startup.
     #[serde(default)]
@@ -155,7 +152,6 @@ pub(crate) struct LegacyPreferences {
     pub annotation_size_factor: Option<f32>,
     pub keybinds: Option<HashMap<Tools, String>>,
     pub invert_scrolling: Option<bool>,
-    pub select_any_annotation: Option<bool>,
     pub close_on_esc: Option<bool>,
     pub close_on_copy: Option<bool>,
     pub close_on_save: Option<bool>,
@@ -170,7 +166,6 @@ impl LegacyPreferences {
         self.annotation_size_factor.is_none()
             && self.keybinds.is_none()
             && self.invert_scrolling.is_none()
-            && self.select_any_annotation.is_none()
             && self.close_on_esc.is_none()
             && self.close_on_copy.is_none()
             && self.close_on_save.is_none()
@@ -187,7 +182,6 @@ pub(crate) fn load_legacy_preferences() -> LegacyPreferences {
         annotation_size_factor: state.annotation_size_factor,
         keybinds: state.keybinds,
         invert_scrolling: state.invert_scrolling,
-        select_any_annotation: state.select_any_annotation,
         close_on_esc: state.close_on_esc,
         close_on_copy: state.close_on_copy,
         close_on_save: state.close_on_save,

@@ -8,7 +8,6 @@ use relm4::Sender;
 use relm4::gtk::gdk::{Key, ModifierType};
 
 use crate::{
-    configuration::APP_CONFIG,
     math::{Rect, Vec2D},
     sketch_board::{KeyEventMsg, MouseButton, MouseEventMsg, MouseEventType, SketchBoardInput},
     style::Style,
@@ -176,21 +175,24 @@ impl Drawable for SelectionOverlay {
 }
 
 impl PointerTool {
-    /// True when we're being consulted implicitly and the hit drawable's
-    /// owning tool doesn't match the active drawing tool — in which case
-    /// the active tool wins the gesture.
-    fn should_pass_through_body_hit(&self, drawable: &dyn Drawable) -> bool {
-        let Some(active) = self.implicit_other_tool else {
-            return false;
-        };
-        // When the user has opted in to selecting any annotation, the
-        // Pointer always grabs whatever was clicked — never pass the
-        // body-hit through to the active drawing tool on a type
-        // mismatch. (Default on; see `select_any_annotation`.)
-        if APP_CONFIG.read().select_any_annotation() {
+    /// True when a drawing tool is armed and the click landed on the
+    /// INTERIOR of the hit drawable rather than its border — in which
+    /// case the drawing tool wins the gesture.
+    ///
+    /// A filled shape, a blur, a spotlight or a text pill can cover most
+    /// of the capture. Treating every pixel of one as "grab me" makes
+    /// the canvas under it unusable: you cannot start a text annotation
+    /// inside a filled rectangle, because the click selects the
+    /// rectangle. So the border grabs and the interior draws.
+    ///
+    /// The Pointer tool never sets `implicit_other_tool`, so selecting
+    /// anywhere on anything still works — that is what switching to it
+    /// is for.
+    fn should_pass_through_body_hit(&self, drawable: &dyn Drawable, point: Vec2D) -> bool {
+        if self.implicit_other_tool.is_none() {
             return false;
         }
-        drawable.tool_type() != Some(active)
+        !drawable.edge_hit_test(point, super::EDGE_HIT_TOLERANCE)
     }
 
     /// Hit-test against the handles of the currently-selected drawable —
@@ -509,13 +511,11 @@ impl Tool for PointerTool {
                 if let Some(id) = store.hit_test(event.pos, HIT_TOLERANCE)
                     && let Some(drawable) = store.clone_drawable(id)
                 {
-                    // Implicit mode + tool-type mismatch (only when the
-                    // select-any-annotation preference is off): yield so
-                    // the active drawing tool places a fresh annotation
-                    // on top instead of grabbing this one. (Pointer
-                    // itself never sets `implicit_other_tool`, so
-                    // explicit selection still works for any drawable.)
-                    if self.should_pass_through_body_hit(drawable.as_ref()) {
+                    // A drawing tool is armed and this landed inside a
+                    // large annotation rather than on its border: yield,
+                    // so the tool draws there instead of grabbing what
+                    // is underneath.
+                    if self.should_pass_through_body_hit(drawable.as_ref(), event.pos) {
                         return ToolUpdateResult::Unmodified;
                     }
 
@@ -721,7 +721,7 @@ impl Tool for PointerTool {
                 if event.n_pressed != 2
                     && let Some(id) = hit
                     && let Some(drawable) = store.clone_drawable(id)
-                    && self.should_pass_through_body_hit(drawable.as_ref())
+                    && self.should_pass_through_body_hit(drawable.as_ref(), event.pos)
                 {
                     let _ = id;
                     return ToolUpdateResult::Unmodified;

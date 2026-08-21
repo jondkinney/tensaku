@@ -3656,36 +3656,27 @@ impl SketchBoard {
             }
         }
 
-        // 2. Otherwise, a drawable under the pointer → grab — but only
-        //    when the active tool would actually grab it. With a non-
-        //    Pointer drawing tool active, a body click on a different-
-        //    typed drawable falls through so the user can place a new
-        //    annotation on top; the cursor follows that semantics and
-        //    stays on the tool's default (crosshair / custom).
+        // 2. Otherwise, a drawable under the pointer → grab, but only
+        //    where a click would actually grab it. The Pointer tool
+        //    grabs anywhere. With a drawing tool armed, only the
+        //    annotation's border grabs and its interior draws, so the
+        //    cursor says which you'll get: "grab" over the border, the
+        //    tool's own cursor over the interior.
         if cursor.is_none()
             && let Some(id) = self
                 .renderer
                 .hit_test(image_pos, crate::tools::HIT_TOLERANCE)
         {
-            let active = self.active_tool_type();
-            let same_type = active == Tools::Pointer
+            let grabbable = self.active_tool_type() == Tools::Pointer
                 || self
                     .renderer
                     .clone_drawable(id)
-                    .and_then(|d| d.tool_type())
-                    .map(|t| t == active)
+                    .map(|d| {
+                        d.edge_hit_test(image_pos, crate::tools::EDGE_HIT_TOLERANCE)
+                    })
                     .unwrap_or(false);
-            if same_type {
+            if grabbable {
                 cursor = Some("grab");
-            } else if APP_CONFIG.read().select_any_annotation() {
-                // Select-any mode: this annotation belongs to a
-                // different tool than the active one, but a click will
-                // still select it (see `PointerTool::
-                // should_pass_through_body_hit`). Show the pointer
-                // affordance so the cursor reflects that, instead of the
-                // active drawing tool's crosshair. With the pref off we
-                // fall through and keep whatever cursor the tool dictates.
-                cursor = Some("pointer");
             }
         }
 

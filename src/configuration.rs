@@ -159,7 +159,6 @@ pub struct Configuration {
     /// selects an annotation whose owning tool matches the active tool
     /// — otherwise it falls through and starts a new annotation.
     /// Default is true. Read by `PointerTool::should_pass_through_body_hit`.
-    select_any_annotation: bool,
     /// User preference: when true, pressing Esc on the canvas adds an
     /// `Action::Exit` to whatever `actions_on_escape` already runs, so
     /// the app closes. Default is false — Esc does nothing
@@ -762,9 +761,6 @@ impl Configuration {
         if let Some(v) = general.invert_scrolling {
             self.invert_scrolling = v;
         }
-        if let Some(v) = general.select_any_annotation {
-            self.select_any_annotation = v;
-        }
         if let Some(v) = general.close_on_esc {
             self.close_on_esc = v;
         }
@@ -1180,19 +1176,6 @@ impl Configuration {
         Ok(())
     }
 
-    pub fn select_any_annotation(&self) -> bool {
-        self.select_any_annotation
-    }
-
-    pub(crate) fn save_select_any_annotation(
-        &mut self,
-        value: bool,
-    ) -> Result<(), ConfigurationWriteError> {
-        self.write_general_bool("select-any-annotation", value)?;
-        self.select_any_annotation = value;
-        Ok(())
-    }
-
     pub fn close_on_esc(&self) -> bool {
         self.close_on_esc
     }
@@ -1414,7 +1397,6 @@ impl Default for Configuration {
             app_id: None,
             // Default matches the historical Preferences fallback.
             invert_scrolling: true,
-            select_any_annotation: true,
             close_on_esc: false,
             close_on_copy: false,
             close_on_save: false,
@@ -1552,13 +1534,6 @@ fn apply_legacy_preferences(
         &mut general.invert_scrolling,
         legacy.invert_scrolling,
         "invert-scrolling",
-        GeneralValue::Bool,
-        &mut updates,
-    );
-    migrate_general_value(
-        &mut general.select_any_annotation,
-        legacy.select_any_annotation,
-        "select-any-annotation",
         GeneralValue::Bool,
         &mut updates,
     );
@@ -1701,6 +1676,16 @@ struct ConfigurationFileGeneral {
     layer_panel_shortcut: Option<String>,
     scroll_capture_restore_region_shortcut: Option<String>,
     invert_scrolling: Option<bool>,
+    /// Removed. Selecting an annotation no longer has a mode: a large
+    /// annotation is grabbed by its border and its interior belongs to
+    /// whichever drawing tool is armed, while the Pointer tool selects
+    /// anywhere.
+    ///
+    /// Still accepted so a config written before the removal keeps
+    /// loading — the file format denies unknown fields, so dropping it
+    /// outright would turn an existing config into a parse error. The
+    /// value is ignored.
+    #[allow(dead_code)]
     select_any_annotation: Option<bool>,
     close_on_esc: Option<bool>,
     close_on_copy: Option<bool>,
@@ -1833,7 +1818,6 @@ mod tests {
         assert_eq!(config.annotation_size_factor(), 1.7);
         assert!(config.annotation_size_factor_is_explicit());
         assert!(!config.invert_scrolling());
-        assert!(!config.select_any_annotation());
         assert!(config.close_on_esc());
         assert!(config.close_on_copy());
         assert!(config.close_on_save());

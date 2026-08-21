@@ -239,6 +239,15 @@ impl Drawable for HighlightStroke {
         )
     }
 
+    /// Border-only picking: a highlight band covers what it marks, so its interior must stay
+    /// available to whichever drawing tool is armed. See
+    /// `Drawable::edge_hit_test`.
+    fn edge_hit_test(&self, point: Vec2D, tolerance: f32) -> bool {
+        self.bounds()
+            .map(|b| super::bbox_edge_hit(b, point, tolerance))
+            .unwrap_or(false)
+    }
+
     fn hit_test(&self, point: Vec2D, tolerance: f32) -> bool {
         if self.rest.is_empty() {
             return false;
