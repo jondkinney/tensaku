@@ -2064,8 +2064,9 @@ impl SketchBoard {
             }
             Tools::Text => {
                 let next = match self.cycle_seed_text() {
+                    TextBackground::Rounded => TextBackground::Outlined,
+                    TextBackground::Outlined => TextBackground::Plain,
                     TextBackground::Plain => TextBackground::Rounded,
-                    TextBackground::Rounded => TextBackground::Plain,
                 };
                 self.tools
                     .get(&Tools::Text)

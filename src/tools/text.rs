@@ -191,13 +191,20 @@ fn dashed_rounded_rect_path(
 /// the StyleToolbar dropdown (visible only when the Text tool is
 /// active). `Plain` renders the text glyphs directly on the canvas;
 /// `Rounded` adds a cream-colored rounded pill behind each line of
-/// text (the pill snugly fits each line's glyph metrics).
+/// text (the pill snugly fits each line's glyph metrics); `Outlined`
+/// strokes a contrasting edge around the glyphs themselves.
+///
+/// The three trade legibility against how much of the screenshot they
+/// cover. Plain hides nothing and is unreadable over busy pixels;
+/// the pill is readable anywhere and hides a whole rectangle;
+/// outlined is readable anywhere and hides only the glyph edges.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TextBackground {
     Plain,
     #[default]
     Rounded,
+    Outlined,
 }
 
 impl TextBackground {
@@ -206,7 +213,26 @@ impl TextBackground {
         match self {
             TextBackground::Plain => "Plain",
             TextBackground::Rounded => "Rounded",
+            TextBackground::Outlined => "Outlined",
         }
+    }
+}
+
+/// Outline thickness as a fraction of the font size. Heavy enough to
+/// survive over a busy screenshot at small sizes, and it scales with
+/// the text so the look holds at every size.
+const OUTLINE_WIDTH_RATIO: f32 = 0.17;
+
+/// The ink that reads against `color`: white behind dark text, black
+/// behind light. Same luminance rule the counter badge uses to pick
+/// its digit colour.
+/// <https://en.wikipedia.org/wiki/Luma_(video)>
+fn outline_color(color: femtovg::Color) -> femtovg::Color {
+    let luminance = 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b;
+    if luminance > 0.5 {
+        femtovg::Color::rgba(0, 0, 0, 235)
+    } else {
+        femtovg::Color::rgba(255, 255, 255, 235)
     }
 }
 
@@ -901,7 +927,35 @@ impl Drawable for Text {
             }
         }
 
+        // Outline pass first, so the glyph fill lands on top of it and
+        // the stroke reads as a halo around the letterform rather than
+        // a thickening of it. Stroking centres on the outline, so half
+        // the width falls inside the glyph — the ratio accounts for
+        // that.
+        let outline_paint = if matches!(self.background, TextBackground::Outlined) {
+            let mut paint = base_paint.clone();
+            paint.set_color(outline_color(self.style.color.into()));
+            let font_size = self
+                .style
+                .size
+                .to_text_size(self.style.annotation_size_factor) as f32;
+            paint.set_line_width(font_size * OUTLINE_WIDTH_RATIO);
+            paint.set_line_join(femtovg::LineJoin::Round);
+            paint.set_anti_alias(true);
+            Some(paint)
+        } else {
+            None
+        };
+
         for (idx, line_range) in lines.iter().enumerate() {
+            if let Some(outline) = &outline_paint {
+                canvas.stroke_text(
+                    line_layouts[idx].start_x,
+                    draw_baseline,
+                    &text[line_range.clone()],
+                    outline,
+                )?;
+            }
             canvas.fill_text(
                 line_layouts[idx].start_x,
                 draw_baseline,

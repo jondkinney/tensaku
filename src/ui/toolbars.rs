@@ -5460,7 +5460,7 @@ impl Component for StyleToolbar {
                     set_hexpand: false,
                     set_valign: gtk::Align::Center,
                     set_height_request: 34,
-                    set_model: Some(&gtk::StringList::new(&["Rounded", "Plain"])),
+                    set_model: Some(&gtk::StringList::new(&["Rounded", "Outlined", "Plain"])),
                     install_tooltip_above_markup: "Text background (<span face=\"Adwaita Sans\">⌃ ⇧</span> scroll to adjust)",
                     #[watch]
                     set_visible: model.current_tool == Tools::Text,
@@ -5476,7 +5476,8 @@ impl Component for StyleToolbar {
                         }
                         let bg = match dropdown.selected() {
                             0 => crate::tools::TextBackground::Rounded,
-                            1 => crate::tools::TextBackground::Plain,
+                            1 => crate::tools::TextBackground::Outlined,
+                            2 => crate::tools::TextBackground::Plain,
                             _ => return,
                         };
                         sender.output_sender().emit(ToolbarEvent::TextBackgroundSelected(bg));
@@ -5930,7 +5931,8 @@ impl Component for StyleToolbar {
                 if let Some(dd) = &self.text_background_dropdown {
                     let idx = match bg {
                         crate::tools::TextBackground::Rounded => 0,
-                        crate::tools::TextBackground::Plain => 1,
+                        crate::tools::TextBackground::Outlined => 1,
+                        crate::tools::TextBackground::Plain => 2,
                     };
                     if dd.selected() != idx {
                         if !emit_upstream {
@@ -6126,7 +6128,8 @@ impl Component for StyleToolbar {
         if let Some(bg) = crate::state::load_text_background() {
             let idx = match bg {
                 crate::tools::TextBackground::Rounded => 0,
-                crate::tools::TextBackground::Plain => 1,
+                crate::tools::TextBackground::Outlined => 1,
+                crate::tools::TextBackground::Plain => 2,
             };
             widgets.text_background_dropdown.set_selected(idx);
         }
