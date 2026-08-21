@@ -945,6 +945,20 @@ fn build_overlay(
     crosshair[1].set_valign(gtk::Align::Start);
     crosshair[1].set_size_request(-1, 1);
 
+    // Live pixel size of the region, beside the corner being dragged.
+    // Same pill and the same placement rule as the area capture — the
+    // rule lives there because that overlay owns the geometry helpers.
+    let readout_label = gtk::Label::new(None);
+    readout_label.add_css_class("scroll-capture-prompt-label");
+    let readout = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    readout.add_css_class("scroll-capture-pill");
+    readout.add_css_class("capture-readout");
+    readout.append(&readout_label);
+    readout.set_halign(gtk::Align::Start);
+    readout.set_valign(gtk::Align::Start);
+    readout.set_visible(false);
+    overlay.add_overlay(&readout);
+
     action_pill.set_visible(false);
     capturing_pill.set_visible(false);
 
@@ -1007,6 +1021,8 @@ fn build_overlay(
         let action_pill_w = action_pill.clone();
         let capturing_pill_w = capturing_pill.clone();
         let crosshair_drag = crosshair.clone();
+        let readout_a = readout.clone();
+        let readout_label_a = readout_label.clone();
         drag.connect_drag_update(move |_, dx, dy| {
             let mut s = state.borrow_mut();
             if !s.drag_active {
@@ -1034,7 +1050,10 @@ fn build_overlay(
                         w: dx.abs(),
                         h: dy.abs(),
                     };
+                    let selection = s.selection;
+                    let origin = s.drag_origin;
                     drop(s);
+                    show_readout(&readout_a, &readout_label_a, selection, origin, (ox + dx, oy + dy));
                     drawing_w.queue_draw();
                     return;
                 }
@@ -1063,11 +1082,14 @@ fn build_overlay(
                 w: dx.abs(),
                 h: dy.abs(),
             };
+            let selection = s.selection;
             drop(s);
+            show_readout(&readout_a, &readout_label_a, selection, (ox, oy), (ox + dx, oy + dy));
             drawing_w.queue_draw();
         });
     }
     {
+        let readout_end = readout.clone();
         let state = Rc::clone(&state);
         let drawing_w = drawing.clone();
         let window_w = window.clone();
@@ -1076,6 +1098,9 @@ fn build_overlay(
         let horiz_btn_w = horiz_auto_scroll.clone();
         let prompt_w = prompt.clone();
         drag.connect_drag_end(move |_, _dx, _dy| {
+            // The size was answering "how big is this drag"; the drag
+            // is over, and the action pill takes the screen from here.
+            readout_end.set_visible(false);
             let mut s = state.borrow_mut();
             if !s.drag_active {
                 // Tap that missed a button or handle — leave state alone.
@@ -4003,6 +4028,44 @@ fn measured_pill_size(pill: &gtk::Box) -> (f64, f64) {
     // stale immediately after pause/end content changes. Use the same
     // margin-neutral natural size for every placement and input-region update.
     pill_natural_size(pill)
+}
+
+/// Put the region's pixel size beside the corner being dragged.
+///
+/// The overlay works in logical pixels and the capture comes back in
+/// device ones, so the number is scaled to match the file rather than
+/// the screen — a 2x display would otherwise report half of what gets
+/// saved.
+fn show_readout(
+    readout: &gtk::Box,
+    label: &gtk::Label,
+    selection: Selection,
+    origin: (f64, f64),
+    corner: (f64, f64),
+) {
+    let scale = crate::display::hyprland_focused_monitor()
+        .map(|m| m.scale as f64)
+        .unwrap_or(1.0)
+        .max(0.0001);
+    let (w, h) = (
+        (selection.w * scale).round() as i64,
+        (selection.h * scale).round() as i64,
+    );
+    if w < 1 || h < 1 {
+        readout.set_visible(false);
+        return;
+    }
+    label.set_text(&format!("{w} × {h}"));
+    readout.set_visible(true);
+
+    let (pw, ph) = pill_natural_size(readout);
+    let screen = readout
+        .root()
+        .map(|r| (r.width() as f64, r.height() as f64))
+        .unwrap_or((0.0, 0.0));
+    let (x, y) = crate::region_capture::readout_position(origin, corner, (pw, ph), screen);
+    readout.set_margin_start(x as i32);
+    readout.set_margin_top(y as i32);
 }
 
 fn draw_backdrop(cr: &cairo::Context, w: f64, h: f64, s: &OverlayState) {

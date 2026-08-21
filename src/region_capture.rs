@@ -99,6 +99,10 @@ struct State {
     crosshair: [gtk::Box; 2],
     /// Where the pointer is, in logical pixels.
     pointer: (f64, f64),
+    /// Live pixel size of the selection, in the capture's own pixels —
+    /// what the saved file will measure, not what the overlay shows.
+    readout: gtk::Box,
+    readout_label: gtk::Label,
     /// The overlay's size in logical pixels, learned once it maps.
     size: (i32, i32),
     /// Image pixels per logical pixel, learned at draw time — the
@@ -164,8 +168,18 @@ fn build_overlay(
     });
 
     let fixed = gtk::Fixed::new();
+    let readout_label = gtk::Label::new(None);
+    readout_label.add_css_class("scroll-capture-prompt-label");
+    let readout = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    readout.add_css_class("scroll-capture-pill");
+    readout.add_css_class("capture-readout");
+    readout.append(&readout_label);
+    readout.set_visible(false);
+
     let state = Rc::new(RefCell::new(State {
         frozen: frozen.clone(),
+        readout: readout.clone(),
+        readout_label: readout_label.clone(),
         fixed: fixed.clone(),
         shade: shade.clone(),
         outline: outline.clone(),
@@ -216,6 +230,7 @@ fn build_overlay(
     for guide in &crosshair {
         fixed.put(guide, 0.0, 0.0);
     }
+    fixed.put(&readout, 0.0, 0.0);
     overlay.add_overlay(&fixed);
     // The cursor goes on the widget the pointer is actually over, not
     // the window: GTK resolves it from the widget under the pointer
@@ -298,6 +313,7 @@ fn layout_shade(state: &State) {
             place(index, 0.0, 0.0, 0.0, 0.0);
         }
         state.outline.set_visible(false);
+        state.readout.set_visible(false);
         layout_crosshair(state, true);
         return;
     };
@@ -316,6 +332,7 @@ fn layout_shade(state: &State) {
     state.outline.set_size_request(w as i32, h as i32);
     state.fixed.move_(&state.outline, x, y);
     state.outline.set_visible(w >= 1.0 && h >= 1.0);
+    layout_readout(state, rect);
     // Once there is a rectangle, it is the thing being aimed — the
     // guides would just be two more lines over it.
     layout_crosshair(state, false);
@@ -329,6 +346,35 @@ fn apply_cursor(widget: &gtk::Fixed, mode: Mode) {
         Mode::Area => "crosshair",
         Mode::Window => "pointer",
     }));
+}
+
+/// Show the selection's pixel size beside the corner being dragged.
+fn layout_readout(state: &State, rect: Rect) {
+    // The capture's pixels, not the overlay's: the number should match
+    // the file, and on a 2x display those differ by half.
+    let scaled = to_image_rect(rect, state.image_scale, &state.frozen);
+    if scaled.width < 1 || scaled.height < 1 {
+        state.readout.set_visible(false);
+        return;
+    }
+    state
+        .readout_label
+        .set_text(&format!("{} × {}", scaled.width, scaled.height));
+    state.readout.set_visible(true);
+
+    let (_, width, _, _) = state.readout.measure(gtk::Orientation::Horizontal, -1);
+    let (_, height, _, _) = state
+        .readout
+        .measure(gtk::Orientation::Vertical, width);
+    let corner = state.pointer;
+    let origin = state.origin;
+    let (x, y) = readout_position(
+        origin,
+        corner,
+        (width as f64, height as f64),
+        (state.size.0 as f64, state.size.1 as f64),
+    );
+    state.fixed.move_(&state.readout, x, y);
 }
 
 /// Put the guides through the pointer, or hide them.
@@ -513,6 +559,36 @@ fn install_keys(
     window.add_controller(keys);
 }
 
+/// Where the size readout goes for a selection dragged from `origin`
+/// to `corner`, given the readout's own size and the screen's.
+///
+/// It follows the moving corner and sits on the *outside* of it — the
+/// direction of the drag says which side that is, so the label never
+/// covers the pixels being measured. Clamped to the screen, because
+/// the moving corner is exactly what you drag off the edge.
+pub fn readout_position(
+    origin: (f64, f64),
+    corner: (f64, f64),
+    readout: (f64, f64),
+    screen: (f64, f64),
+) -> (f64, f64) {
+    const GAP: f64 = 12.0;
+    let x = if corner.0 >= origin.0 {
+        corner.0 + GAP
+    } else {
+        corner.0 - GAP - readout.0
+    };
+    let y = if corner.1 >= origin.1 {
+        corner.1 + GAP
+    } else {
+        corner.1 - GAP - readout.1
+    };
+    (
+        x.clamp(0.0, (screen.0 - readout.0).max(0.0)),
+        y.clamp(0.0, (screen.1 - readout.1).max(0.0)),
+    )
+}
+
 /// Normalise two corners into a rectangle, whichever way it was dragged.
 fn rect_between(a: (f64, f64), b: (f64, f64)) -> Rect {
     let x = a.0.min(b.0);
@@ -544,6 +620,7 @@ fn install_css(app: &gtk::Application) {
          /* The dim sheet, as strips GTK composites rather than pixels
             cairo blends on every motion event. */
          .capture-shade { background: rgba(0, 0, 0, 0.45); }
+         .capture-readout { padding: 4px 10px; }
          .region-capture-outline {
              border: 1px solid rgba(255, 255, 255, 0.9);
          }
@@ -580,7 +657,7 @@ fn install_css(app: &gtk::Application) {
 
 #[cfg(test)]
 mod tests {
-    use super::{MIN_DRAG, Mode, Rect, rect_between, to_image_rect};
+    use super::{MIN_DRAG, Mode, Rect, readout_position, rect_between, to_image_rect};
     use relm4::gtk::gdk_pixbuf::{Colorspace, Pixbuf};
 
     /// Dragging up-left has to produce the same rectangle as dragging
@@ -612,6 +689,32 @@ mod tests {
     /// A 2x display hands back a capture twice the overlay's logical
     /// size, and a selection that ignored that would crop a quarter of
     /// what was outlined.
+    /// The readout follows the corner being dragged and sits outside
+    /// it, so it never covers the pixels it is measuring.
+    #[test]
+    fn the_readout_sits_outside_the_moving_corner() {
+        let screen = (2000.0, 1200.0);
+        let size = (90.0, 30.0);
+        // Dragging down-right: below and right of the corner.
+        let (x, y) = readout_position((100.0, 100.0), (500.0, 400.0), size, screen);
+        assert!(x > 500.0 && y > 400.0);
+        // Dragging up-left: above and left, clear of the corner.
+        let (x, y) = readout_position((500.0, 400.0), (100.0, 100.0), size, screen);
+        assert!(x + size.0 < 100.0 && y + size.1 < 100.0);
+    }
+
+    /// The corner you drag is the one you drag off the screen, so the
+    /// readout has to stay on it.
+    #[test]
+    fn the_readout_stays_on_screen() {
+        let screen = (2000.0, 1200.0);
+        let size = (90.0, 30.0);
+        let (x, y) = readout_position((100.0, 100.0), (1999.0, 1199.0), size, screen);
+        assert!(x + size.0 <= screen.0 && y + size.1 <= screen.1);
+        let (x, y) = readout_position((500.0, 400.0), (0.0, 0.0), size, screen);
+        assert!(x >= 0.0 && y >= 0.0);
+    }
+
     #[test]
     fn a_selection_converts_into_the_captures_own_pixels() {
         let frozen = Pixbuf::new(Colorspace::Rgb, true, 8, 6144, 3456).unwrap();
