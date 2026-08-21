@@ -1808,6 +1808,42 @@ impl SketchBoard {
     /// fold to `ModifyDrawable`, multi-element to `ModifyDrawables`,
     /// empty to `Unmodified` so callers can fall through to a
     /// "treat as default" branch when nothing relevant was selected.
+    /// Flip the fill of every selected annotation that `tool` drew.
+    /// `None` when the selection holds none of them, which is the
+    /// caller's signal to treat the key as a plain tool switch.
+    ///
+    /// The first match decides the new state, so a group of mixed
+    /// rectangles converges on one fill instead of each flipping to
+    /// its own opposite and leaving the group as mixed as it started.
+    fn toggle_fill_on_selection(&mut self, tool: Tools) -> Option<ToolUpdateResult> {
+        let selected = self
+            .tools
+            .get(&Tools::Pointer)
+            .borrow()
+            .selected_drawables();
+        let new_fill = selected.iter().find_map(|id| {
+            let drawable = self.renderer.clone_drawable(*id)?;
+            if drawable.tool_type() != Some(tool) {
+                return None;
+            }
+            drawable.style().map(|style| !style.fill)
+        })?;
+        Some(self.apply_to_selection(|d| {
+            if d.tool_type() != Some(tool) {
+                return false;
+            }
+            let Some(mut style) = d.style() else {
+                return false;
+            };
+            if style.fill == new_fill {
+                return false;
+            }
+            style.fill = new_fill;
+            d.set_style(style);
+            true
+        }))
+    }
+
     fn apply_to_selection<F>(&mut self, mut mutate: F) -> ToolUpdateResult
     where
         F: FnMut(&mut dyn Drawable) -> bool,
@@ -2859,6 +2895,28 @@ impl SketchBoard {
                         self.last_tool_press = None;
                         sender.input(SketchBoardInput::ToolbarEvent(ToolbarEvent::ApplyCrop));
                         return ToolUpdateResult::Unmodified;
+                    }
+                    // A single `r` / `e` with that shape selected
+                    // toggles the fill of what's selected. The key
+                    // acts on the annotation in hand rather than
+                    // switching to a tool the user is plainly already
+                    // working in — same instinct as the color keys,
+                    // which have always edited the selection.
+                    //
+                    // It edits only those annotations, not the
+                    // next-annotation default: `rr` / `ee` still set
+                    // that, and quietly redefining the default from an
+                    // edit to one shape would be a second, invisible
+                    // effect. With nothing of that shape selected the
+                    // key still switches tools.
+                    if matches!(tool, Tools::Rectangle | Tools::Ellipse)
+                        && let Some(result) = self.toggle_fill_on_selection(tool)
+                    {
+                        // Forget the press so the NEXT one is read
+                        // fresh: two taps here are two toggles, not a
+                        // style cycle.
+                        self.last_tool_press = None;
+                        return result;
                     }
                     // Double-press cycle: if the user presses the
                     // SAME tool key twice within TOOL_CYCLE_MS AND
