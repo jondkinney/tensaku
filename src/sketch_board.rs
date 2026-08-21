@@ -80,6 +80,10 @@ pub enum SketchBoardInput {
     ExitCropToPreviousTool,
     /// Mirror the current `style.fill` out to the StyleToolbar after
     /// a programmatic toggle (the `F` keyboard shortcut routes
+    /// The pointer left the canvas widget — drop any hover-only
+    /// preview so it doesn't sit frozen on screen.
+    PointerLeftCanvas,
+
     /// through `ToolbarEvent::ToggleFill`, which updates
     /// `style.fill` but doesn't touch the toolbar's mirror — that's
     /// done lazily on button click; this sync signal closes the loop).
@@ -1570,11 +1574,6 @@ impl SketchBoard {
         }
         if self.renderer.image_dimensions() != before_dims {
             self.refit_after_dims_change(sender);
-        }
-        // Undoing a stamped counter rolls the next number back, so the
-        // cursor previewing that number is now wrong.
-        if self.active_tool_type() == Tools::Marker {
-            self.apply_idle_cursor();
         }
     }
 
@@ -3731,6 +3730,19 @@ impl SketchBoard {
             }
         }
 
+        // 2.5. The Counter's ghost badge: the number a click would
+        //      stamp, painted into the canvas under the pointer at its
+        //      real size and color. `cursor.is_none()` here means no
+        //      handle, no editing body and nothing grabbable is under
+        //      the pointer — i.e. a click really would place one — so
+        //      the ghost appears exactly where the stamp would land
+        //      and nowhere else.
+        if self.set_marker_ghost(
+            (self.active_tool_type() == Tools::Marker && cursor.is_none()).then_some(image_pos),
+        ) {
+            self.refresh_screen();
+        }
+
         // 3. Tool-specific default for empty canvas. Brush/Highlighter
         //    take a custom-rendered cursor that previews stroke
         //    geometry; everything else falls through to a named cursor.
@@ -3786,12 +3798,21 @@ impl SketchBoard {
         self.renderer.set_cursor_from_name(cursor);
     }
 
+    /// Park the Counter's ghost badge at `pos`, or clear it with
+    /// `None`. Returns whether the canvas needs a redraw.
+    fn set_marker_ghost(&mut self, pos: Option<Vec2D>) -> bool {
+        self.tools
+            .get(&Tools::Marker)
+            .borrow_mut()
+            .set_hover_preview(pos)
+    }
+
     /// Tools whose cursor is painted from live state — stroke size,
     /// badge color and number — rather than picked from the stock
     /// names. Their cursor has to be rebuilt whenever that state
     /// changes, not just on the next motion event.
     fn has_custom_cursor(tool: Tools) -> bool {
-        matches!(tool, Tools::Brush | Tools::Highlighter | Tools::Marker)
+        matches!(tool, Tools::Brush | Tools::Highlighter)
     }
 
     /// Cursor to show when nothing is under the pointer.
@@ -3800,6 +3821,11 @@ impl SketchBoard {
             // Pointer + Crop use the default arrow — they manipulate or
             // frame the image rather than draw new geometry.
             Tools::Pointer | Tools::Crop => None,
+            // The counter's ghost badge already shows what lands and
+            // where, so the cursor's job is just "click to place" —
+            // the pointing hand, not a crosshair aiming at a preview
+            // that is right there under it.
+            Tools::Marker => Some("pointer"),
             _ => Some("crosshair"),
         }
     }
@@ -3821,7 +3847,6 @@ impl SketchBoard {
         // cursor visually in lock-step with the stroke that comes out
         // of it.
         let dpr = crate::femtovg_area::current_device_pixel_ratio() as f64;
-        let marker_number = self.active_tool.borrow().next_marker_number();
         crate::ui::cursor::drawing_tool_cursor(
             self.active_tool_type(),
             &self.style,
@@ -3829,7 +3854,6 @@ impl SketchBoard {
             dpr,
             band_height_image_px,
             band_vertical_offset_image_px,
-            marker_number,
         )
     }
 
@@ -4766,6 +4790,9 @@ impl Component for SketchBoard {
                             Vec2D::new(x as f32, y as f32),
                             false
                         ));
+                    },
+                    connect_leave[sender] => move |_| {
+                        sender.input(SketchBoardInput::PointerLeftCanvas);
                     }
                 }
                     },  // end FemtoVGArea
@@ -5427,6 +5454,14 @@ impl Component for SketchBoard {
                 });
                 ToolUpdateResult::Unmodified
             }
+            SketchBoardInput::PointerLeftCanvas => {
+                // Otherwise the Counter's ghost sits frozen wherever
+                // the pointer last was, looking like a placed badge.
+                if self.set_marker_ghost(None) {
+                    self.refresh_screen();
+                }
+                ToolUpdateResult::Unmodified
+            }
             SketchBoardInput::SyncFillToToolbar => {
                 sender
                     .output_sender()
@@ -5739,13 +5774,6 @@ impl Component for SketchBoard {
                     self.renderer.request_render(&[Action::SaveToClipboard]);
                 }
                 self.refresh_screen();
-                // The Counter's cursor previews the NEXT number, so
-                // stamping one has to rebuild it — otherwise it keeps
-                // advertising the number that just landed until the
-                // pointer happens to move.
-                if self.active_tool_type() == Tools::Marker {
-                    self.apply_idle_cursor();
-                }
             }
             ToolUpdateResult::ModifyDrawable(id, drawable) => {
                 self.renderer.modify(id, drawable);

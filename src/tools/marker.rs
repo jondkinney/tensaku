@@ -22,6 +22,10 @@ pub struct MarkerTool {
     next_number: Rc<RefCell<u16>>,
     input_enabled: bool,
     sender: Option<Sender<SketchBoardInput>>,
+    /// The badge a click would stamp, parked under the pointer. Drawn
+    /// through the same path as a committed one — real font, real
+    /// size, real zoom — just translucent and never exported.
+    ghost: Option<Marker>,
 }
 
 #[derive(Clone, Debug)]
@@ -34,7 +38,14 @@ pub struct Marker {
     number: u16,
     style: Style,
     tool_next_number: Rc<RefCell<u16>>,
+    /// Hover preview rather than a real annotation: same geometry,
+    /// drawn see-through so it reads as "this is what you'd get".
+    ghost: bool,
 }
+
+/// Ghost opacity. Solid enough to read the number against a busy
+/// screenshot, sheer enough that it never looks already-placed.
+const GHOST_ALPHA: f32 = 0.72;
 
 impl Drawable for Marker {
     fn as_any(&self) -> &dyn std::any::Any {
@@ -47,6 +58,10 @@ impl Drawable for Marker {
         "number-circle-1-regular"
     }
 
+    fn is_hover_preview(&self) -> bool {
+        self.ghost
+    }
+
     fn draw(
         &self,
         canvas: &mut femtovg::Canvas<femtovg::renderer::OpenGl>,
@@ -55,14 +70,18 @@ impl Drawable for Marker {
     ) -> anyhow::Result<()> {
         let text = format!("{}", self.number);
 
-        let marker_color: Color = self.style.color.into();
+        let mut marker_color: Color = self.style.color.into();
         // https://en.wikipedia.org/wiki/Luma_(video)
         let luminance = 0.2126 * marker_color.r + 0.7152 * marker_color.g + 0.0722 * marker_color.b;
-        let text_color = if luminance > 0.5 {
+        let mut text_color = if luminance > 0.5 {
             Color::black()
         } else {
             Color::white()
         };
+        if self.ghost {
+            marker_color.a *= GHOST_ALPHA;
+            text_color.a *= GHOST_ALPHA;
+        }
 
         let mut paint = Paint::color(text_color);
 
@@ -207,7 +226,7 @@ impl Drawable for Marker {
 /// A free function rather than a method because the cursor previews the
 /// badge before any `Marker` exists to ask, and a preview sized by its
 /// own copy of these numbers would drift from the badge it promises.
-pub fn marker_text_size(size: crate::style::Size, factor: f32, scale: f32) -> f32 {
+fn marker_text_size(size: crate::style::Size, factor: f32, scale: f32) -> f32 {
     let base = match size {
         crate::style::Size::XSmall => 14.0,
         crate::style::Size::Small => 22.0,
@@ -222,7 +241,7 @@ pub fn marker_text_size(size: crate::style::Size, factor: f32, scale: f32) -> f3
 /// Approximate badge radius for `text_size`, without canvas-bound text
 /// metrics — wider for a two- or three-digit number, same as the real
 /// disc. Shared with the cursor preview.
-pub fn marker_radius(text_size: f32, number: u16) -> f32 {
+fn marker_radius(text_size: f32, number: u16) -> f32 {
     let digits = number.to_string().len() as f32;
     let w = text_size * 0.7 * digits.max(1.0);
     let h = text_size;
@@ -253,7 +272,35 @@ impl Tool for MarkerTool {
     }
 
     fn get_drawable(&self) -> Option<&dyn Drawable> {
-        None
+        self.ghost.as_ref().map(|m| m as &dyn Drawable)
+    }
+
+    fn set_hover_preview(&mut self, pos: Option<Vec2D>) -> bool {
+        let Some(pos) = pos else {
+            return self.ghost.take().is_some();
+        };
+        let number = *self.next_number.borrow();
+        // Skip the redraw when nothing about the badge would differ —
+        // the pointer sitting still, or a motion event that rounds to
+        // the same image pixel.
+        if let Some(g) = &self.ghost
+            && g.pos == pos
+            && g.number == number
+            && g.style.color == self.style.color
+            && g.style.size == self.style.size
+            && g.style.annotation_size_factor == self.style.annotation_size_factor
+        {
+            return false;
+        }
+        self.ghost = Some(Marker {
+            pos,
+            scale: 1.0,
+            number,
+            style: self.style,
+            tool_next_number: self.next_number.clone(),
+            ghost: true,
+        });
+        true
     }
 
     fn handle_style_event(&mut self, style: Style) -> ToolUpdateResult {
@@ -271,6 +318,7 @@ impl Tool for MarkerTool {
                         number: *self.next_number.borrow(),
                         style: self.style,
                         tool_next_number: self.next_number.clone(),
+                        ghost: false,
                     };
 
                     // increment for next
@@ -288,10 +336,6 @@ impl Tool for MarkerTool {
     fn set_sender(&mut self, sender: Sender<SketchBoardInput>) {
         self.sender = Some(sender);
     }
-
-    fn next_marker_number(&self) -> Option<u16> {
-        Some(*self.next_number.borrow())
-    }
 }
 
 impl Default for MarkerTool {
@@ -301,6 +345,7 @@ impl Default for MarkerTool {
             next_number: Rc::new(RefCell::new(1)),
             input_enabled: true,
             sender: None,
+            ghost: None,
         }
     }
 }

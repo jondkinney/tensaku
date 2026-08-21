@@ -2881,7 +2881,12 @@ impl FemtoVgAreaMut {
         // A move drag (`DragMode::Body`) keeps the old no-decoration look.
         {
             let at = self.active_tool.borrow();
-            if let Some(d) = at.get_drawable() {
+            // Hover-only previews (the Counter's ghost badge) are
+            // editor furniture, not annotations — they must never
+            // reach an export or the clipboard.
+            if let Some(d) = at.get_drawable()
+                && (onscreen || !d.is_hover_preview())
+            {
                 let resizing = at.is_resizing();
                 super::set_current_drawable_is_selected(resizing);
                 d.draw(canvas, font, bounds)?;

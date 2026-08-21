@@ -270,10 +270,12 @@ pub trait Tool {
         None
     }
 
-    /// The number the next click would stamp. Only the Counter answers;
-    /// the cursor uses it to preview that exact badge.
-    fn next_marker_number(&self) -> Option<u16> {
-        None
+    /// Park a hover-only preview of what a click here would create,
+    /// or clear it with `None`. Only the Counter answers — its ghost
+    /// badge. Returns whether anything changed, so the caller can skip
+    /// a redraw when the pointer hasn't moved far enough to matter.
+    fn set_hover_preview(&mut self, _pos: Option<Vec2D>) -> bool {
+        false
     }
 }
 
@@ -465,6 +467,12 @@ pub trait Drawable: DrawableClone + Debug {
     /// distinct from their edge, so their whole body stays grabbable.
     fn edge_hit_test(&self, point: Vec2D, tolerance: f32) -> bool {
         self.hit_test(point, tolerance)
+    }
+
+    /// A hover-only preview of an annotation that hasn't been created
+    /// yet. It is editor furniture: drawn on screen, never exported.
+    fn is_hover_preview(&self) -> bool {
+        false
     }
 
     /// Translate the drawable by `delta` (image coordinates).
@@ -1209,7 +1217,6 @@ pub use crop::{AspectRatio, CropBgColor, CropHit, CropTool};
 pub use ellipse::EllipseTool;
 pub use highlight::{HighlightTool, HighlighterStyle, Highlighters};
 pub use line::LineTool;
-pub use marker::{marker_radius, marker_text_size};
 pub use pasted_image::PastedImage;
 pub use rectangle::RectangleTool;
 pub use spotlight::SpotlightTool;
