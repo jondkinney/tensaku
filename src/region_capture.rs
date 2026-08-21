@@ -199,7 +199,6 @@ fn build_overlay(
     // region that can't screenshot the bar.
     window.set_exclusive_zone(-1);
     window.add_css_class("region-capture-overlay");
-    window.set_cursor_from_name(Some("crosshair"));
 
     let overlay = gtk::Overlay::new();
     // The capture as a widget: GTK uploads it once and composites it,
@@ -218,6 +217,10 @@ fn build_overlay(
         fixed.put(guide, 0.0, 0.0);
     }
     overlay.add_overlay(&fixed);
+    // The cursor goes on the widget the pointer is actually over, not
+    // the window: GTK resolves it from the widget under the pointer
+    // outward, and every event here lands on this surface.
+    apply_cursor(&fixed, Mode::Area);
 
     let hint = gtk::Label::new(Some(Mode::Area.hint()));
     hint.add_css_class("region-capture-hint");
@@ -306,6 +309,16 @@ fn layout_shade(state: &State) {
     // Once there is a rectangle, it is the thing being aimed — the
     // guides would just be two more lines over it.
     layout_crosshair(state, false);
+}
+
+/// The pointer shape for `mode`: crosshairs while a region is being
+/// aimed, because the cursor is the thing doing the aiming, and a hand
+/// where the click picks a whole window.
+fn apply_cursor(widget: &gtk::Fixed, mode: Mode) {
+    widget.set_cursor_from_name(Some(match mode {
+        Mode::Area => "crosshair",
+        Mode::Window => "pointer",
+    }));
 }
 
 /// Put the guides through the pointer, or hide them.
@@ -441,6 +454,7 @@ fn install_keys(
     hint: &gtk::Label,
     shared: &Rc<RefCell<RegionOutcome>>,
 ) {
+    let cursor_target = state.borrow().fixed.clone();
     let keys = gtk::EventControllerKey::new();
     let state = Rc::clone(state);
     let hint = hint.clone();
@@ -479,12 +493,7 @@ fn install_keys(
                     state.hovered = None;
                     hint.set_text(state.mode.hint());
                 }
-                window_for_keys.set_cursor_from_name(Some(
-                    match state.borrow().mode {
-                        Mode::Area => "crosshair",
-                        Mode::Window => "pointer",
-                    },
-                ));
+                apply_cursor(&cursor_target, state.borrow().mode);
                 layout_shade(&state.borrow());
                 gtk::glib::Propagation::Stop
             }
