@@ -58,6 +58,20 @@ const PICTURE_TOOLTIP: &str = "Click to open in the editor · Drag into another 
 /// waiting when the next frame asks for it.
 const POLL_INTERVAL: Duration = Duration::from_millis(2);
 
+/// How far ahead of the pointer to place a dragged pin. Measured: the
+/// pin lands about 12ms behind the pointer, and that is a frame of
+/// compositor work rather than anything this side can skip.
+const LEAD: Duration = Duration::from_millis(12);
+
+/// Most a lead may add, in pixels. Past a flick this fast the guess is
+/// worth less than the overshoot it causes.
+const LEAD_CAP: i32 = 48;
+
+/// How much of each reading folds into the smoothed speed. Low enough
+/// that a jittery hand doesn't throw the lead around, high enough that
+/// a change of direction is followed within a frame or two.
+const VELOCITY_BLEND: f32 = 0.35;
+
 /// Gap between stacked pins.
 const PIN_GAP: i32 = 12;
 
@@ -505,10 +519,12 @@ fn install_move(window: &gtk::Window, target: &gtk::Button, bottom_margin: i32) 
             {
                 let cursor = Arc::clone(&cursor);
                 std::thread::spawn(move || {
+                    let mut last = std::time::Instant::now();
                     while cursor.following.load(Ordering::Relaxed) {
                         if let Some((x, y)) = crate::hypr::cursor_position() {
-                            cursor.x.store(x, Ordering::Relaxed);
-                            cursor.y.store(y, Ordering::Relaxed);
+                            let now = std::time::Instant::now();
+                            cursor.sample(x, y, now.duration_since(last).as_secs_f32());
+                            last = now;
                         }
                         std::thread::sleep(POLL_INTERVAL);
                     }
@@ -533,8 +549,7 @@ fn install_move(window: &gtk::Window, target: &gtk::Button, bottom_margin: i32) 
                 // down.
                 crate::ui::toolbars::dismiss_active_tooltip();
 
-                let x = cursor_for_tick.x.load(Ordering::Relaxed);
-                let y = cursor_for_tick.y.load(Ordering::Relaxed);
+                let (x, y) = cursor_for_tick.predicted();
                 // Anchored bottom-right, so moving right shrinks the
                 // right margin. Clamped so a pin can't be pushed off
                 // the edge it hangs from and out of reach.
@@ -572,6 +587,11 @@ fn install_move(window: &gtk::Window, target: &gtk::Button, bottom_margin: i32) 
 struct CursorFollow {
     x: AtomicI32,
     y: AtomicI32,
+    /// Pointer speed in pixels per second, smoothed. Used to place the
+    /// pin where the pointer will be when the frame lands rather than
+    /// where it was when the frame was built.
+    vx: AtomicI32,
+    vy: AtomicI32,
     following: AtomicBool,
 }
 
@@ -580,8 +600,54 @@ impl CursorFollow {
         Self {
             x: AtomicI32::new(origin.0),
             y: AtomicI32::new(origin.1),
+            vx: AtomicI32::new(0),
+            vy: AtomicI32::new(0),
             following: AtomicBool::new(true),
         }
+    }
+
+    /// Where the pointer will be `LEAD` from now, at its current
+    /// speed.
+    ///
+    /// Measured end to end, a pin lands about 12ms after the pointer
+    /// it is following: the compositor has to accept a new margin,
+    /// lay the surface out and present it, and that is a frame's work
+    /// however the margin got there. Leading by that much cancels it,
+    /// which is what turns "close behind" into "attached".
+    ///
+    /// Capped, because a lead is a guess: at a direction change the
+    /// guess is wrong, and a small wrong guess reads as softness while
+    /// a large one reads as the pin overshooting and snapping back.
+    fn predicted(&self) -> (i32, i32) {
+        let lead = LEAD.as_secs_f32();
+        let step = |v: &AtomicI32| {
+            ((v.load(Ordering::Relaxed) as f32 * lead).round() as i32).clamp(-LEAD_CAP, LEAD_CAP)
+        };
+        (
+            self.x.load(Ordering::Relaxed) + step(&self.vx),
+            self.y.load(Ordering::Relaxed) + step(&self.vy),
+        )
+    }
+
+    /// Record a reading and fold it into the smoothed speed.
+    fn sample(&self, x: i32, y: i32, dt: f32) {
+        if dt > 0.0 {
+            let blend = |old: &AtomicI32, delta: i32| {
+                let instant = delta as f32 / dt;
+                let previous = old.load(Ordering::Relaxed) as f32;
+                // A plain difference of two readings is mostly noise
+                // at this rate; the average of the recent past is what
+                // a hand is actually doing.
+                old.store(
+                    (previous * (1.0 - VELOCITY_BLEND) + instant * VELOCITY_BLEND).round() as i32,
+                    Ordering::Relaxed,
+                );
+            };
+            blend(&self.vx, x - self.x.load(Ordering::Relaxed));
+            blend(&self.vy, y - self.y.load(Ordering::Relaxed));
+        }
+        self.x.store(x, Ordering::Relaxed);
+        self.y.store(y, Ordering::Relaxed);
     }
 }
 
