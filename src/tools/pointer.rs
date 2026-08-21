@@ -189,18 +189,7 @@ impl PointerTool {
     /// anywhere on anything still works — that is what switching to it
     /// is for.
     fn should_pass_through_body_hit(&self, drawable: &dyn Drawable, point: Vec2D) -> bool {
-        let Some(armed) = self.implicit_other_tool else {
-            return false;
-        };
-        // The counter is a stamp: a click IS the whole gesture, and the
-        // thing you most often want to number is a piece of text. So it
-        // overrides text's always-grabbable rule and stamps on top.
-        // Other tools keep that rule, because for them a click on a text
-        // box means "move this", not "start something here".
-        if armed == Tools::Marker && drawable.tool_type() == Some(Tools::Text) {
-            return true;
-        }
-        !drawable.edge_hit_test(point, super::EDGE_HIT_TOLERANCE)
+        !super::click_grabs_drawable(self.implicit_other_tool, drawable, point)
     }
 
     /// Hit-test against the handles of the currently-selected drawable —

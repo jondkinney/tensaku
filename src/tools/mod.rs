@@ -719,6 +719,37 @@ pub const EDGE_HIT_TOLERANCE: f32 = 14.0;
 ///
 /// Inside and outside by `tolerance` both count, so the target is
 /// `2 * tolerance` wide and a slightly-missed grab still lands.
+/// Does a click at `point` grab `drawable`, or fall through to the
+/// drawing tool `armed` behind it? `armed` is `None` when the Pointer
+/// tool is active, which grabs anywhere.
+///
+/// Both the click handler and the hover cursor ask this, so the cursor
+/// can't promise a grab the click won't perform.
+pub fn click_grabs_drawable(armed: Option<Tools>, drawable: &dyn Drawable, point: Vec2D) -> bool {
+    grab_rule(
+        armed,
+        drawable.tool_type(),
+        drawable.edge_hit_test(point, EDGE_HIT_TOLERANCE),
+    )
+}
+
+/// The rule behind `click_grabs_drawable`, split from the `Drawable`
+/// so it can be tested without standing up a whole annotation.
+fn grab_rule(armed: Option<Tools>, target: Option<Tools>, edge_hit: bool) -> bool {
+    let Some(armed) = armed else {
+        return true;
+    };
+    // The counter is a stamp: the click IS the whole gesture, and the
+    // thing you most often want to number is a piece of text. So it
+    // overrides text's always-grabbable rule and stamps on top. Every
+    // other tool keeps that rule, because for them a click on a text
+    // box means "move this", not "start something here".
+    if armed == Tools::Marker && target == Some(Tools::Text) {
+        return false;
+    }
+    edge_hit
+}
+
 pub fn bbox_edge_hit(rect: Rect, point: Vec2D, tolerance: f32) -> bool {
     if !rect.inflated(tolerance).contains(point) {
         return false;
@@ -1653,8 +1684,31 @@ mod canvas_transform_tests {
 
 #[cfg(test)]
 mod edge_hit_tests {
-    use super::{EDGE_HIT_TOLERANCE, HIT_TOLERANCE, bbox_edge_hit};
+    use super::{EDGE_HIT_TOLERANCE, HIT_TOLERANCE, Tools, bbox_edge_hit, grab_rule};
     use crate::math::{Rect, Vec2D};
+
+    /// The counter stamps over a text box; every other armed tool
+    /// still grabs it anywhere, which is what stops the Text tool
+    /// from stacking a second box on an existing one.
+    #[test]
+    fn the_counter_stamps_over_text_and_nothing_else_does() {
+        let text = Some(Tools::Text);
+        assert!(!grab_rule(Some(Tools::Marker), text, false));
+        assert!(!grab_rule(Some(Tools::Marker), text, true));
+        assert!(grab_rule(Some(Tools::Text), text, true));
+        assert!(grab_rule(Some(Tools::Arrow), text, true));
+        // ... and the counter still grabs a counter, so a stamped
+        // number can be repositioned without switching tools.
+        assert!(grab_rule(Some(Tools::Marker), Some(Tools::Marker), true));
+    }
+
+    /// The Pointer tool grabs anywhere on anything — that is what
+    /// switching to it is for.
+    #[test]
+    fn the_pointer_grabs_the_interior() {
+        assert!(grab_rule(None, Some(Tools::Text), false));
+        assert!(grab_rule(None, Some(Tools::Rectangle), false));
+    }
 
     fn rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
         Rect::new(Vec2D::new(x, y), Vec2D::new(w, h))

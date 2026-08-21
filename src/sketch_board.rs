@@ -3703,20 +3703,24 @@ impl SketchBoard {
         //    grabs anywhere. With a drawing tool armed, only the
         //    annotation's border grabs and its interior draws, so the
         //    cursor says which you'll get: "grab" over the border, the
-        //    tool's own cursor over the interior.
+        //    tool's own cursor over the interior. Shares one rule with
+        //    the click handler, so the cursor can't promise a grab the
+        //    click won't perform — the counter over a text box reads as
+        //    "stamp here", not "move this".
         if cursor.is_none()
             && let Some(id) = self
                 .renderer
                 .hit_test(image_pos, crate::tools::HIT_TOLERANCE)
         {
-            let grabbable = self.active_tool_type() == Tools::Pointer
-                || self
-                    .renderer
-                    .clone_drawable(id)
-                    .map(|d| {
-                        d.edge_hit_test(image_pos, crate::tools::EDGE_HIT_TOLERANCE)
-                    })
-                    .unwrap_or(false);
+            let armed = match self.active_tool_type() {
+                Tools::Pointer => None,
+                other => Some(other),
+            };
+            let grabbable = self
+                .renderer
+                .clone_drawable(id)
+                .map(|d| crate::tools::click_grabs_drawable(armed, d.as_ref(), image_pos))
+                .unwrap_or(false);
             if grabbable {
                 cursor = Some("grab");
             }
