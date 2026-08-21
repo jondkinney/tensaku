@@ -129,10 +129,11 @@ impl Blur {
         size: Vec2D,
         sigma: f32,
     ) -> Result<ImageId> {
-        let (x, y, w, h) =
-            super::canvas_region(canvas, pos, size).ok_or_else(|| anyhow!("blur region off-canvas"))?;
-        let sub = crate::femtovg_area::read_framebuffer_region(canvas.height() as usize, x, y, w, h)
-            .ok_or_else(|| anyhow!("framebuffer readback failed"))?;
+        let (x, y, w, h) = super::canvas_region(canvas, pos, size)
+            .ok_or_else(|| anyhow!("blur region off-canvas"))?;
+        let sub =
+            crate::femtovg_area::read_framebuffer_region(canvas.height() as usize, x, y, w, h)
+                .ok_or_else(|| anyhow!("framebuffer readback failed"))?;
 
         let src_image_id = canvas.create_image(sub.as_ref(), ImageFlags::empty())?;
         let dst_image_id =
@@ -338,9 +339,14 @@ impl Blur {
             .round()
             .max(2.0) as usize;
 
-        let sub =
-            crate::femtovg_area::read_framebuffer_region(canvas.height() as usize, x, y, src_w, src_h)
-                .ok_or_else(|| anyhow!("framebuffer readback failed"))?;
+        let sub = crate::femtovg_area::read_framebuffer_region(
+            canvas.height() as usize,
+            x,
+            y,
+            src_w,
+            src_h,
+        )
+        .ok_or_else(|| anyhow!("framebuffer readback failed"))?;
         let src = sub.buf();
 
         let dst_w = src_w.div_ceil(canvas_cell);
@@ -491,34 +497,35 @@ impl Drawable for Blur {
                 // and every drag motion event invalidates the cache —
                 // so this is the cost that scales with panel size
                 // while a blur is being moved or resized.
-                let id = crate::femtovg_area::perf_timed("blur-resample", || match self.blur_style {
-                    BlurStyle::Gaussian => Self::blur(
-                        canvas,
-                        pos,
-                        size,
-                        self.style
-                            .size
-                            .to_blur_factor(self.style.annotation_size_factor),
-                    ),
-                    BlurStyle::SecureBlur => Self::secure_blur(
-                        canvas,
-                        pos,
-                        size,
-                        self.style
-                            .size
-                            .to_blur_factor(self.style.annotation_size_factor),
-                        Self::fringe_gap(canvas),
-                    ),
-                    BlurStyle::Pixelate => Self::pixelate(
-                        canvas,
-                        pos,
-                        size,
-                        self.style
-                            .size
-                            .to_pixelate_cell_size(self.style.annotation_size_factor),
-                    ),
-                    BlurStyle::BlackOut => unreachable!("handled above"),
-                })?;
+                let id =
+                    crate::femtovg_area::perf_timed("blur-resample", || match self.blur_style {
+                        BlurStyle::Gaussian => Self::blur(
+                            canvas,
+                            pos,
+                            size,
+                            self.style
+                                .size
+                                .to_blur_factor(self.style.annotation_size_factor),
+                        ),
+                        BlurStyle::SecureBlur => Self::secure_blur(
+                            canvas,
+                            pos,
+                            size,
+                            self.style
+                                .size
+                                .to_blur_factor(self.style.annotation_size_factor),
+                            Self::fringe_gap(canvas),
+                        ),
+                        BlurStyle::Pixelate => Self::pixelate(
+                            canvas,
+                            pos,
+                            size,
+                            self.style
+                                .size
+                                .to_pixelate_cell_size(self.style.annotation_size_factor),
+                        ),
+                        BlurStyle::BlackOut => unreachable!("handled above"),
+                    })?;
                 self.cached_image.borrow_mut().replace(id);
             }
 
@@ -770,7 +777,10 @@ mod fringe_tests {
     /// A region with room all round samples at the full step-out.
     #[test]
     fn a_roomy_region_gets_the_gap_it_asked_for() {
-        assert_eq!(Blur::fitting_gap(8, 100, 100, 200, 200, 1000, 1000), Some(8));
+        assert_eq!(
+            Blur::fitting_gap(8, 100, 100, 200, 200, 1000, 1000),
+            Some(8)
+        );
     }
 
     /// Near an edge, take the widest band that still fits rather than

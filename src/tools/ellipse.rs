@@ -157,7 +157,6 @@ impl Drawable for Ellipse {
         self.origin += delta;
     }
 
-
     fn apply_canvas_transform(&mut self, t: CanvasTransform, w: f32, h: f32) {
         match self.radii {
             Some(r) => {
@@ -425,7 +424,10 @@ mod outline_tests {
     fn the_middle_is_not_the_outline() {
         for fill in [false, true] {
             let e = ellipse(fill);
-            assert!(!e.edge_hit_test(Vec2D::new(300.0, 200.0), 8.0), "fill={fill}");
+            assert!(
+                !e.edge_hit_test(Vec2D::new(300.0, 200.0), 8.0),
+                "fill={fill}"
+            );
         }
     }
 
@@ -434,9 +436,18 @@ mod outline_tests {
     #[test]
     fn the_band_straddles_the_curve() {
         let e = ellipse(false);
-        assert!(e.edge_hit_test(Vec2D::new(496.0, 200.0), 8.0), "just inside");
-        assert!(e.edge_hit_test(Vec2D::new(504.0, 200.0), 8.0), "just outside");
-        assert!(!e.edge_hit_test(Vec2D::new(560.0, 200.0), 8.0), "well outside");
+        assert!(
+            e.edge_hit_test(Vec2D::new(496.0, 200.0), 8.0),
+            "just inside"
+        );
+        assert!(
+            e.edge_hit_test(Vec2D::new(504.0, 200.0), 8.0),
+            "just outside"
+        );
+        assert!(
+            !e.edge_hit_test(Vec2D::new(560.0, 200.0), 8.0),
+            "well outside"
+        );
     }
 
     /// A filled ellipse is hit anywhere inside; an unfilled one only

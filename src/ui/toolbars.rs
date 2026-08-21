@@ -2103,6 +2103,8 @@ pub enum ToolbarEvent {
     Undo,
     SaveFile,
     CopyClipboard,
+    /// Pin the finished image to the desktop and step the editor aside.
+    Pin,
     ToggleFill,
     Reset,
     SaveFileAs,
@@ -2228,7 +2230,10 @@ pub enum TopBarLayout {
 #[derive(Debug, Copy, Clone)]
 pub enum ToolsToolbarInput {
     /// Each shape's own fill state, for the Rectangle / Ellipse glyphs.
-    SetShapeFill { rect: bool, ellipse: bool },
+    SetShapeFill {
+        rect: bool,
+        ellipse: bool,
+    },
     SetVisibility(bool),
     ToggleVisibility,
     SwitchSelectedTool(Tools),
@@ -3517,6 +3522,15 @@ impl Component for ToolsToolbar {
                         set_icon_name: "copy-regular",
                         install_tooltip_markup: "Copy to clipboard (<span face=\"Adwaita Sans\">⌃</span> C)",
                         connect_clicked[sender] => move |_| {sender.output_sender().emit(ToolbarEvent::CopyClipboard);},
+                    },
+                    gtk::Button {
+                        set_focusable: true,
+                        set_focus_on_click: false,
+                        set_hexpand: false,
+
+                        set_icon_name: "pin-regular",
+                        install_tooltip_markup: "Pin to desktop (<span face=\"Adwaita Sans\">⌃</span> P)",
+                        connect_clicked[sender] => move |_| {sender.output_sender().emit(ToolbarEvent::Pin);},
                     },
                     gtk::Button {
                         set_focusable: true,

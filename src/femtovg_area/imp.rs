@@ -291,7 +291,16 @@ fn extend_edges(
     let bottom = cols(&bottom_colors);
 
     if grow_left > 0 {
-        fill_side_strip(dst, 0, dst_y, grow_left, &left, settled, Anchor::End, inset.left);
+        fill_side_strip(
+            dst,
+            0,
+            dst_y,
+            grow_left,
+            &left,
+            settled,
+            Anchor::End,
+            inset.left,
+        );
     }
     if grow_right > 0 {
         fill_side_strip(
@@ -306,7 +315,16 @@ fn extend_edges(
         );
     }
     if grow_top > 0 {
-        fill_side_band(dst, dst_x, 0, grow_top, &top, settled, Anchor::End, inset.top);
+        fill_side_band(
+            dst,
+            dst_x,
+            0,
+            grow_top,
+            &top,
+            settled,
+            Anchor::End,
+            inset.top,
+        );
     }
     if grow_bottom > 0 {
         fill_side_band(
@@ -1608,7 +1626,6 @@ fn auto_fit_scale(
     (inner_w / content_w).min(fit_h).min(max_scale)
 }
 
-
 /// Add one spotlight's punch-out path to `paths`, and — when it
 /// magnifies — a second copy to `magnifiers` with the rect to sample
 /// and the factor to enlarge it by.
@@ -2757,7 +2774,10 @@ impl FemtoVgAreaMut {
             // old whole-framebuffer grab can be read against the region
             // grab that replaced it.
             let _ = super::perf::timed("readback-full", || canvas.screenshot());
-            let (rw, rh) = (700.min(canvas.width() as usize), 420.min(canvas.height() as usize));
+            let (rw, rh) = (
+                700.min(canvas.width() as usize),
+                420.min(canvas.height() as usize),
+            );
             let ch = canvas.height() as usize;
             let _ = super::perf::timed("readback-region", || {
                 super::gl::read_framebuffer_region(ch, 0, 0, rw, rh)
@@ -3212,7 +3232,9 @@ impl FemtoVgAreaMut {
             .filter_map(|(path, rect)| {
                 let (x, y, w, h) = crate::tools::canvas_region(canvas, rect.pos, rect.size)?;
                 let sub = super::read_framebuffer_region(canvas.height() as usize, x, y, w, h)?;
-                let id = canvas.create_image(sub.as_ref(), ImageFlags::empty()).ok()?;
+                let id = canvas
+                    .create_image(sub.as_ref(), ImageFlags::empty())
+                    .ok()?;
                 Some((path, id, *rect))
             })
             .collect();
@@ -3464,11 +3486,7 @@ impl FemtoVgAreaMut {
             // existing textures and only uploads its new strips below.
             self.pending_tile_strips.clear();
             self.background_tiles = super::perf::timed("bg-upload", || {
-                Self::upload_background_tiles(
-                    canvas,
-                    &self.background_image,
-                    self.max_texture_size,
-                )
+                Self::upload_background_tiles(canvas, &self.background_image, self.max_texture_size)
             })?;
         } else if !self.pending_tile_strips.is_empty() {
             let strips = std::mem::take(&mut self.pending_tile_strips);
@@ -3842,8 +3860,14 @@ impl FemtoVgAreaMut {
                     let id =
                         canvas.create_image_empty(tile_w, tile_h, format, ImageFlags::empty())?;
 
-                    let bytes =
-                        region_bytes(src_buffer, RasterLayout::of(image), tile_x, tile_y, tile_w, tile_h);
+                    let bytes = region_bytes(
+                        src_buffer,
+                        RasterLayout::of(image),
+                        tile_x,
+                        tile_y,
+                        tile_w,
+                        tile_h,
+                    );
                     let bytes: &[u8] = &bytes;
 
                     if image.has_alpha() {
@@ -4413,14 +4437,8 @@ mod tests {
             // Width 5 with 3 bytes per pixel gives a 15-byte row that
             // gdk-pixbuf pads to 16 — so the RGB case exercises a
             // stride wider than the pixel data.
-            let p = Pixbuf::new(
-                relm4::gtk::gdk_pixbuf::Colorspace::Rgb,
-                has_alpha,
-                8,
-                5,
-                4,
-            )
-            .unwrap();
+            let p =
+                Pixbuf::new(relm4::gtk::gdk_pixbuf::Colorspace::Rgb, has_alpha, 8, 5, 4).unwrap();
             p.fill(0x000000ff);
             super::fill_rect(&p, 1, 1, 3, 2, (10, 20, 30, 255));
 
@@ -4519,8 +4537,13 @@ mod tests {
         new_w: i32,
         new_h: i32,
     ) -> (Vec<u8>, Strips) {
-        let strips =
-            super::background_grow_strips(t, old_w as f32, old_h as f32, new_w as f32, new_h as f32);
+        let strips = super::background_grow_strips(
+            t,
+            old_w as f32,
+            old_h as f32,
+            new_w as f32,
+            new_h as f32,
+        );
         let mut hits = vec![0u8; (new_w * new_h) as usize];
         for &(x, y, w, h) in &strips {
             for py in (y as i32)..((y + h) as i32) {
@@ -4539,13 +4562,13 @@ mod tests {
         // (translation, old size, new size) — grow on each side, on
         // both, an asymmetric grow, and a grow-plus-shrink.
         let cases = [
-            (Vec2D::new(0.0, 0.0), 10, 8, 14, 8),   // right only
-            (Vec2D::new(0.0, 0.0), 10, 8, 10, 12),  // bottom only
-            (Vec2D::new(3.0, 0.0), 10, 8, 13, 8),   // left only
-            (Vec2D::new(0.0, 2.0), 10, 8, 10, 10),  // top only
-            (Vec2D::new(3.0, 2.0), 10, 8, 16, 13),  // all four
-            (Vec2D::new(0.0, 2.0), 10, 8, 14, 11),  // top + right
-            (Vec2D::new(0.0, 0.0), 10, 8, 14, 6),   // grow x, shrink y
+            (Vec2D::new(0.0, 0.0), 10, 8, 14, 8),  // right only
+            (Vec2D::new(0.0, 0.0), 10, 8, 10, 12), // bottom only
+            (Vec2D::new(3.0, 0.0), 10, 8, 13, 8),  // left only
+            (Vec2D::new(0.0, 2.0), 10, 8, 10, 10), // top only
+            (Vec2D::new(3.0, 2.0), 10, 8, 16, 13), // all four
+            (Vec2D::new(0.0, 2.0), 10, 8, 14, 11), // top + right
+            (Vec2D::new(0.0, 0.0), 10, 8, 14, 6),  // grow x, shrink y
         ];
         for (t, ow, oh, nw, nh) in cases {
             let (hits, strips) = strip_coverage(t, ow, oh, nw, nh);
@@ -4609,9 +4632,16 @@ mod tests {
         }
 
         let settled = super::image_settled_color(&src);
-        let out =
-            super::resize_pixbuf_to_rect(&src, -PAD, -PAD, w + 2*PAD, h + 2*PAD, settled, Default::default())
-                .unwrap();
+        let out = super::resize_pixbuf_to_rect(
+            &src,
+            -PAD,
+            -PAD,
+            w + 2 * PAD,
+            h + 2 * PAD,
+            settled,
+            Default::default(),
+        )
+        .unwrap();
 
         // Boundary columns carry each row's own colour.
         for y in (EDGE + BAND / 2..h - EDGE).step_by(BAND as usize) {
@@ -4664,14 +4694,7 @@ mod tests {
     #[test]
     fn edge_extension_ignores_a_stray_edge_pixel() {
         let (w, h) = (60, 60);
-        let src = Pixbuf::new(
-            relm4::gtk::gdk_pixbuf::Colorspace::Rgb,
-            false,
-            8,
-            w,
-            h,
-        )
-        .unwrap();
+        let src = Pixbuf::new(relm4::gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, w, h).unwrap();
         src.fill(0x20304000);
         // Two bright pixels in one row's sampled depth — a minority of
         // the 8 samples, so the median must reject them.
@@ -4679,7 +4702,8 @@ mod tests {
         src.put_pixel(1, 30, 255, 0, 0, 255);
 
         let settled = super::image_settled_color(&src);
-        let out = super::resize_pixbuf_to_rect(&src, -8, 0, w + 8, h, settled, Default::default()).unwrap();
+        let out = super::resize_pixbuf_to_rect(&src, -8, 0, w + 8, h, settled, Default::default())
+            .unwrap();
         let got = super::read_pixel(&out, 0, 30, false);
         assert_eq!((got.0, got.1, got.2), (0x20, 0x30, 0x40));
     }
@@ -4709,12 +4733,12 @@ mod tests {
         // (src_x, src_y, dw, dh) applied in sequence. The pad is 256, so
         // the small steps re-view and the big one forces a realloc.
         let steps = [
-            (-3, -2, 5, 4),      // grow all sides a little
-            (0, 0, 7, 0),        // grow right only
-            (-4, 0, 4, 6),       // grow left and bottom
-            (2, 1, -2, -1),      // shrink back in
+            (-3, -2, 5, 4),         // grow all sides a little
+            (0, 0, 7, 0),           // grow right only
+            (-4, 0, 4, 6),          // grow left and bottom
+            (2, 1, -2, -1),         // shrink back in
             (-400, -300, 800, 600), // outgrows the allocation
-            (-2, -2, 4, 4),      // small again, in the fresh allocation
+            (-2, -2, 4, 4),         // small again, in the fresh allocation
         ];
 
         // Both paths take the SAME settled colour, derived once from the
@@ -4728,21 +4752,28 @@ mod tests {
 
         for (i, (sx, sy, dw, dh)) in steps.into_iter().enumerate() {
             let (nw, nh) = (view.width() + dw, view.height() + dh);
-            let (next_view, next_alloc, next_origin) =
-                super::resize_raster_in_alloc(
-                    &view,
-                    alloc.as_ref(),
-                    origin,
-                    sx,
-                    sy,
-                    nw,
-                    nh,
-                    settled,
-                    Default::default(),
-                )
-                .unwrap();
-            let next_reference =
-                super::resize_pixbuf_to_rect(&reference, sx, sy, nw, nh, settled, Default::default()).unwrap();
+            let (next_view, next_alloc, next_origin) = super::resize_raster_in_alloc(
+                &view,
+                alloc.as_ref(),
+                origin,
+                sx,
+                sy,
+                nw,
+                nh,
+                settled,
+                Default::default(),
+            )
+            .unwrap();
+            let next_reference = super::resize_pixbuf_to_rect(
+                &reference,
+                sx,
+                sy,
+                nw,
+                nh,
+                settled,
+                Default::default(),
+            )
+            .unwrap();
 
             assert_eq!(
                 (next_view.width(), next_view.height()),
@@ -4858,9 +4889,18 @@ mod tests {
         src.fill(0x11223300);
 
         let settled = super::image_settled_color(&src);
-        let (first, alloc, origin) =
-            super::resize_raster_in_alloc(&src, None, (0,0), -2, -2, w+4, h+4, settled, Default::default())
-                .unwrap();
+        let (first, alloc, origin) = super::resize_raster_in_alloc(
+            &src,
+            None,
+            (0, 0),
+            -2,
+            -2,
+            w + 4,
+            h + 4,
+            settled,
+            Default::default(),
+        )
+        .unwrap();
         let snapshot: Vec<_> = (0..first.height())
             .flat_map(|y| (0..first.width()).map(move |x| (x, y)))
             .map(|(x, y)| super::read_pixel(&first, x, y, false))
@@ -4916,11 +4956,9 @@ mod tests {
         )
         .unwrap();
         let digest = unsafe {
-            out.pixels()
-                .iter()
-                .fold(1469598103934665603u64, |acc, b| {
-                    (acc ^ *b as u64).wrapping_mul(1099511628211)
-                })
+            out.pixels().iter().fold(1469598103934665603u64, |acc, b| {
+                (acc ^ *b as u64).wrapping_mul(1099511628211)
+            })
         };
         println!(
             "grow_raster_digest {}x{} -> {}x{}: {:016x}",
@@ -4957,33 +4995,39 @@ mod tests {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(3384);
-        let src = Pixbuf::new(
-            relm4::gtk::gdk_pixbuf::Colorspace::Rgb,
-            false,
-            8,
-            w,
-            h,
-        )
-        .unwrap();
+        let src = Pixbuf::new(relm4::gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, w, h).unwrap();
         src.fill(0x304050ff);
         // A drawable that has spilled 40 px past the right and bottom
         // edges — the shape of a grow triggered mid-drag.
         let start = std::time::Instant::now();
         let settled = super::image_settled_color(&src);
-        let out = resize_pixbuf_to_rect(&src, 0, 0, w + 40, h + 40, settled, Default::default()).unwrap();
+        let out =
+            resize_pixbuf_to_rect(&src, 0, 0, w + 40, h + 40, settled, Default::default()).unwrap();
         let elapsed = start.elapsed();
         assert_eq!(out.width(), w + 40);
-        println!("resize_pixbuf_to_rect {w}x{h} -> +40px: {:.1} ms", elapsed.as_secs_f64() * 1000.0);
+        println!(
+            "resize_pixbuf_to_rect {w}x{h} -> +40px: {:.1} ms",
+            elapsed.as_secs_f64() * 1000.0
+        );
 
         // Breakdown, so the optimisation targets the part that costs.
         let t = |label: &str, f: &dyn Fn()| {
             let start = std::time::Instant::now();
             f();
-            println!("    {label}: {:.1} ms", start.elapsed().as_secs_f64() * 1000.0);
+            println!(
+                "    {label}: {:.1} ms",
+                start.elapsed().as_secs_f64() * 1000.0
+            );
         };
         t("Pixbuf::new + fill", &|| {
-            let n = Pixbuf::new(relm4::gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, w + 40, h + 40)
-                .unwrap();
+            let n = Pixbuf::new(
+                relm4::gtk::gdk_pixbuf::Colorspace::Rgb,
+                false,
+                8,
+                w + 40,
+                h + 40,
+            )
+            .unwrap();
             n.fill(0x000000ff);
         });
         t("4x edge_line_colors", &|| {
@@ -4996,29 +5040,43 @@ mod tests {
                 super::edge_line_colors(&src, side, false);
             }
         });
-        let dst = Pixbuf::new(relm4::gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, w + 40, h + 40)
-            .unwrap();
+        let dst = Pixbuf::new(
+            relm4::gtk::gdk_pixbuf::Colorspace::Rgb,
+            false,
+            8,
+            w + 40,
+            h + 40,
+        )
+        .unwrap();
         t("copy_area", &|| src.copy_area(0, 0, w, h, &dst, 0, 0));
         // The two resize paths at capture scale: one that has to
         // allocate and copy, and one that re-views an allocation it
         // already has.
-        let (view, alloc, origin) =
-            super::resize_raster_in_alloc(&src, None, (0,0), -4, -4, w+8, h+8, settled, Default::default())
-                .unwrap();
+        let (view, alloc, origin) = super::resize_raster_in_alloc(
+            &src,
+            None,
+            (0, 0),
+            -4,
+            -4,
+            w + 8,
+            h + 8,
+            settled,
+            Default::default(),
+        )
+        .unwrap();
         let start = std::time::Instant::now();
-        let (view2, alloc2, origin2) =
-            super::resize_raster_in_alloc(
-                &view,
-                Some(&alloc),
-                origin,
-                -4,
-                -4,
-                w + 16,
-                h + 16,
-                settled,
-                Default::default(),
-            )
-            .unwrap();
+        let (view2, alloc2, origin2) = super::resize_raster_in_alloc(
+            &view,
+            Some(&alloc),
+            origin,
+            -4,
+            -4,
+            w + 16,
+            h + 16,
+            settled,
+            Default::default(),
+        )
+        .unwrap();
         println!(
             "    resize_raster (re-view, no copy): {:.1} ms",
             start.elapsed().as_secs_f64() * 1000.0

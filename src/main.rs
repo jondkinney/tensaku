@@ -30,6 +30,7 @@ use ui::welcome::{WelcomeDialog, WelcomeDialogInit, WelcomeDialogInput, WelcomeD
 use ui::zoom_indicator::{ZoomIndicator, ZoomIndicatorInput, ZoomIndicatorOutput};
 use xdg::BaseDirectories;
 
+mod pin;
 mod capture;
 mod chord_capture;
 mod configuration;
@@ -77,6 +78,9 @@ struct AppInit {
 }
 
 struct App {
+    /// The editor window itself, held so pinning can step it aside and
+    /// the pin's Edit button can bring it back.
+    main_window: gtk::Window,
     image_dimensions: (i32, i32),
     sketch_board: Controller<SketchBoard>,
     tools_toolbar: Controller<ToolsToolbar>,
@@ -337,6 +341,12 @@ enum AppInput {
     /// saved default off `state.toml`.
     SpotlightDarknessReset(f32),
     SpotlightMagnificationReset(f32),
+    /// The shot has been pinned: step the editor window aside, since
+    /// the pin is now the thing on screen.
+    PinOpened,
+    /// The pin's Edit button: bring the editor back, annotations and
+    /// all — it never left, it was only hidden.
+    PinEditRequested,
     HighlighterOpacityReset(f32),
     BrushPostSmoothReset(usize),
 }
@@ -1077,6 +1087,17 @@ impl Component for App {
                     .sender()
                     .emit(SketchBoardInput::ScaleFactorChanged);
             }
+            AppInput::PinOpened => {
+                // Hidden, not closed: the SketchBoard component and
+                // every drawable in it stay alive, which is what lets
+                // Edit come back to a live document rather than a
+                // flattened picture of one.
+                self.main_window.set_visible(false);
+            }
+            AppInput::PinEditRequested => {
+                self.main_window.set_visible(true);
+                self.main_window.present();
+            }
             AppInput::FullscreenChanged(fullscreen) => {
                 let tools = self.tools_toolbar.widget();
                 if fullscreen {
@@ -1517,6 +1538,8 @@ impl Component for App {
                     SketchBoardOutput::SelectionBrushPostSmoothChanged(v) => {
                         AppInput::SelectionBrushPostSmoothChanged(v)
                     }
+                    SketchBoardOutput::PinOpened => AppInput::PinOpened,
+                    SketchBoardOutput::PinEditRequested => AppInput::PinEditRequested,
                     SketchBoardOutput::SpotlightMagnificationReset(v) => {
                         AppInput::SpotlightMagnificationReset(v)
                     }
@@ -1769,6 +1792,7 @@ impl Component for App {
 
         // Model
         let model = App {
+            main_window: root.clone(),
             sketch_board,
             tools_toolbar,
             style_toolbar,

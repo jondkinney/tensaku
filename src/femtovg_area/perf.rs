@@ -250,7 +250,10 @@ pub struct Guard {
 
 impl Drop for Guard {
     fn drop(&mut self) {
-        extra(self.label, (Instant::now() - self.start).as_secs_f64() * 1000.0);
+        extra(
+            self.label,
+            (Instant::now() - self.start).as_secs_f64() * 1000.0,
+        );
     }
 }
 

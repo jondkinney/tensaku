@@ -601,7 +601,12 @@ fn window_rule_calls(contents: &str) -> Vec<String> {
                 _ => {}
             }
         }
-        calls.push(after[..end].split_whitespace().collect::<Vec<_>>().join(" "));
+        calls.push(
+            after[..end]
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
         rest = &after[end..];
     }
     calls
@@ -796,9 +801,9 @@ mod tests {
     fn apply_env_line_inserts_when_absent() {
         match apply_env_line("-- Extra env variables\n", "/usr/bin/tensaku-edit") {
             EnvLineOutcome::Inserted(s) => {
-                assert!(s.contains(
-                    r#"hl.env("OMARCHY_SCREENSHOT_EDITOR", "/usr/bin/tensaku-edit")"#
-                ));
+                assert!(
+                    s.contains(r#"hl.env("OMARCHY_SCREENSHOT_EDITOR", "/usr/bin/tensaku-edit")"#)
+                );
                 assert!(s.starts_with("-- Extra env variables\n"));
             }
             other => panic!("expected Inserted, got {other:?}"),
@@ -819,9 +824,9 @@ mod tests {
         let contents = "a\nhl.env(\"OMARCHY_SCREENSHOT_EDITOR\", \"/old/path\")\nb\n";
         match apply_env_line(contents, "/usr/bin/tensaku-edit") {
             EnvLineOutcome::Updated(s) => {
-                assert!(s.contains(
-                    r#"hl.env("OMARCHY_SCREENSHOT_EDITOR", "/usr/bin/tensaku-edit")"#
-                ));
+                assert!(
+                    s.contains(r#"hl.env("OMARCHY_SCREENSHOT_EDITOR", "/usr/bin/tensaku-edit")"#)
+                );
                 assert!(!s.contains("/old/path"));
                 assert!(s.starts_with("a\n") && s.trim_end().ends_with('b'));
             }
@@ -837,9 +842,7 @@ mod tests {
             Some("/home/u/.local/bin/tensaku-edit")
         );
         // The config directive is not an inline bind value.
-        assert!(
-            inline_bind_editor_value(r#"hl.env("OMARCHY_SCREENSHOT_EDITOR", "/x")"#).is_none()
-        );
+        assert!(inline_bind_editor_value(r#"hl.env("OMARCHY_SCREENSHOT_EDITOR", "/x")"#).is_none());
     }
 
     /// Rules written across several lines — the normal Lua layout, and

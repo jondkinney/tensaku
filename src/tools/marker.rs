@@ -250,7 +250,11 @@ fn marker_radius(text_size: f32, number: u16) -> f32 {
 
 impl Marker {
     fn marker_text_size(&self) -> f32 {
-        marker_text_size(self.style.size, self.style.annotation_size_factor, self.scale)
+        marker_text_size(
+            self.style.size,
+            self.style.annotation_size_factor,
+            self.scale,
+        )
     }
 
     fn approx_radius(&self) -> f32 {

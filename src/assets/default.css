@@ -529,3 +529,28 @@ dropdown.compact-control > button.combo {
 .layer_panel_resize_handle:hover {
     background: alpha(#4f9cf0, 0.55);
 }
+
+/* Pinned capture: a layer-surface window with no titlebar, so the
+   rounded corner and the shadow have to come from here. The controls
+   sit on top of the image, so they carry their own scrim rather than
+   relying on whatever happens to be underneath. */
+.pin-window {
+  background: transparent;
+}
+
+.pin-window picture {
+  border-radius: 10px;
+}
+
+.pin-controls {
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 8px;
+  padding: 2px;
+}
+
+.pin-controls button {
+  min-width: 26px;
+  min-height: 26px;
+  padding: 2px;
+  color: #ffffff;
+}

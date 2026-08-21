@@ -99,6 +99,11 @@ fn main() -> Result<(), io::Error> {
             // to-text-rows mode that pairs with the i-beam cursor the
             // tool puts on screen.
             "text-regular",
+            // Pin-to-desktop: the toolbar the pinned window shows on
+            // hover, plus the toolbar button that creates it.
+            "pin-regular",
+            "dismiss-regular",
+            "link-regular",
             // (The arrow-style picker uses cairo-drawn previews
             // matching the real arrow shapes; no icons needed.)
             // Layer-panel toggle button (F7).

@@ -118,9 +118,7 @@ pub fn drain_deleted_images(canvas: &mut femtovg::Canvas<femtovg::renderer::Open
 /// bottom-up and ours is top-down), same channel order. Rather than
 /// trust that by inspection, compare the two directly for a handful of
 /// rectangles and report the first mismatch.
-pub fn verify_readback_matches_screenshot(
-    canvas: &mut femtovg::Canvas<femtovg::renderer::OpenGl>,
-) {
+pub fn verify_readback_matches_screenshot(canvas: &mut femtovg::Canvas<femtovg::renderer::OpenGl>) {
     if !std::env::var("TENSAKU_VERIFY_READBACK").is_ok_and(|v| v != "0") {
         return;
     }
@@ -210,7 +208,10 @@ pub fn verify_flat_render(canvas: &mut femtovg::Canvas<femtovg::renderer::OpenGl
             .filter(|(a, b, _)| b - a > 40)
             .map(|(a, b, c)| format!("{a}-{b} #{:02X}{:02X}{:02X}", c.r, c.g, c.b))
             .collect();
-        eprintln!("verify-flat: framebuffer row y={y}: {} runs; long: {long:?}", runs.len());
+        eprintln!(
+            "verify-flat: framebuffer row y={y}: {} runs; long: {long:?}",
+            runs.len()
+        );
         // Alpha matters as much as colour: a canvas that renders the
         // right RGB but leaves alpha below 255 is composited against
         // whatever sits behind the window, which shows up as faint
@@ -227,6 +228,9 @@ pub fn verify_flat_render(canvas: &mut femtovg::Canvas<femtovg::renderer::OpenGl
             .filter(|(a, b, _)| b - a > 40)
             .map(|(a, b, v)| format!("{a}-{b} a={v}"))
             .collect();
-        eprintln!("verify-flat: alpha y={y}: {} runs; long: {alphas:?}", alpha_runs.len());
+        eprintln!(
+            "verify-flat: alpha y={y}: {} runs; long: {alphas:?}",
+            alpha_runs.len()
+        );
     }
 }

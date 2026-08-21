@@ -878,10 +878,7 @@ pub fn bbox_edge_hit(rect: Rect, point: Vec2D, tolerance: f32) -> bool {
     // an edge hit.
     let inner = Rect {
         pos: Vec2D::new(rect.pos.x + tolerance, rect.pos.y + tolerance),
-        size: Vec2D::new(
-            rect.size.x - 2.0 * tolerance,
-            rect.size.y - 2.0 * tolerance,
-        ),
+        size: Vec2D::new(rect.size.x - 2.0 * tolerance, rect.size.y - 2.0 * tolerance),
     };
     if inner.size.x <= 0.0 || inner.size.y <= 0.0 {
         return true;
@@ -1324,9 +1321,7 @@ pub use highlight::{HighlightTool, HighlighterStyle, Highlighters};
 pub use line::LineTool;
 pub use pasted_image::PastedImage;
 pub use rectangle::RectangleTool;
-pub use spotlight::{
-    MAX_SPOTLIGHT_MAGNIFICATION, MIN_SPOTLIGHT_MAGNIFICATION, SpotlightTool,
-};
+pub use spotlight::{MAX_SPOTLIGHT_MAGNIFICATION, MIN_SPOTLIGHT_MAGNIFICATION, SpotlightTool};
 pub use text::{Text, TextBackground, TextTool};
 
 use self::{brush::BrushTool, marker::MarkerTool, pointer::PointerTool};
@@ -1876,13 +1871,16 @@ mod edge_hit_tests {
         let r = rect(100.0, 100.0, 400.0, 300.0);
         let t = EDGE_HIT_TOLERANCE;
         for p in [
-            (100.0, 250.0),       // exactly on the left edge
+            (100.0, 250.0),           // exactly on the left edge
             (100.0 + t - 1.0, 250.0), // just inside it
             (100.0 - t + 1.0, 250.0), // just outside it
-            (300.0, 100.0),       // top edge
-            (500.0, 400.0),       // bottom-right corner
+            (300.0, 100.0),           // top edge
+            (500.0, 400.0),           // bottom-right corner
         ] {
-            assert!(bbox_edge_hit(r, Vec2D::new(p.0, p.1), t), "{p:?} should grab");
+            assert!(
+                bbox_edge_hit(r, Vec2D::new(p.0, p.1), t),
+                "{p:?} should grab"
+            );
         }
     }
 
@@ -1891,7 +1889,11 @@ mod edge_hit_tests {
     #[test]
     fn far_outside_is_a_miss() {
         let r = rect(100.0, 100.0, 400.0, 300.0);
-        assert!(!bbox_edge_hit(r, Vec2D::new(50.0, 250.0), EDGE_HIT_TOLERANCE));
+        assert!(!bbox_edge_hit(
+            r,
+            Vec2D::new(50.0, 250.0),
+            EDGE_HIT_TOLERANCE
+        ));
     }
 
     /// An annotation thinner than the band has no interior left, so
@@ -1900,7 +1902,11 @@ mod edge_hit_tests {
     #[test]
     fn a_thin_annotation_is_grabbable_throughout() {
         let sliver = rect(100.0, 100.0, 400.0, 6.0);
-        assert!(bbox_edge_hit(sliver, Vec2D::new(300.0, 103.0), EDGE_HIT_TOLERANCE));
+        assert!(bbox_edge_hit(
+            sliver,
+            Vec2D::new(300.0, 103.0),
+            EDGE_HIT_TOLERANCE
+        ));
     }
 
     /// The grab target is deliberately fatter than ordinary picking,

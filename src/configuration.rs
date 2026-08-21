@@ -382,6 +382,9 @@ where
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Action {
+    /// Hand the finished image to a pinned window and step the editor
+    /// aside. See `crate::pin`.
+    Pin,
     SaveToClipboard,
     SaveToFile,
     SaveToFileAs,

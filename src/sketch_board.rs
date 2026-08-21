@@ -369,6 +369,10 @@ pub enum SketchBoardOutput {
     /// opacity slider back to the saved default. Toolbar updates
     /// its slider so the on-screen value matches the now-active
     /// style state instead of the previous session's drag.
+    /// A pin window is up; the editor window should step aside.
+    PinOpened,
+    /// The pin's Edit button was pressed; bring the editor back.
+    PinEditRequested,
     SpotlightDarknessReset(f32),
     SpotlightMagnificationReset(f32),
     HighlighterOpacityReset(f32),
@@ -673,6 +677,9 @@ pub struct SketchBoard {
     style: Style,
     im_context: gtk::IMMulticontext,
     last_saved_filepath: RefCell<Option<String>>,
+    /// The pinned window, held so it outlives this call. Dropping the
+    /// handle would close the pin the moment it opened.
+    pinned_window: RefCell<Option<gtk::Window>>,
     /// Last (selected drawable id, size, size-factor) tuple we pushed
     /// to the toolbar via `SelectionStyleChanged`. We re-emit when
     /// any of these change — flips of the active selection AND
@@ -1080,6 +1087,11 @@ impl SketchBoard {
         let mut early_exit = false;
         while let Some(action) = iter.next() {
             match action {
+                Action::Pin => {
+                    if let Some(ref pix_buf) = pix_buf {
+                        self.handle_pin(pix_buf, &sender);
+                    }
+                }
                 Action::CopyFilepathToClipboard => {
                     self.handle_copy_filepath();
                 }
@@ -1424,6 +1436,37 @@ impl SketchBoard {
         command: &str,
     ) -> anyhow::Result<()> {
         self.save_bytes_to_external_process(texture.save_to_png_bytes().as_ref(), command)
+    }
+
+    /// Put `image` in a pinned window and tell App to step aside.
+    ///
+    /// The pin is built here rather than in App because this is where
+    /// the finished Pixbuf lives, and a Pixbuf can't travel in
+    /// `AppInput` — that type has to stay `Send` for the window's
+    /// signal handlers. What crosses to App is two unit messages:
+    /// hide, and later show again.
+    fn handle_pin(&self, image: &Pixbuf, sender: &ComponentSender<Self>) {
+        let copy_image = image.clone();
+        let copy_sender = sender.input_sender().clone();
+        let edit_sender = sender.output_sender().clone();
+        let window = crate::pin::open(
+            image,
+            crate::pin::PinActions {
+                on_edit: Box::new(move || {
+                    edit_sender.emit(SketchBoardOutput::PinEditRequested);
+                }),
+                // Routed back through the ordinary copy path so a pinned
+                // copy is byte-identical to one made from the editor,
+                // including the configured `copy-command`.
+                on_copy: Box::new(move || {
+                    let _ = copy_image;
+                    copy_sender.emit(SketchBoardInput::ToolbarEvent(ToolbarEvent::CopyClipboard));
+                }),
+                saved_path: self.last_saved_filepath.borrow().clone(),
+            },
+        );
+        *self.pinned_window.borrow_mut() = Some(window);
+        sender.output_sender().emit(SketchBoardOutput::PinOpened);
     }
 
     fn handle_copy_clipboard(&self, image: &Pixbuf) {
@@ -2362,6 +2405,7 @@ impl SketchBoard {
             }
             ToolbarEvent::SaveFile => self.handle_action(&[Action::SaveToFile]),
             ToolbarEvent::CopyClipboard => self.handle_action(&[Action::SaveToClipboard]),
+            ToolbarEvent::Pin => self.handle_action(&[Action::Pin]),
             ToolbarEvent::Undo => self.handle_undo(&sender),
             ToolbarEvent::Redo => self.handle_redo(&sender),
             ToolbarEvent::Reset => self.handle_reset(),
@@ -2431,9 +2475,7 @@ impl SketchBoard {
                     .emit(SketchBoardOutput::ShowCycleToast(label.to_string()));
                 // Mirror the new fill out to the toolbar so the icon
                 // refreshes.
-                sender
-                    .output_sender()
-                    .emit(self.fill_states(new_fill));
+                sender.output_sender().emit(self.fill_states(new_fill));
                 // Forward to the active tool so its next-stroke style
                 // picks up the new fill — but skip Pointer, which
                 // would otherwise apply self.style to every selected
@@ -3964,7 +4006,10 @@ impl SketchBoard {
     /// restacks the whole group.
     fn open_annotation_menu(&mut self, widget_pos: Vec2D, sender: &ComponentSender<Self>) -> bool {
         let image_pos = self.renderer.abs_canvas_to_image_coordinates(widget_pos);
-        let Some(id) = self.renderer.hit_test(image_pos, crate::tools::HIT_TOLERANCE) else {
+        let Some(id) = self
+            .renderer
+            .hit_test(image_pos, crate::tools::HIT_TOLERANCE)
+        else {
             return false;
         };
         let pointer = self.tools.get(&Tools::Pointer);
@@ -5219,6 +5264,11 @@ impl Component for SketchBoard {
                             {
                                 self.renderer.request_render(&[Action::SaveToClipboard]);
                                 ToolUpdateResult::Unmodified
+                            } else if ke.is_one_of(Key::p, KeyMappingId::UsP)
+                                && ke.modifier == ModifierType::CONTROL_MASK
+                            {
+                                self.renderer.request_render(&[Action::Pin]);
+                                ToolUpdateResult::Unmodified
                             } else if ke.is_one_of(Key::c, KeyMappingId::UsC)
                                 && ke.modifier
                                     == (ModifierType::CONTROL_MASK | ModifierType::ALT_MASK)
@@ -5451,7 +5501,8 @@ impl Component for SketchBoard {
                             // adjusting what you're about to.
                             self.scroll_resize_selection(&selected, me.pos.y, &outer_sender);
                             true
-                        } else if no_mods && Self::wheel_sizes_next_annotation(self.active_tool_type())
+                        } else if no_mods
+                            && Self::wheel_sizes_next_annotation(self.active_tool_type())
                         {
                             // Plain wheel with a drawing tool armed and
                             // nothing selected → that tool's size for the
@@ -6177,6 +6228,7 @@ impl Component for SketchBoard {
             tools,
             im_context,
             last_saved_filepath: RefCell::new(None),
+            pinned_window: RefCell::new(None),
             last_synced_selection: None,
             last_was_multi_selection: false,
             tool_before_crop: None,
