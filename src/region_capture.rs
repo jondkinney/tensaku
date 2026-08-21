@@ -41,6 +41,9 @@ const HINT_MARGIN_BOTTOM: i32 = 48;
 const GRIP: i32 = 12;
 const PUCK: i32 = 30;
 
+/// Space between the move puck and the capture button.
+const PUCK_GAP: f64 = 10.0;
+
 /// Ignore drags this small: a click that wobbles by a pixel is a click,
 /// and capturing a 3×2 region helps nobody.
 const MIN_DRAG: f64 = 8.0;
@@ -119,6 +122,10 @@ struct State {
     /// as a picture of where the last one was.
     grips: [gtk::Box; 8],
     puck: gtk::Box,
+    /// Take-the-shot button, beside the puck. A restored region is
+    /// framed and waiting; the keyboard says Enter, and this says the
+    /// same thing to a hand already on the mouse.
+    shutter: gtk::Button,
     /// The overlay's size in logical pixels, learned once it maps.
     size: (i32, i32),
     /// Image pixels per logical pixel, learned at draw time — the
@@ -218,10 +225,19 @@ fn build_overlay(
         puck.append(&cross);
     }
 
+    let shutter = gtk::Button::from_icon_name("camera-regular");
+    shutter.add_css_class("capture-shutter");
+    shutter.set_focusable(false);
+    shutter.set_focus_on_click(false);
+    shutter.set_tooltip_text(Some("Capture this region"));
+    shutter.set_size_request(PUCK, PUCK);
+    shutter.set_visible(false);
+
     let state = Rc::new(RefCell::new(State {
         frozen: frozen.clone(),
         grips: grips.clone(),
         puck: puck.clone(),
+        shutter: shutter.clone(),
         readout: readout.clone(),
         readout_label: readout_label.clone(),
         fixed: fixed.clone(),
@@ -281,7 +297,22 @@ fn build_overlay(
         fixed.put(grip, 0.0, 0.0);
     }
     fixed.put(&puck, 0.0, 0.0);
+    fixed.put(&shutter, 0.0, 0.0);
     overlay.add_overlay(&fixed);
+    {
+        // Commits exactly what Enter would, through the same path, so
+        // the two can't drift apart about what "this region" means.
+        let state_for_shutter = Rc::clone(&state);
+        let shared_for_shutter = Rc::clone(shared);
+        let window_for_shutter = window.clone();
+        shutter.connect_clicked(move |_| {
+            let choice = committed_region(&state_for_shutter.borrow());
+            if let Some(choice) = choice {
+                *shared_for_shutter.borrow_mut() = choice;
+                window_for_shutter.close();
+            }
+        });
+    }
     // The cursor goes on the widget the pointer is actually over, not
     // the window: GTK resolves it from the widget under the pointer
     // outward, and every event here lands on this surface.
@@ -309,6 +340,13 @@ fn build_overlay(
     overlay.add_overlay(&hint_pill);
     window.set_child(Some(&overlay));
 
+    // The icon bundle is registered by the editor's startup, which
+    // this path never runs — without it the capture button renders
+    // GTK's missing-image glyph.
+    relm4_icons::initialize_icons(
+        crate::icons::icon_names::GRESOURCE_BYTES,
+        crate::icons::icon_names::RESOURCE_PREFIX,
+    );
     install_css(app);
     install_pointer(&fixed, &state, &window, shared);
     install_keys(&window, &state, &hint, shared);
@@ -447,13 +485,20 @@ fn layout_grips(state: &State, rect: Rect) {
 
     // The puck needs room of its own — on a small region it would
     // cover the thing being framed.
-    let puck_fits = w > PUCK as f64 * 2.0 && h > PUCK as f64 * 2.0;
-    state.fixed.move_(
-        &state.puck,
-        x + w / 2.0 - PUCK as f64 / 2.0,
-        y + h / 2.0 - PUCK as f64 / 2.0,
-    );
-    state.puck.set_visible(puck_fits);
+    //
+    // The pair is centred together rather than the puck alone, so
+    // "move it" and "take it" read as one control rather than one
+    // control and an afterthought.
+    let pair = PUCK as f64 * 2.0 + PUCK_GAP;
+    let fits = w > pair + PUCK as f64 && h > PUCK as f64 * 2.0;
+    let top = y + h / 2.0 - PUCK as f64 / 2.0;
+    let left = x + w / 2.0 - pair / 2.0;
+    state.fixed.move_(&state.puck, left, top);
+    state.puck.set_visible(fits);
+    state
+        .fixed
+        .move_(&state.shutter, left + PUCK as f64 + PUCK_GAP, top);
+    state.shutter.set_visible(fits);
 }
 
 fn hide_grips(state: &State) {
@@ -461,6 +506,7 @@ fn hide_grips(state: &State) {
         grip.set_visible(false);
     }
     state.puck.set_visible(false);
+    state.shutter.set_visible(false);
 }
 
 /// Show the selection's size beside the corner being dragged.
@@ -843,6 +889,18 @@ fn install_css(app: &gtk::Application) {
              background: rgba(255, 255, 255, 0.92);
              border-radius: 3px;
              box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+         }
+         .capture-shutter {
+             background: rgba(20, 20, 26, 0.84);
+             border: 2px solid rgba(255, 255, 255, 0.92);
+             border-radius: 999px;
+             color: rgba(255, 255, 255, 0.92);
+             min-height: 0;
+             min-width: 0;
+             padding: 0;
+         }
+         .capture-shutter:hover {
+             background: rgba(60, 60, 70, 0.92);
          }
          .capture-puck {
              background: rgba(20, 20, 26, 0.84);
