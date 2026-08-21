@@ -571,6 +571,46 @@ dropdown.compact-control > button.combo {
   padding: 3px 10px;
 }
 
+/* The pin's name, committed from the right-click entry. It wears the
+   Text tool's background styles — none, pill, outline — so a named
+   pin looks like the annotations the same preference dresses. Dark
+   glyphs, like the outline style's reasoning for a white halo:
+   screenshots are mostly light UI. */
+.pin-name {
+  font-size: 0.95em;
+  font-weight: 600;
+}
+
+.pin-name-none {
+  color: #1c1c1e;
+}
+
+/* The Text tool's cream pill. */
+.pin-name-pill {
+  color: #1c1c1e;
+  background: rgb(248, 245, 235);
+  border-radius: 6px;
+  padding: 2px 10px;
+}
+
+/* No text-outline in CSS, so the halo is eight hard shadows. */
+.pin-name-outline {
+  color: #1c1c1e;
+  text-shadow: -1px -1px 0 #ffffff, 0 -1px 0 #ffffff, 1px -1px 0 #ffffff,
+               -1px 0 0 #ffffff, 1px 0 0 #ffffff,
+               -1px 1px 0 #ffffff, 0 1px 0 #ffffff, 1px 1px 0 #ffffff;
+}
+
+/* The naming entry: same scrim as the toast and the controls, so the
+   three read as one set of furniture over the image. */
+.pin-name-entry {
+  background: rgba(0, 0, 0, 0.65);
+  color: #ffffff;
+  caret-color: #ffffff;
+  border-radius: 6px;
+  padding: 3px 8px;
+}
+
 /* The drag handle reads as a grip rather than a command: same size as
    its neighbours, dimmer until hovered. */
 .pin-drag-handle {

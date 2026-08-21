@@ -226,6 +226,8 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
     let (toast_label, toast) = build_toast();
     overlay.add_overlay(&toast_label);
 
+    install_naming(&overlay);
+
     // The toolbar is furniture: it would cover the top of the image it
     // describes, so it appears on hover and gets out of the way again.
     controls.set_visible(false);
@@ -260,6 +262,107 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
     window.set_child(Some(&overlay));
     window.present();
     Pin { window, toast }
+}
+
+/// Longest a pin's name renders before ellipsising, in characters.
+/// The label is an overlay child, and a window sizes to its children's
+/// natural widths — an uncapped name would widen the pin to fit it.
+const NAME_MAX_CHARS: i32 = 24;
+
+/// Let the pin be named: right-click reveals an entry over the image,
+/// Enter commits it, Esc abandons it, and an empty commit removes the
+/// name.
+///
+/// Pins exist to keep several references on screen at once, and three
+/// unlabelled thumbnails of the same app are three windows you have to
+/// squint at. The name is window furniture, not pixels — it is never
+/// in the shot, and it goes when the pin does.
+fn install_naming(overlay: &gtk::Overlay) {
+    let label = gtk::Label::new(None);
+    label.add_css_class("pin-name");
+    label.set_halign(gtk::Align::Center);
+    label.set_valign(gtk::Align::Center);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    label.set_max_width_chars(NAME_MAX_CHARS);
+    label.set_visible(false);
+    // Display only: as an overlay sibling of the picture it would
+    // otherwise take the clicks that open the editor and the drags
+    // that carry the shot into another app.
+    label.set_can_target(false);
+    overlay.add_overlay(&label);
+
+    let entry = gtk::Entry::new();
+    entry.add_css_class("pin-name-entry");
+    entry.set_halign(gtk::Align::Fill);
+    entry.set_valign(gtk::Align::Center);
+    entry.set_margin_start(12);
+    entry.set_margin_end(12);
+    entry.set_visible(false);
+    overlay.add_overlay(&entry);
+
+    let reveal = gtk::GestureClick::new();
+    reveal.set_button(gtk::gdk::BUTTON_SECONDARY);
+    {
+        let label = label.clone();
+        let entry = entry.clone();
+        reveal.connect_pressed(move |gesture, _, _, _| {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            // Pre-filled with the current name, so a rename edits it
+            // rather than starting over.
+            entry.set_text(label.text().as_str());
+            label.set_visible(false);
+            entry.set_visible(true);
+            entry.grab_focus();
+        });
+    }
+    overlay.add_controller(reveal);
+
+    {
+        let label = label.clone();
+        entry.connect_activate(move |entry| {
+            let name = entry.text().trim().to_owned();
+            entry.set_visible(false);
+            label.set_text(&name);
+            if name.is_empty() {
+                label.set_visible(false);
+                return;
+            }
+            apply_name_style(&label);
+            label.set_visible(true);
+        });
+    }
+
+    let keys = gtk::EventControllerKey::new();
+    {
+        let entry = entry.clone();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if key != gtk::gdk::Key::Escape {
+                return gtk::glib::Propagation::Proceed;
+            }
+            entry.set_visible(false);
+            // The name from before the edit, if there was one.
+            label.set_visible(!label.text().is_empty());
+            gtk::glib::Propagation::Stop
+        });
+    }
+    entry.add_controller(keys);
+}
+
+/// Dress the name in the Text tool's background style — none, pill or
+/// outline, whichever the editor is set to. Read fresh on every
+/// commit, so a changed preference dresses the next name without
+/// restarting anything.
+fn apply_name_style(label: &gtk::Label) {
+    use crate::tools::TextBackground;
+    let background = crate::state::load_text_background().unwrap_or_default();
+    for class in ["pin-name-none", "pin-name-pill", "pin-name-outline"] {
+        label.remove_css_class(class);
+    }
+    label.add_css_class(match background {
+        TextBackground::Plain => "pin-name-none",
+        TextBackground::Rounded => "pin-name-pill",
+        TextBackground::Outlined => "pin-name-outline",
+    });
 }
 
 /// The confirmation strip and the closure that flashes it.
