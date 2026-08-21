@@ -1636,10 +1636,6 @@ pub struct StyleToolbar {
     /// Popover hanging off the blur-style MenuButton — stashed so each
     /// row's click handler can `popdown()` after dispatch.
     blur_style_popover: Option<gtk::Popover>,
-    /// The blur popover's Secure checkbox, with the handler id needed
-    /// to refresh it without the programmatic update re-firing as a
-    /// user toggle.
-    secure_blur_check: Option<(gtk::CheckButton, gtk::glib::SignalHandlerId)>,
     /// Currently-selected arrow geometry. Same role as `blur_style`
     /// for the arrow MenuButton's leading icon.
     arrow_style: ArrowStyle,
@@ -1947,25 +1943,6 @@ fn arrow_tooltip_text(s: ArrowStyle) -> String {
 
 /// Tooltip text for the blur-style MenuButton — same shape as
 /// `arrow_tooltip_text`, the active algorithm's name plus the glyphs.
-/// Point the Secure checkbox at `style`: ticked for the modes that
-/// destroy the content, and editable only on the smooth blur, which
-/// is the one mode where "secure" is a choice rather than a fact.
-///
-/// The handler is blocked around the update — `set_active` emits
-/// `toggled` exactly like a click would, and an unblocked refresh
-/// would read as the user asking to change the style.
-fn sync_secure_check(
-    check: &gtk::CheckButton,
-    handler: &gtk::glib::SignalHandlerId,
-    style: BlurStyle,
-) {
-    let reversible = style == BlurStyle::Gaussian;
-    check.block_signal(handler);
-    check.set_active(!reversible);
-    check.unblock_signal(handler);
-    check.set_sensitive(reversible);
-}
-
 fn blur_tooltip_text(s: BlurStyle) -> String {
     format!(
         "{} (<span face=\"Adwaita Sans\">⌃ ⇧</span> scroll to adjust)",
@@ -1990,7 +1967,6 @@ fn build_style_popover<S, FW>(
     widget_for: FW,
     label_for: fn(S) -> &'static str,
     to_input: fn(S) -> StyleToolbarInput,
-    footer: Option<&gtk::Widget>,
 ) -> gtk::Popover
 where
     S: Copy + 'static,
@@ -2018,15 +1994,6 @@ where
             popover_clone.popdown();
         });
         list.append(&row);
-    }
-    // Optional trailer under the variants — a control that qualifies
-    // the choice above it rather than being one of the choices.
-    if let Some(footer) = footer {
-        let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
-        separator.set_margin_top(4);
-        separator.set_margin_bottom(4);
-        list.append(&separator);
-        list.append(footer);
     }
     popover.set_child(Some(&list));
     menu.set_popover(Some(&popover));
@@ -5446,6 +5413,45 @@ impl Component for StyleToolbar {
                     },
                 },
 
+                // Secure sits BESIDE the blur picker rather than
+                // inside its popover: it qualifies the mode shown on
+                // the chip, and a warning about what a redaction can't
+                // undo is worth nothing behind a click.
+                //
+                // Ticked and insensitive on the three modes that
+                // destroy the content, because there it states a fact.
+                // Live only on the smooth blur, the one mode where
+                // "secure" is a choice — ticking it switches to the
+                // secure blur, which looks the same but fills from
+                // pixels outside the selection.
+                #[name = "secure_blur_check"]
+                gtk::CheckButton {
+                    set_label: Some("Secure"),
+                    set_focusable: true,
+                    set_focus_on_click: false,
+                    set_valign: gtk::Align::Center,
+                    install_tooltip_above: "A smooth blur can be reversed by AI deblurring. Secure fills the region from pixels outside it, so there is nothing inside left to recover.",
+                    #[watch]
+                    set_visible: model.current_tool == Tools::Blur,
+                    #[watch]
+                    set_sensitive: model.blur_style == BlurStyle::Gaussian,
+                    // Blocked, or every style change would bounce back
+                    // through the handler as a user toggle.
+                    #[watch]
+                    #[block_signal(secure_toggled)]
+                    set_active: model.blur_style != BlurStyle::Gaussian,
+                    connect_toggled[sender] => move |btn| {
+                        // Only reachable on the smooth blur; the other
+                        // modes leave the box insensitive.
+                        if btn.is_active() {
+                            sender.input(StyleToolbarInput::SetBlurStyle {
+                                style: BlurStyle::SecureBlur,
+                                emit_upstream: true,
+                            });
+                        }
+                    } @secure_toggled,
+                },
+
                 #[name = "text_background_dropdown"]
                 gtk::DropDown {
                     add_css_class: "compact-control",
@@ -5868,9 +5874,6 @@ impl Component for StyleToolbar {
                 // skipped on the selection-sync path so the same value
                 // isn't redundantly re-applied + toasted.
                 self.blur_style = style;
-                if let Some((check, handler)) = &self.secure_blur_check {
-                    sync_secure_check(check, handler, style);
-                }
                 if let Some(label) = &self.blur_style_tooltip_label {
                     // set_markup, not set_text — the tooltip carries an
                     // Adwaita Sans glyph span (set_text would disable
@@ -6005,7 +6008,6 @@ impl Component for StyleToolbar {
             fill_tooltip_label: None,
             blur_style: crate::state::load_blur_style().unwrap_or_default(),
             blur_style_popover: None,
-            secure_blur_check: None,
             arrow_style: crate::state::load_arrow_style().unwrap_or_default(),
             arrow_style_popover: None,
             arrow_preview_area: None,
@@ -6048,35 +6050,7 @@ impl Component for StyleToolbar {
                 style: s,
                 emit_upstream: true,
             },
-            None,
         ));
-        // The Secure checkbox states the reversibility of the mode
-        // above it. Three of the four destroy the content outright;
-        // a smooth blur is a linear convolution that ML deblurring can
-        // undo, so it is the only one with a choice to make -- and
-        // making it means switching to the secure blur, which looks
-        // the same and fills from outside the selection.
-        let secure_check = gtk::CheckButton::with_label("Secure (unrecoverable)");
-        secure_check.set_focus_on_click(false);
-        secure_check.set_tooltip_text(Some(
-            "A smooth blur can be reversed by AI deblurring. \
-             Secure fills the region from pixels outside it, \
-             so there is nothing inside left to recover.",
-        ));
-        let secure_sender = sender.clone();
-        let secure_handler = secure_check.connect_toggled(move |btn| {
-            // Only reachable on the smooth blur -- the box is
-            // insensitive on the modes that are already irreversible.
-            if btn.is_active() {
-                secure_sender.input(StyleToolbarInput::SetBlurStyle {
-                    style: BlurStyle::SecureBlur,
-                    emit_upstream: true,
-                });
-            }
-        });
-        sync_secure_check(&secure_check, &secure_handler, model.blur_style);
-        model.secure_blur_check = Some((secure_check.clone(), secure_handler));
-
         model.blur_style_popover = Some(build_style_popover(
             &widgets.blur_style_menu,
             &sender,
@@ -6092,7 +6066,6 @@ impl Component for StyleToolbar {
                 style: s,
                 emit_upstream: true,
             },
-            Some(secure_check.upcast_ref::<gtk::Widget>()),
         ));
         model.highlighter_style_popover = Some(build_style_popover(
             &widgets.highlighter_style_menu,
@@ -6104,7 +6077,6 @@ impl Component for StyleToolbar {
             |s| gtk::Image::from_icon_name(highlighter_style_icon(s)).upcast::<gtk::Widget>(),
             highlighter_style_label,
             StyleToolbarInput::SetHighlighterStyle,
-            None,
         ));
 
         // Build the arrow MenuButton's leading preview — same drawing
