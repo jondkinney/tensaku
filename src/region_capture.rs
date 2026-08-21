@@ -212,6 +212,9 @@ fn build_overlay(
     readout.set_focus_on_click(false);
     readout.set_tooltip_text(Some("Capture this region"));
     readout.set_visible(false);
+    // Its own pointer, or it inherits the surface's crosshair and
+    // reads as somewhere to start a new drag rather than a button.
+    readout.set_cursor_from_name(Some("pointer"));
     {
         let faces = readout_faces.clone();
         let hover = gtk::EventControllerMotion::new();
@@ -234,6 +237,7 @@ fn build_overlay(
     let puck = gtk::DrawingArea::new();
     puck.set_size_request(PUCK, PUCK);
     puck.set_visible(false);
+    puck.set_cursor_from_name(Some("move"));
     puck.set_draw_func(|_, ctx, w, h| {
         let r = (w.min(h) as f64 / 2.0 - 1.0).max(1.0);
         crate::scroll_capture::draw_move_puck(ctx, w as f64 / 2.0, h as f64 / 2.0, r);
