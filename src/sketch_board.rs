@@ -1943,20 +1943,27 @@ impl SketchBoard {
     /// the desired behavior — re-selecting is harmless.
     /// Fill state for one shape tool, whether or not it is active.
     ///
-    /// The active tool's lives in `style.fill`; an inactive one falls
-    /// back to whatever it was last set to this session, then to its
-    /// saved default, then to the active tool's — an untouched shape
-    /// tracks the one you are using rather than diverging for no
-    /// reason.
+    /// The active tool's lives in `style.fill`. An inactive one falls
+    /// back to what it was last set to this session (only when sticky
+    /// session defaults are on — with them off, leaving a tool is
+    /// meant to discard its adjustments), then to its saved default,
+    /// then to the global one.
+    ///
+    /// It deliberately never falls back to the ACTIVE tool's fill: an
+    /// untouched shape that borrows the live value flips its icon
+    /// every time you toggle the other shape, so `rr` appears to fill
+    /// the ellipse too.
     fn fill_state_for(&self, tool: Tools) -> bool {
         if self.active_tool_type() == tool {
             return self.style.fill;
         }
-        self.session_fill_per_tool
-            .get(&tool)
-            .copied()
-            .or_else(|| crate::state::load_fill_for_tool(tool))
-            .unwrap_or(self.style.fill)
+        if APP_CONFIG.read().sticky_session_defaults()
+            && let Some(v) = self.session_fill_per_tool.get(&tool).copied()
+        {
+            return v;
+        }
+        crate::state::load_fill_for_tool(tool)
+            .unwrap_or_else(|| APP_CONFIG.read().default_fill_shapes())
     }
 
     /// Both shapes' fill states plus the active one's, for the toolbar.
@@ -2166,31 +2173,22 @@ impl SketchBoard {
                         .emit(SketchBoardOutput::BrushPostSmoothReset(saved));
                 }
                 Tools::Rectangle | Tools::Ellipse => {
-                    // Same snapback for per-tool fill. Saved default wins
-                    // if the user has explicitly pinned one for THIS shape
-                    // tool; otherwise leave style.fill alone so an in-
-                    // session toggle survives switching between Rectangle
-                    // and Ellipse.
+                    // Rectangle and Ellipse share one `style.fill`, so
+                    // entering a shape tool has to load THAT shape's
+                    // fill. Leaving the flag alone leaves it holding the
+                    // other shape's value, and the next `rr` / `ee`
+                    // flips it back to what this shape already showed —
+                    // a press that looks like it did nothing.
                     //
-                    // Sticky-defaults: prefer the in-session value for
-                    // THIS specific shape tool (Rect ≠ Ellipse here, even
-                    // though they share `style.fill`) over the saved
-                    // default, so the user's in-session toggle survives
-                    // a round trip through other tools.
-                    let saved_default =
-                        if sticky && let Some(v) = self.session_fill_per_tool.get(&tool).copied() {
-                            Some(v)
-                        } else {
-                            crate::state::load_fill_for_tool(tool)
-                        };
-                    if let Some(saved) = saved_default
-                        && saved != self.style.fill
-                    {
-                        self.style.fill = saved;
-                        sender
-                            .output_sender()
-                            .emit(self.fill_states(saved));
-                    }
+                    // `fill_state_for` applies exactly the precedence
+                    // the icons use, so the button and the next stroke
+                    // can't disagree about what this shape's fill is.
+                    self.style.fill = self.fill_state_for(tool);
+                    // Deferred: `fill_state_for` reads the ACTIVE tool's
+                    // live fill, and the switch hasn't happened yet, so
+                    // refreshing here would stamp the incoming shape's
+                    // value onto the outgoing shape's icon.
+                    sender.input(SketchBoardInput::SyncFillToToolbar);
                 }
                 _ => {}
             }
