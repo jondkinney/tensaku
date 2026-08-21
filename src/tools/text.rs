@@ -1027,6 +1027,10 @@ impl Drawable for Text {
     // double-click edits that box's text rather than starting a new
     // one. Starting a new text still works anywhere the click doesn't
     // land on an existing one.
+    //
+    // The counter tool overrides this — it stamps on top of a text box
+    // rather than grabbing it, since numbering a piece of text is the
+    // common case. See `PointerTool::should_pass_through_body_hit`.
 
     fn hit_test(&self, point: Vec2D, tolerance: f32) -> bool {
         // Use bounds() inflated by AT LEAST the pointer's full
