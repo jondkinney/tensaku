@@ -3829,6 +3829,13 @@ impl SketchBoard {
             .set_hover_preview(pos)
     }
 
+    /// Tools whose next annotation has a size the plain wheel sets.
+    /// Pointer keeps the wheel for panning; Crop and Spotlight claim
+    /// it earlier in the chain for their own primary adjustment.
+    fn wheel_sizes_next_annotation(tool: Tools) -> bool {
+        !matches!(tool, Tools::Pointer | Tools::Crop | Tools::Spotlight)
+    }
+
     /// Tools whose cursor is painted from live state — stroke size,
     /// badge color and number — rather than picked from the stock
     /// names. Their cursor has to be rebuilt whenever that state
@@ -5230,8 +5237,28 @@ impl Component for SketchBoard {
                             true
                         } else if !selected.is_empty() {
                             // Plain wheel with a selection → resize the
-                            // selected drawable(s).
+                            // selected drawable(s). A selection owns the
+                            // wheel whatever tool is armed: adjusting what
+                            // you just placed is the same gesture as
+                            // adjusting what you're about to.
                             self.scroll_resize_selection(&selected, me.pos.y, &outer_sender);
+                            true
+                        } else if no_mods && Self::wheel_sizes_next_annotation(self.active_tool_type())
+                        {
+                            // Plain wheel with a drawing tool armed and
+                            // nothing selected → that tool's size for the
+                            // next annotation. Sizing what you're about
+                            // to place is the adjustment you reach for
+                            // mid-placement, so it shouldn't cost a
+                            // modifier; Shift+wheel still pans, and the
+                            // Pointer tool keeps the plain wheel for it.
+                            //
+                            // Same handler as Alt+wheel, so it inherits
+                            // the per-tool session size that the
+                            // sticky-defaults preference restores on tool
+                            // switch — without touching the saved default
+                            // the next launch starts from.
+                            self.scroll_resize_tool_size(me.pos.y, &outer_sender);
                             true
                         } else {
                             // Clear residual accumulation when no resize

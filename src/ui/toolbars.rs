@@ -2036,20 +2036,11 @@ fn fill_tooltip_text(fill_shapes: bool) -> &'static str {
     }
 }
 
-/// Size-slider tooltip text. The wheel-resize gesture's modifier
-/// depends on whether anything is selected: with a selection, plain
-/// wheel resizes it; without one, Alt+wheel changes the next-stroke
-/// size (plain wheel pans, Ctrl+wheel zooms). Reflecting that in the
-/// tooltip surfaces the right keystroke for the user's current state.
-/// Returns Pango markup (the modifier glyph rides in an Adwaita Sans
-/// span), so the tooltip label must have `use_markup` set.
-fn size_tooltip_text(has_selection: bool) -> &'static str {
-    if has_selection {
-        "Annotation size (scroll to adjust)"
-    } else {
-        "Annotation size (<span face=\"Adwaita Sans\">⌥</span> scroll to adjust)"
-    }
-}
+/// Size-slider tooltip text. One string for both states: the plain
+/// wheel resizes a selection when there is one and the next
+/// annotation when there isn't, so the gesture the user needs is the
+/// same either way. (Ctrl+wheel zooms, Shift+wheel pans.)
+const SIZE_TOOLTIP: &str = "Annotation size (scroll to adjust)";
 
 /// Map a `Size` to the size slider's integer position (0..=5). The
 /// helper sits next to its inverse so the two stay in sync.
@@ -5717,7 +5708,7 @@ impl Component for StyleToolbar {
                 // No selection → wheel-resize requires Alt;
                 // tooltip says so.
                 if let Some(label) = &self.size_tooltip_label {
-                    label.set_label(size_tooltip_text(false));
+                    label.set_label(SIZE_TOOLTIP);
                 }
             }
             StyleToolbarInput::CropPresenceChanged(present) => {
@@ -5769,7 +5760,7 @@ impl Component for StyleToolbar {
                 // Selection is active → wheel resizes it; tooltip
                 // points at the unmodified-wheel gesture.
                 if let Some(label) = &self.size_tooltip_label {
-                    label.set_label(size_tooltip_text(true));
+                    label.set_label(SIZE_TOOLTIP);
                 }
             }
             StyleToolbarInput::SyncMultiAgreement { size, smooth } => {
@@ -5811,7 +5802,7 @@ impl Component for StyleToolbar {
                 // Multi-selection counts as "selection active" for
                 // tooltip purposes — wheel still resizes the group.
                 if let Some(label) = &self.size_tooltip_label {
-                    label.set_label(size_tooltip_text(true));
+                    label.set_label(SIZE_TOOLTIP);
                 }
             }
             StyleToolbarInput::ToggleFill => {
@@ -6067,7 +6058,7 @@ impl Component for StyleToolbar {
         // that's the initial state and the most common cold-start.
         let size_tooltip = install_dynamic_tooltip(
             &widgets.size_slider,
-            size_tooltip_text(false),
+            SIZE_TOOLTIP,
             gtk::PositionType::Top,
             true,
         );
