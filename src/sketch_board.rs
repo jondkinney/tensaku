@@ -3104,13 +3104,18 @@ impl SketchBoard {
     fn drain_scroll_resize_steps(&mut self, dy: f32) -> i32 {
         // Reset on direction reversal so a flick the other way doesn't
         // have to chew through the previous direction's leftover.
-        if self.scroll_resize_accum != 0.0 && (self.scroll_resize_accum.signum() != (-dy).signum())
-        {
+        if self.scroll_resize_accum != 0.0 && (self.scroll_resize_accum.signum() != dy.signum()) {
             self.scroll_resize_accum = 0.0;
         }
-        // GTK reports dy>0 for scroll-down, dy<0 for scroll-up. We want
-        // scroll-up → step_up (bigger), so negate the sign.
-        self.scroll_resize_accum += -dy;
+        // The delta passes straight through: pulling the wheel toward
+        // you (dy > 0) steps up. Inverting it here would fight the
+        // compositor, which has already applied the user's natural-
+        // scrolling setting to this number — every flip we add on top
+        // is a second opinion about a direction they already chose.
+        // Every wheel adjustment in the editor shares this sign, so
+        // "toward you" means more of the thing everywhere: bigger
+        // annotation, darker spotlight, smoother brush.
+        self.scroll_resize_accum += dy;
         let mut steps = 0;
         while self.scroll_resize_accum >= 1.0 {
             self.scroll_resize_accum -= 1.0;
@@ -5213,7 +5218,9 @@ impl Component for SketchBoard {
                             let in_edit = crop_tool.borrow().is_active_edit();
                             if in_edit {
                                 let factor = APP_CONFIG.read().zoom_factor();
-                                let multiplier = factor.powf(-me.pos.y);
+                                // Same polarity as every other wheel
+                                // adjustment: toward you grows the rect.
+                                let multiplier = factor.powf(me.pos.y);
                                 if crop_tool.borrow_mut().resize_proportional(multiplier) {
                                     self.renderer.request_render(&[]);
                                 }
@@ -5227,11 +5234,13 @@ impl Component for SketchBoard {
                             // exponent, so a notched wheel (|dy| = 1 per
                             // click) and a trackpad swipe (many |dy| ≪ 1
                             // events) settle on the same zoom per
-                            // gesture.
+                            // gesture. Same direction as the size wheel:
+                            // toward you brings the canvas closer, the
+                            // way it makes an annotation bigger.
                             if me.pos.y != 0.0 {
                                 let factor = APP_CONFIG.read().zoom_factor();
                                 self.renderer
-                                    .set_zoom_scale_at_cursor(factor.powf(-me.pos.y));
+                                    .set_zoom_scale_at_cursor(factor.powf(me.pos.y));
                                 self.renderer.request_render(&[]);
                             }
                             true
