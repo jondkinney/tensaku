@@ -84,6 +84,9 @@ pub enum SketchBoardInput {
     /// editor back.
     PinEdit,
 
+    /// The pinned window's Copy-image button.
+    PinCopyImage,
+
     /// The pinned window's Copy-path button.
     PinCopyPath,
 
@@ -699,6 +702,14 @@ pub struct SketchBoard {
     /// dropping the handle would close the window the moment it
     /// opened — and so a completed copy can confirm itself on it.
     pinned: RefCell<Option<crate::pin::Pin>>,
+    /// The image the pin is showing.
+    ///
+    /// Kept because the editor's window is hidden while a pin is up,
+    /// and every path through the renderer needs it visible: a hidden
+    /// GLArea never draws, so a render request made from the pin
+    /// never comes back. Copying and saving work from these pixels
+    /// instead, which are already exactly what was pinned.
+    pinned_image: RefCell<Option<Pixbuf>>,
     /// Last (selected drawable id, size, size-factor) tuple we pushed
     /// to the toolbar via `SelectionStyleChanged`. We re-emit when
     /// any of these change — flips of the active selection AND
@@ -1512,7 +1523,6 @@ impl SketchBoard {
             None => Self::write_pin_snapshot(image),
         };
         let drag_path = saved.clone().or_else(|| snapshot.clone());
-        let copy_image = image.clone();
         let copy_sender = sender.input_sender().clone();
         let path_sender = sender.input_sender().clone();
         let edit_sender = sender.input_sender().clone();
@@ -1526,8 +1536,7 @@ impl SketchBoard {
                 // copy is byte-identical to one made from the editor,
                 // including the configured `copy-command`.
                 on_copy: Box::new(move || {
-                    let _ = copy_image;
-                    copy_sender.emit(SketchBoardInput::ToolbarEvent(ToolbarEvent::CopyClipboard));
+                    copy_sender.emit(SketchBoardInput::PinCopyImage);
                 }),
                 on_copy_path: Box::new(move || {
                     path_sender.emit(SketchBoardInput::PinCopyPath);
@@ -1548,6 +1557,7 @@ impl SketchBoard {
                 let _ = fs::remove_file(&snapshot);
             });
         }
+        *self.pinned_image.borrow_mut() = Some(image.clone());
         *self.pinned.borrow_mut() = Some(pin);
         sender.output_sender().emit(SketchBoardOutput::PinOpened);
     }
@@ -5887,6 +5897,12 @@ impl Component for SketchBoard {
                     .emit(SketchBoardOutput::PinEditRequested);
                 ToolUpdateResult::Unmodified
             }
+            SketchBoardInput::PinCopyImage => {
+                if let Some(image) = self.pinned_image.borrow().as_ref() {
+                    self.handle_copy_clipboard(image);
+                }
+                ToolUpdateResult::Unmodified
+            }
             SketchBoardInput::PinCopyPath => {
                 // A pinned shot has often never been saved, so the
                 // path it would be copied from doesn't exist yet.
@@ -5894,19 +5910,30 @@ impl Component for SketchBoard {
                 // honestly mean there, and `handle_save` records the
                 // path synchronously, so the copy that follows in the
                 // same action list sees it.
+                // Straight from the pinned pixels, never through the
+                // renderer: the editor's window is hidden while a pin
+                // is up, and a hidden GLArea never draws, so a render
+                // request would be a copy that silently never happens.
+                let image = self.pinned_image.borrow().clone();
                 if self.last_saved_filepath.borrow().is_some() {
                     self.handle_copy_filepath();
-                } else if APP_CONFIG.read().output_filename().is_some() {
-                    self.renderer
-                        .request_render(&[Action::SaveToFile, Action::CopyFilepathToClipboard]);
-                } else {
-                    // Nowhere configured to save to, so ask. Save As
-                    // carries the rest of the action list into its
-                    // callback, which is how the copy still happens
-                    // after a dialog that returns whenever the user
-                    // gets round to it.
-                    self.renderer
-                        .request_render(&[Action::SaveToFileAs, Action::CopyFilepathToClipboard]);
+                } else if let Some(image) = image {
+                    if APP_CONFIG.read().output_filename().is_some() {
+                        self.handle_save(&image);
+                        self.handle_copy_filepath();
+                    } else {
+                        // Nowhere configured to save to, so ask. Save
+                        // As carries the follow-up into its callback,
+                        // which is how the copy still happens after a
+                        // dialog that returns whenever the user gets
+                        // round to it.
+                        self.handle_save_as(
+                            true,
+                            image,
+                            sender,
+                            vec![Action::CopyFilepathToClipboard],
+                        );
+                    }
                 }
                 ToolUpdateResult::Unmodified
             }
@@ -6357,6 +6384,7 @@ impl Component for SketchBoard {
             im_context,
             last_saved_filepath: RefCell::new(None),
             pinned: RefCell::new(None),
+            pinned_image: RefCell::new(None),
             last_synced_selection: None,
             last_was_multi_selection: false,
             tool_before_crop: None,

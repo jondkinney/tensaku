@@ -27,9 +27,18 @@ use std::rc::Rc;
 use std::time::Duration;
 
 /// Width of a pinned capture, in CSS pixels. Height follows the
-/// image's aspect. Big enough to read a line of text in a terminal
-/// shot, small enough to leave the desktop usable.
-const PIN_WIDTH: i32 = 280;
+/// image's aspect. Big enough to tell one shot from another, small
+/// enough to leave the desktop usable — a pin is a reminder of what
+/// you took, not a window to work in.
+const PIN_WIDTH: i32 = 186;
+
+/// Frame around the preview: the pin needs an edge of its own or it
+/// reads as a picture lying loose on the desktop rather than a thing
+/// sitting on it.
+const PIN_PADDING: i32 = 6;
+
+/// Gap between stacked pins.
+const PIN_GAP: i32 = 12;
 
 /// Gap between the pin and the screen edge it starts anchored to.
 const EDGE_MARGIN: i32 = 24;
@@ -93,26 +102,39 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
     window.set_layer(Layer::Overlay);
     window.set_anchor(Edge::Right, true);
     window.set_anchor(Edge::Bottom, true);
+    window.set_namespace(Some(PIN_NAMESPACE));
+    // Stack above whatever is already pinned instead of landing on
+    // top of it. Each capture is its own process, so the count comes
+    // from the compositor rather than from a shared list.
+    let (width, height) = scaled_size(image.width(), image.height());
+    let bottom = EDGE_MARGIN + stacked_pins() * (height + PIN_PADDING * 2 + PIN_GAP);
     window.set_margin(Edge::Right, EDGE_MARGIN);
-    window.set_margin(Edge::Bottom, EDGE_MARGIN);
+    window.set_margin(Edge::Bottom, bottom);
     // OnDemand rather than Exclusive: the pin should never swallow the
     // keystrokes of whatever the user is actually working in, but Esc
     // has to reach it once it is clicked.
     window.set_keyboard_mode(KeyboardMode::OnDemand);
 
-    let (width, height) = scaled_size(image.width(), image.height());
-    window.set_default_size(width, height);
+    window.set_default_size(width + PIN_PADDING * 2, height + PIN_PADDING * 2);
 
-    let picture = gtk::Picture::for_pixbuf(image);
+    // Scale the pixels down rather than asking the widget to shrink
+    // them. A `Picture`'s natural size is its image's, so a 6K capture
+    // asked for a 6K surface and the compositor clamped it — which is
+    // why a pin showed a corner at full size instead of the shot.
+    let preview = image
+        .scale_simple(width, height, gtk::gdk_pixbuf::InterpType::Bilinear)
+        .unwrap_or_else(|| image.clone());
+    let picture = gtk::Picture::for_pixbuf(&preview);
     picture.set_can_shrink(true);
-    // `keep_aspect_ratio` in this GTK build; a long stitch is capped
-    // in `scaled_size`, so the picture letterboxes rather than
-    // stretching when the cap bites.
     picture.set_keep_aspect_ratio(true);
     picture.set_size_request(width, height);
 
+    let frame = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    frame.add_css_class("pin-frame");
+    frame.append(&picture);
+
     let overlay = gtk::Overlay::new();
-    overlay.set_child(Some(&picture));
+    overlay.set_child(Some(&frame));
 
     let controls = build_controls(&window, image, actions);
     overlay.add_overlay(&controls);
@@ -170,6 +192,28 @@ fn build_toast() -> (gtk::Label, Toast) {
         });
     };
     (label, Rc::new(show))
+}
+
+/// Layer-surface namespace, so pins can count each other.
+const PIN_NAMESPACE: &str = "tensaku-pin";
+
+/// How many pins are already on screen.
+///
+/// Asks the compositor rather than keeping a count: every capture is a
+/// separate process, and a file of slots would go stale the first time
+/// one crashed. A compositor that can't be asked answers zero, and the
+/// new pin lands in the corner like the first one.
+fn stacked_pins() -> i32 {
+    let Ok(output) = std::process::Command::new("hyprctl")
+        .args(["-j", "layers"])
+        .output()
+    else {
+        return 0;
+    };
+    let Ok(text) = String::from_utf8(output.stdout) else {
+        return 0;
+    };
+    text.matches(PIN_NAMESPACE).count() as i32
 }
 
 /// Fit `PIN_WIDTH` while keeping the capture's aspect, and never let a
@@ -352,7 +396,7 @@ fn install_drag(window: &gtk::Window, target: &gtk::Overlay) {
 
 #[cfg(test)]
 mod tests {
-    use super::{DRAG_ICON_MAX, PIN_WIDTH, fit_within, scaled_size};
+    use super::{DRAG_ICON_MAX, PIN_GAP, PIN_PADDING, PIN_WIDTH, fit_within, scaled_size};
 
     /// The pointer carries a token, not the capture: a 6K shot has to
     /// come down to something a pointer can drag.
@@ -397,5 +441,15 @@ mod tests {
     fn a_long_stitch_is_capped() {
         let (_, h) = scaled_size(1000, 40_000);
         assert_eq!(h, PIN_WIDTH * 3);
+    }
+
+    /// Pins stack clear of each other, so a second one doesn't bury
+    /// the first — the whole point of seeing both is telling them
+    /// apart.
+    #[test]
+    fn stacked_pins_do_not_overlap() {
+        let (_, height) = scaled_size(1600, 900);
+        let step = height + PIN_PADDING * 2 + PIN_GAP;
+        assert!(step > height + PIN_PADDING * 2);
     }
 }
