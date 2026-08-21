@@ -5184,6 +5184,21 @@ impl Component for SketchBoard {
                         false
                     };
 
+                    // A text being edited owns the next click, wherever it
+                    // lands. Clicking away from an in-progress text only ends
+                    // it: it commits and clears, and creates nothing. A second
+                    // click then does whatever it would normally do — start a
+                    // new text on blank canvas, grab an annotation, and so on.
+                    //
+                    // Without this the implicit pointer sees that click first
+                    // and can consume it — selecting whatever was under the
+                    // cursor, or grabbing one of the text's own editing
+                    // handles — so the text tool never gets to finish, and
+                    // "click away to finish typing" silently does something
+                    // else instead. `Tool::active` is only ever true for a
+                    // text in progress.
+                    let editing_in_progress = self.active_tool.borrow().active();
+
                     let pointer_consumed =
                         // Crop is excluded: while cropping, mouse gestures
                         // belong to the crop handles ONLY — never the implicit
@@ -5192,6 +5207,7 @@ impl Component for SketchBoard {
                         if active_type != Tools::Pointer
                             && active_type != Tools::Crop
                             && !in_active_editing_body
+                            && !editing_in_progress
                         {
                             // Hint to the pointer which drawing tool is active
                             // so it can pass body-grabs through on type-mismatch
