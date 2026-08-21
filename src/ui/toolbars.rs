@@ -6195,7 +6195,15 @@ impl Component for StyleToolbar {
                 crate::tools::TextBackground::Outlined => 1,
                 crate::tools::TextBackground::Plain => 2,
             };
+            // Silently: `set_selected` fires the dropdown's notify
+            // handler, which is the user-picked-this path — it emits
+            // upstream, which re-saves the style and toasts it. Reading
+            // a saved default at startup is not the user picking
+            // anything, and the toast made it look like the text tool
+            // had opened itself.
+            text_background_silent.set(true);
             widgets.text_background_dropdown.set_selected(idx);
+            text_background_silent.set(false);
         }
         // Stash the DropDown so `SetTextBackground` can drive its
         // selected index when sketch_board cycles the variant via the

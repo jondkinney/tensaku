@@ -81,6 +81,16 @@ impl Mode {
 struct State {
     /// The screen as it was when the overlay went up.
     frozen: Pixbuf,
+    /// The capture pre-scaled to the overlay's size, and a second copy
+    /// with the dim sheet already burnt in.
+    ///
+    /// Without these, every motion event rescales a 21-megapixel
+    /// capture through cairo twice — once for the backdrop and once
+    /// inside the selection — and the rectangle lags the pointer.
+    /// Scaling once at the size it will actually be drawn turns each
+    /// frame into two blits.
+    backdrop: Option<gtk::cairo::ImageSurface>,
+    dimmed: Option<gtk::cairo::ImageSurface>,
     /// Image pixels per logical pixel, learned at draw time — the
     /// overlay is laid out in logical units and the capture is in
     /// device ones, and on a 2x display those differ by exactly the
@@ -129,6 +139,8 @@ fn build_overlay(
     // longer where it was drawn.
     let state = Rc::new(RefCell::new(State {
         frozen,
+        backdrop: None,
+        dimmed: None,
         image_scale: 1.0,
         mode: Mode::Area,
         origin: (0.0, 0.0),
@@ -193,19 +205,16 @@ fn install_draw(drawing: &gtk::DrawingArea, state: &Rc<RefCell<State>>) {
         // and record it for the selection to convert with.
         let scale = state.frozen.width() as f64 / width as f64;
         state.image_scale = scale;
+        ensure_backdrops(&mut state, width, height);
 
-        // The frozen screen, then a sheet over it. Painting the
-        // capture rather than leaving the surface transparent is what
-        // makes the selection show what was there when you pressed the
-        // key, rather than whatever moved since.
-        ctx.save().ok();
-        ctx.scale(1.0 / scale, 1.0 / scale);
-        ctx.set_source_pixbuf(&state.frozen, 0.0, 0.0);
-        let _ = ctx.paint();
-        ctx.restore().ok();
-
-        ctx.set_source_rgba(0.0, 0.0, 0.0, 0.45);
-        let _ = ctx.paint();
+        // The frozen screen with the dim sheet already in it. Painting
+        // the capture rather than leaving the surface transparent is
+        // what makes the selection show what was there when the key
+        // was pressed, rather than whatever moved since.
+        if let Some(dimmed) = &state.dimmed {
+            let _ = ctx.set_source_surface(dimmed, 0.0, 0.0);
+            let _ = ctx.paint();
+        }
 
         let Some(rect) = pending_rect(&state) else {
             return;
@@ -221,19 +230,55 @@ fn install_draw(drawing: &gtk::DrawingArea, state: &Rc<RefCell<State>>) {
         }
         // Repaint the capture inside the selection, undimmed, so the
         // rectangle previews exactly the pixels it will keep.
-        ctx.save().ok();
-        ctx.rectangle(x, y, w, h);
-        ctx.clip();
-        ctx.scale(1.0 / scale, 1.0 / scale);
-        ctx.set_source_pixbuf(&state.frozen, 0.0, 0.0);
-        let _ = ctx.paint();
-        ctx.restore().ok();
+        if let Some(backdrop) = &state.backdrop {
+            ctx.save().ok();
+            ctx.rectangle(x, y, w, h);
+            ctx.clip();
+            let _ = ctx.set_source_surface(backdrop, 0.0, 0.0);
+            let _ = ctx.paint();
+            ctx.restore().ok();
+        }
 
         ctx.set_source_rgba(1.0, 1.0, 1.0, 0.9);
         ctx.set_line_width(1.0);
         ctx.rectangle(x + 0.5, y + 0.5, w - 1.0, h - 1.0);
         let _ = ctx.stroke();
     });
+}
+
+/// Scale the capture to the overlay's size once, and burn a second
+/// copy with the dim sheet already applied. Rebuilt only when the
+/// overlay's size changes, which in practice means once.
+fn ensure_backdrops(state: &mut State, width: i32, height: i32) {
+    let sized = |surface: &Option<gtk::cairo::ImageSurface>| {
+        surface
+            .as_ref()
+            .is_some_and(|s| s.width() == width && s.height() == height)
+    };
+    if sized(&state.backdrop) && sized(&state.dimmed) {
+        return;
+    }
+
+    let render = |dim: bool| -> Option<gtk::cairo::ImageSurface> {
+        let surface =
+            gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, width, height).ok()?;
+        let ctx = gtk::cairo::Context::new(&surface).ok()?;
+        ctx.scale(
+            width as f64 / state.frozen.width() as f64,
+            height as f64 / state.frozen.height() as f64,
+        );
+        ctx.set_source_pixbuf(&state.frozen, 0.0, 0.0);
+        let _ = ctx.paint();
+        if dim {
+            ctx.identity_matrix();
+            ctx.set_source_rgba(0.0, 0.0, 0.0, 0.45);
+            let _ = ctx.paint();
+        }
+        drop(ctx);
+        Some(surface)
+    };
+    state.backdrop = render(false);
+    state.dimmed = render(true);
 }
 
 /// The rectangle the overlay would capture if the user committed now.
