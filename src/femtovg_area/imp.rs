@@ -1616,7 +1616,18 @@ impl FemtoVgAreaMut {
         let counter = self.next_label_index.entry(kind).or_insert(1);
         let label_index = *counter;
         *counter += 1;
-        self.drawables.push(Stacked::new(id, drawable, label_index));
+        // Land at the top of this drawable's band rather than the top
+        // of the stack, so a filled rectangle drawn over a label goes
+        // behind it instead of swallowing it. Only the landing spot —
+        // reordering afterwards moves it anywhere and stays put.
+        let bands: Vec<crate::tools::StackBand> = self
+            .drawables
+            .iter()
+            .map(|s| s.drawable.stack_band())
+            .collect();
+        let at = crate::tools::StackBand::insert_position(&bands, drawable.stack_band());
+        self.drawables
+            .insert(at, Stacked::new(id, drawable, label_index));
         self.undo_stack.push(UndoAction::Add(id));
         self.redo_stack.clear();
         id

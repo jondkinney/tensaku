@@ -475,6 +475,11 @@ pub trait Drawable: DrawableClone + Debug {
         false
     }
 
+    /// Which band this drawable is committed into. See [`StackBand`].
+    fn stack_band(&self) -> StackBand {
+        StackBand::of(self.tool_type())
+    }
+
     /// Translate the drawable by `delta` (image coordinates).
     /// Default is a no-op so non-movable drawables (e.g. crop overlays) don't need
     /// to implement it.
@@ -733,6 +738,58 @@ pub const EDGE_HIT_TOLERANCE: f32 = 14.0;
 ///
 /// Inside and outside by `tolerance` both count, so the target is
 /// `2 * tolerance` wide and a slightly-missed grab still lands.
+/// Where a newly committed annotation lands in the stack.
+///
+/// A new annotation normally goes on top of everything, which buries a
+/// text box under the next filled rectangle drawn over it. Labels are
+/// the thing you least want covered, so they get their own bands: a
+/// new annotation is inserted at the top of ITS band rather than the
+/// top of the stack, leaving text above the artwork and counters above
+/// the text.
+///
+/// This only decides where something lands when it is created.
+/// Reordering afterwards — the layer panel, the canvas context menu —
+/// moves it anywhere, and nothing drags it back. The rule is a good
+/// default, not a constraint the editor keeps re-imposing, which also
+/// keeps the layer panel's order honest about what gets drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StackBand {
+    /// Everything that makes up the picture: shapes, arrows, brush,
+    /// blur, spotlight, pasted images.
+    Artwork,
+    /// Text, above the artwork so a shape drawn over a label doesn't
+    /// swallow it.
+    Text,
+    /// Counters, above even text — a number stamped on a label is the
+    /// whole point of stamping it there.
+    Counter,
+}
+
+impl StackBand {
+    pub fn of(tool: Option<Tools>) -> Self {
+        match tool {
+            Some(Tools::Text) => StackBand::Text,
+            Some(Tools::Marker) => StackBand::Counter,
+            _ => StackBand::Artwork,
+        }
+    }
+
+    /// Where a new drawable of `band` lands in a stack whose existing
+    /// bands are `existing`, bottom-first: just above the last entry
+    /// that isn't in a higher band. Newest-on-top holds within a band,
+    /// so this only changes which annotations a new one goes under.
+    ///
+    /// `existing` is read as-is rather than assumed sorted — after a
+    /// manual reorder the bands can interleave, and the insert still
+    /// has to land somewhere sensible.
+    pub fn insert_position(existing: &[StackBand], band: StackBand) -> usize {
+        existing
+            .iter()
+            .rposition(|b| *b <= band)
+            .map_or(0, |pos| pos + 1)
+    }
+}
+
 /// Does a click at `point` grab `drawable`, or fall through to the
 /// drawing tool `armed` behind it? `armed` is `None` when the Pointer
 /// tool is active, which grabs anywhere.
@@ -1781,5 +1838,67 @@ mod edge_hit_tests {
     #[test]
     fn the_border_target_is_fatter_than_ordinary_picking() {
         const { assert!(EDGE_HIT_TOLERANCE > HIT_TOLERANCE) };
+    }
+}
+
+#[cfg(test)]
+mod stack_band_tests {
+    use super::{StackBand, Tools};
+
+    /// Labels sit above the picture, and a counter above the label it
+    /// numbers.
+    #[test]
+    fn the_bands_rank_labels_over_artwork() {
+        assert!(StackBand::of(Some(Tools::Rectangle)) < StackBand::of(Some(Tools::Text)));
+        assert!(StackBand::of(Some(Tools::Text)) < StackBand::of(Some(Tools::Marker)));
+        // Everything that isn't a label is picture, including the
+        // tools that have no drawable of their own.
+        for tool in [
+            Tools::Arrow,
+            Tools::Blur,
+            Tools::Brush,
+            Tools::Ellipse,
+            Tools::Highlighter,
+            Tools::Line,
+            Tools::Spotlight,
+        ] {
+            assert_eq!(StackBand::of(Some(tool)), StackBand::Artwork, "{tool}");
+        }
+        assert_eq!(StackBand::of(None), StackBand::Artwork);
+    }
+
+    /// The case that started this: a shape drawn over a text box goes
+    /// behind it, not over it.
+    #[test]
+    fn artwork_lands_under_the_labels_already_placed() {
+        let stack = [StackBand::Artwork, StackBand::Text, StackBand::Counter];
+        assert_eq!(StackBand::insert_position(&stack, StackBand::Artwork), 1);
+        assert_eq!(StackBand::insert_position(&stack, StackBand::Text), 2);
+        assert_eq!(StackBand::insert_position(&stack, StackBand::Counter), 3);
+    }
+
+    /// Within a band the newest still wins, so two rectangles stack in
+    /// the order they were drawn.
+    #[test]
+    fn newest_still_goes_on_top_within_a_band() {
+        let stack = [StackBand::Artwork, StackBand::Artwork];
+        assert_eq!(StackBand::insert_position(&stack, StackBand::Artwork), 2);
+    }
+
+    #[test]
+    fn an_empty_stack_takes_anything_at_the_bottom() {
+        for band in [StackBand::Artwork, StackBand::Text, StackBand::Counter] {
+            assert_eq!(StackBand::insert_position(&[], band), 0);
+        }
+    }
+
+    /// After a manual reorder the bands interleave. The insert still
+    /// lands above the last thing it belongs over, rather than
+    /// searching for a band boundary that no longer exists.
+    #[test]
+    fn an_interleaved_stack_still_takes_an_insert() {
+        let stack = [StackBand::Counter, StackBand::Artwork, StackBand::Text];
+        assert_eq!(StackBand::insert_position(&stack, StackBand::Artwork), 2);
+        assert_eq!(StackBand::insert_position(&stack, StackBand::Counter), 3);
     }
 }
