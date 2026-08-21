@@ -159,7 +159,7 @@ fn build_controls(window: &gtk::Window, actions: PinActions) -> gtk::Box {
         if path_known {
             "Copy file path"
         } else {
-            "Save and copy file path"
+            "Save the shot, then copy its path"
         },
     );
     copy_path.connect_clicked(move |btn| {

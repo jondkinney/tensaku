@@ -5826,12 +5826,13 @@ impl Component for SketchBoard {
                     self.renderer
                         .request_render(&[Action::SaveToFile, Action::CopyFilepathToClipboard]);
                 } else {
-                    // Nowhere to save to means no path to copy. Say so
-                    // rather than appearing to work.
-                    log_result(
-                        "No output filename configured, so there is no path to copy.",
-                        !APP_CONFIG.read().disable_notifications(),
-                    );
+                    // Nowhere configured to save to, so ask. Save As
+                    // carries the rest of the action list into its
+                    // callback, which is how the copy still happens
+                    // after a dialog that returns whenever the user
+                    // gets round to it.
+                    self.renderer
+                        .request_render(&[Action::SaveToFileAs, Action::CopyFilepathToClipboard]);
                 }
                 ToolUpdateResult::Unmodified
             }
