@@ -201,29 +201,41 @@ impl Drawable for Marker {
     }
 }
 
+/// Marker-specific text size. Smaller than Style::to_text_size — markers
+/// are compact badges, not paragraphs.
+///
+/// A free function rather than a method because the cursor previews the
+/// badge before any `Marker` exists to ask, and a preview sized by its
+/// own copy of these numbers would drift from the badge it promises.
+pub fn marker_text_size(size: crate::style::Size, factor: f32, scale: f32) -> f32 {
+    let base = match size {
+        crate::style::Size::XSmall => 14.0,
+        crate::style::Size::Small => 22.0,
+        crate::style::Size::Medium => 36.0,
+        crate::style::Size::Large => 50.0,
+        crate::style::Size::XLarge => 70.0,
+        crate::style::Size::XXLarge => 96.0,
+    };
+    base * factor * scale
+}
+
+/// Approximate badge radius for `text_size`, without canvas-bound text
+/// metrics — wider for a two- or three-digit number, same as the real
+/// disc. Shared with the cursor preview.
+pub fn marker_radius(text_size: f32, number: u16) -> f32 {
+    let digits = number.to_string().len() as f32;
+    let w = text_size * 0.7 * digits.max(1.0);
+    let h = text_size;
+    (w * w + h * h).sqrt() * 0.65
+}
+
 impl Marker {
-    /// Marker-specific text size. Smaller than Style::to_text_size — markers
-    /// are compact badges, not paragraphs.
     fn marker_text_size(&self) -> f32 {
-        let factor = self.style.annotation_size_factor;
-        let base = match self.style.size {
-            crate::style::Size::XSmall => 14.0,
-            crate::style::Size::Small => 22.0,
-            crate::style::Size::Medium => 36.0,
-            crate::style::Size::Large => 50.0,
-            crate::style::Size::XLarge => 70.0,
-            crate::style::Size::XXLarge => 96.0,
-        };
-        base * factor * self.scale
+        marker_text_size(self.style.size, self.style.annotation_size_factor, self.scale)
     }
 
-    /// Approximate hit-test/selection radius without canvas-bound text metrics.
     fn approx_radius(&self) -> f32 {
-        let text_size = self.marker_text_size();
-        let digits = self.number.to_string().len() as f32;
-        let w = text_size * 0.7 * digits.max(1.0);
-        let h = text_size;
-        (w * w + h * h).sqrt() * 0.65
+        marker_radius(self.marker_text_size(), self.number)
     }
 }
 
@@ -275,6 +287,10 @@ impl Tool for MarkerTool {
 
     fn set_sender(&mut self, sender: Sender<SketchBoardInput>) {
         self.sender = Some(sender);
+    }
+
+    fn next_marker_number(&self) -> Option<u16> {
+        Some(*self.next_number.borrow())
     }
 }
 

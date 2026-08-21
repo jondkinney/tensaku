@@ -1571,6 +1571,11 @@ impl SketchBoard {
         if self.renderer.image_dimensions() != before_dims {
             self.refit_after_dims_change(sender);
         }
+        // Undoing a stamped counter rolls the next number back, so the
+        // cursor previewing that number is now wrong.
+        if self.active_tool_type() == Tools::Marker {
+            self.apply_idle_cursor();
+        }
     }
 
     /// After an undo/redo changed the image dimensions — a rotate /
@@ -3575,7 +3580,7 @@ impl SketchBoard {
         // user sees the new diameter before they move the mouse. Skip
         // for tools without a custom cursor — apply_idle_cursor
         // handles that path correctly.
-        if matches!(active_type, Tools::Brush | Tools::Highlighter) {
+        if Self::has_custom_cursor(active_type) {
             self.apply_idle_cursor();
         }
 
@@ -3781,6 +3786,14 @@ impl SketchBoard {
         self.renderer.set_cursor_from_name(cursor);
     }
 
+    /// Tools whose cursor is painted from live state — stroke size,
+    /// badge color and number — rather than picked from the stock
+    /// names. Their cursor has to be rebuilt whenever that state
+    /// changes, not just on the next motion event.
+    fn has_custom_cursor(tool: Tools) -> bool {
+        matches!(tool, Tools::Brush | Tools::Highlighter | Tools::Marker)
+    }
+
     /// Cursor to show when nothing is under the pointer.
     fn idle_cursor_for_active_tool(&self) -> Option<&'static str> {
         match self.active_tool_type() {
@@ -3808,6 +3821,7 @@ impl SketchBoard {
         // cursor visually in lock-step with the stroke that comes out
         // of it.
         let dpr = crate::femtovg_area::current_device_pixel_ratio() as f64;
+        let marker_number = self.active_tool.borrow().next_marker_number();
         crate::ui::cursor::drawing_tool_cursor(
             self.active_tool_type(),
             &self.style,
@@ -3815,6 +3829,7 @@ impl SketchBoard {
             dpr,
             band_height_image_px,
             band_vertical_offset_image_px,
+            marker_number,
         )
     }
 
@@ -5364,7 +5379,7 @@ impl Component for SketchBoard {
                 // pointer isn't actually over.
                 self.last_hover_image_pos = None;
                 crate::text_bands::clear_local_band_cache();
-                if matches!(self.active_tool_type(), Tools::Brush | Tools::Highlighter) {
+                if Self::has_custom_cursor(self.active_tool_type()) {
                     self.apply_idle_cursor();
                 }
                 ToolUpdateResult::Unmodified
@@ -5724,6 +5739,13 @@ impl Component for SketchBoard {
                     self.renderer.request_render(&[Action::SaveToClipboard]);
                 }
                 self.refresh_screen();
+                // The Counter's cursor previews the NEXT number, so
+                // stamping one has to rebuild it — otherwise it keeps
+                // advertising the number that just landed until the
+                // pointer happens to move.
+                if self.active_tool_type() == Tools::Marker {
+                    self.apply_idle_cursor();
+                }
             }
             ToolUpdateResult::ModifyDrawable(id, drawable) => {
                 self.renderer.modify(id, drawable);

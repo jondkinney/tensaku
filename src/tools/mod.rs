@@ -269,6 +269,12 @@ pub trait Tool {
     fn editing_body_rect(&self) -> Option<Rect> {
         None
     }
+
+    /// The number the next click would stamp. Only the Counter answers;
+    /// the cursor uses it to preview that exact badge.
+    fn next_marker_number(&self) -> Option<u16> {
+        None
+    }
 }
 
 /// Read-only view of the committed-drawable stack, exposed to tools that need
@@ -1203,6 +1209,7 @@ pub use crop::{AspectRatio, CropBgColor, CropHit, CropTool};
 pub use ellipse::EllipseTool;
 pub use highlight::{HighlightTool, HighlighterStyle, Highlighters};
 pub use line::LineTool;
+pub use marker::{marker_radius, marker_text_size};
 pub use pasted_image::PastedImage;
 pub use rectangle::RectangleTool;
 pub use spotlight::SpotlightTool;

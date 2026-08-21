@@ -43,6 +43,15 @@ const INNER_LINE_WIDTH: f64 = 1.0;
 /// reasonable minimum.
 const MIN_CURSOR_PX: f64 = 8.0;
 
+/// How far the arrow pointer reaches from its tip, used to size the
+/// counter cursor's texture when the badge itself is smaller.
+const ARROW_EXTENT: f64 = 18.0;
+
+/// Below this the digit is a smudge rather than a number, so the badge
+/// shows as a plain disc — still the right color and size, just without
+/// an illegible glyph in it.
+const MIN_DIGIT_PX: f64 = 9.0;
+
 /// Build a circular double-ring cursor for the Brush tool. Diameter
 /// matches the brush's stroke line width AS RENDERED on screen —
 /// `render_scale` is the renderer's image→canvas multiplier, and
@@ -121,6 +130,149 @@ pub fn build_highlighter_cursor(
         let width = (height / 6.0).max(4.0).min(height);
         build_double_ring_cursor(width, height, hotspot_offset_tex_px)
     }
+}
+
+/// Build the Counter tool's cursor: a preview of the badge a click
+/// would stamp — its real color, its real size, and the number that is
+/// actually next — centered on the pointer, because that is where the
+/// badge lands. A crosshair said "you are about to click"; this says
+/// what, and where.
+///
+/// The arrow's tip sits at that same center rather than beside the
+/// badge, so the two halves of the cursor can't disagree about the
+/// placement point. The badge is drawn translucent and the arrow
+/// carries its own light-on-dark outline, so the digit stays readable
+/// underneath it.
+///
+/// Returns `None` when the badge would exceed GDK's cursor size limit
+/// (a very large counter, or a zoomed-in canvas), leaving the caller
+/// on the stock crosshair.
+pub fn build_marker_cursor(
+    style: &Style,
+    number: u16,
+    render_scale: f64,
+    device_pixel_ratio: f64,
+) -> Option<gdk::Cursor> {
+    let surface = render_marker_cursor(style, number, render_scale, device_pixel_ratio)?;
+    let total = surface.width();
+    let pixbuf: Pixbuf = gdk::pixbuf_get_from_surface(&surface, 0, 0, total, total)?;
+    let texture = gdk::Texture::for_pixbuf(&pixbuf);
+    let hot = total / 2;
+    Some(gdk::Cursor::from_texture(&texture, hot, hot, None))
+}
+
+/// Paint the counter cursor onto a fresh surface. Split from
+/// `build_marker_cursor` so a test can render it and inspect the
+/// pixels without a display server in the loop.
+fn render_marker_cursor(
+    style: &Style,
+    number: u16,
+    render_scale: f64,
+    device_pixel_ratio: f64,
+) -> Option<cairo::ImageSurface> {
+    let dpr = device_pixel_ratio.max(1.0);
+    // Same image→cursor-texture mapping the other builders use, so the
+    // preview tracks the zoom the badge will actually be drawn at.
+    let scale = render_scale / dpr;
+    let text_size_img = crate::tools::marker_text_size(style.size, style.annotation_size_factor, 1.0);
+    let radius = crate::tools::marker_radius(text_size_img, number) as f64 * scale;
+    let text_px = text_size_img as f64 * scale;
+
+    // Shrink the arrow on a small badge. At full size it swallows a
+    // 20 px disc whole, and the number — the entire point of the
+    // preview — disappears under it.
+    let arrow_scale = (radius / 26.0).clamp(0.55, 1.0);
+    // The texture is square and the hotspot is its center, so it has to
+    // hold whichever reaches further from that center: the badge, or
+    // the arrow hanging off toward the lower right.
+    let half = (radius + RING_PAD).max(ARROW_EXTENT * arrow_scale + RING_PAD);
+    let total = (half * 2.0).ceil() as i32;
+    if total > 128 {
+        return None;
+    }
+
+    let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, total, total).ok()?;
+    let ctx = cairo::Context::new(&surface).ok()?;
+    let c = total as f64 / 2.0;
+
+    let (r, g, b) = (
+        style.color.r as f64 / 255.0,
+        style.color.g as f64 / 255.0,
+        style.color.b as f64 / 255.0,
+    );
+
+    // Disc, translucent so the arrow on top of it stays legible while
+    // the color still reads as the color you picked.
+    ctx.new_path();
+    ctx.arc(c, c, radius.max(1.0), 0.0, 2.0 * PI);
+    ctx.set_source_rgba(r, g, b, 0.72);
+    let _ = ctx.fill_preserve();
+    // Double ring, same dark-then-light trick as the brush cursor, so
+    // the badge's edge survives on a background of any brightness.
+    ctx.set_source_rgba(0.0, 0.0, 0.0, 0.65);
+    ctx.set_line_width(OUTER_LINE_WIDTH);
+    let _ = ctx.stroke_preserve();
+    ctx.set_source_rgba(1.0, 1.0, 1.0, 0.95);
+    ctx.set_line_width(INNER_LINE_WIDTH);
+    let _ = ctx.stroke();
+
+    // The number, in the same luminance-picked ink the real badge uses.
+    // https://en.wikipedia.org/wiki/Luma_(video)
+    if text_px >= MIN_DIGIT_PX {
+        let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        let ink = if luminance > 0.5 { 0.0 } else { 1.0 };
+        let label = format!("{number}");
+        ctx.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
+        ctx.set_font_size(text_px);
+        if let Ok(ext) = ctx.text_extents(&label) {
+            // Nudged up and left, out from under the arrow that hangs
+            // down-right off the same point. The badge itself stays
+            // centered — only the glyph inside it shifts, and only far
+            // enough to stay readable.
+            let dodge = ARROW_EXTENT * arrow_scale * 0.22;
+            ctx.move_to(
+                c - dodge - ext.width() / 2.0 - ext.x_bearing(),
+                c - dodge * 0.7 - ext.height() / 2.0 - ext.y_bearing(),
+            );
+            ctx.set_source_rgba(ink, ink, ink, 0.95);
+            let _ = ctx.show_text(&label);
+        }
+    }
+
+    draw_arrow_at(&ctx, c, c, arrow_scale);
+
+    drop(ctx);
+    Some(surface)
+}
+
+/// Trace the classic arrow pointer with its tip at `(x, y)`, body
+/// hanging toward the lower right, and paint it light-on-dark so it
+/// reads over both the badge and whatever the badge is translucent
+/// over.
+fn draw_arrow_at(ctx: &cairo::Context, x: f64, y: f64, scale: f64) {
+    const POINTS: [(f64, f64); 7] = [
+        (0.0, 0.0),
+        (0.0, 15.4),
+        (3.6, 12.0),
+        (6.1, 17.4),
+        (8.5, 16.3),
+        (5.9, 11.1),
+        (10.6, 10.7),
+    ];
+    ctx.new_path();
+    for (i, (dx, dy)) in POINTS.iter().enumerate() {
+        if i == 0 {
+            ctx.move_to(x + dx * scale, y + dy * scale);
+        } else {
+            ctx.line_to(x + dx * scale, y + dy * scale);
+        }
+    }
+    ctx.close_path();
+    ctx.set_source_rgba(1.0, 1.0, 1.0, 0.98);
+    let _ = ctx.fill_preserve();
+    ctx.set_source_rgba(0.0, 0.0, 0.0, 0.85);
+    ctx.set_line_width(1.3 * scale.max(0.8));
+    let _ = ctx.stroke();
 }
 
 /// Build a thick I-beam (text-selection style) cursor scaled to
@@ -297,6 +449,8 @@ fn draw_capsule_path(ctx: &cairo::Context, cx: f64, cy: f64, half_w: f64, half_h
 /// style-derived height so the cursor previews what a click here
 /// would highlight. `None` (no band, or non-highlighter tool) keeps
 /// the regular style-driven sizing.
+/// `marker_number` is the number the Counter would stamp next — only
+/// that tool uses it, and without one it keeps the stock crosshair.
 pub fn drawing_tool_cursor(
     tool: crate::tools::Tools,
     style: &Style,
@@ -304,6 +458,7 @@ pub fn drawing_tool_cursor(
     device_pixel_ratio: f64,
     band_height_image_px: Option<f32>,
     band_vertical_offset_image_px: f32,
+    marker_number: Option<u16>,
 ) -> Option<gdk::Cursor> {
     use crate::tools::Tools;
     match tool {
@@ -315,6 +470,9 @@ pub fn drawing_tool_cursor(
             band_height_image_px,
             band_vertical_offset_image_px,
         ),
+        Tools::Marker => {
+            build_marker_cursor(style, marker_number?, render_scale, device_pixel_ratio)
+        }
         _ => None,
     }
 }
@@ -322,3 +480,72 @@ pub fn drawing_tool_cursor(
 // Suppress "unused" if Size is referenced only for the public API.
 #[allow(dead_code)]
 fn _force_use_size(_: Size) {}
+
+#[cfg(test)]
+mod marker_cursor_tests {
+    use super::render_marker_cursor;
+    use crate::style::{Color, Size, Style};
+
+    fn style(size: Size) -> Style {
+        Style {
+            size,
+            color: Color {
+                r: 240,
+                g: 60,
+                b: 50,
+                a: 255,
+            },
+            ..Default::default()
+        }
+    }
+
+    /// Dump the cursor at a few sizes for eyeballing. Ignored — it
+    /// writes files and proves nothing on its own.
+    #[test]
+    #[ignore]
+    fn dump_marker_cursor_pngs() {
+        let dir = std::env::var("TENSAKU_CURSOR_DUMP_DIR").unwrap_or("/tmp".to_string());
+        for (name, size, number, scale) in [
+            ("small-1", Size::Small, 1u16, 1.0),
+            ("medium-7", Size::Medium, 7, 1.0),
+            ("medium-12", Size::Medium, 12, 1.0),
+            ("large-3", Size::Large, 3, 1.0),
+            ("medium-3-zoomed-out", Size::Medium, 3, 0.4),
+        ] {
+            let mut surface = render_marker_cursor(&style(size), number, scale, 1.0)
+                .unwrap_or_else(|| panic!("{name} produced no surface"));
+            let w = surface.width();
+            let h = surface.height();
+            let stride = surface.stride() as usize;
+            let data = surface.data().unwrap();
+            // Raw BGRA rows, tightly packed: cairo's `png` feature
+            // isn't on, and any image viewer takes this with a size.
+            let mut raw = Vec::with_capacity((w * h * 4) as usize);
+            for row in 0..h as usize {
+                raw.extend_from_slice(&data[row * stride..row * stride + (w as usize) * 4]);
+            }
+            std::fs::write(format!("{dir}/cursor-{name}-{w}x{h}.bgra"), &raw).unwrap();
+        }
+    }
+
+    /// The badge has to grow with the size picker, or the preview is
+    /// lying about what lands.
+    #[test]
+    fn the_badge_tracks_the_size_picker() {
+        let small = render_marker_cursor(&style(Size::Small), 1, 1.0, 1.0).unwrap();
+        let large = render_marker_cursor(&style(Size::Large), 1, 1.0, 1.0).unwrap();
+        assert!(
+            large.width() > small.width(),
+            "large {} should exceed small {}",
+            large.width(),
+            small.width()
+        );
+    }
+
+    /// Past GDK's cursor limit there is no texture to hand back, and
+    /// the caller falls through to the stock crosshair.
+    #[test]
+    fn an_oversized_badge_declines_rather_than_returning_a_clipped_one() {
+        assert!(render_marker_cursor(&style(Size::XXLarge), 888, 4.0, 1.0).is_none());
+    }
+}
