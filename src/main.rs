@@ -225,7 +225,11 @@ enum AppInput {
     /// Fill-Shape toggled from outside the StyleToolbar (`F`
     /// keyboard shortcut). Forwarded so the toolbar's button
     /// state updates in lockstep with sketch_board's `style.fill`.
-    FillShapesChanged(bool),
+    FillShapesChanged {
+        current: bool,
+        rect: bool,
+        ellipse: bool,
+    },
     /// Crop rect dimensions during a drag / typed set — pushed
     /// only to the top toolbar's W/H entries (the bottom-right
     /// output-dims readout doesn't watch this; it tracks the
@@ -1298,10 +1302,19 @@ impl Component for App {
                     .sender()
                     .emit(ToolsToolbarInput::ImageDimensionsChanged { width, height });
             }
-            AppInput::FillShapesChanged(fill) => {
+            AppInput::FillShapesChanged {
+                current,
+                rect,
+                ellipse,
+            } => {
                 self.style_toolbar
                     .sender()
-                    .emit(StyleToolbarInput::SetFillShapes(fill));
+                    .emit(StyleToolbarInput::SetFillShapes(current));
+                // The two shape buttons live in the tools toolbar and
+                // each shows its own fill, so they need both values.
+                self.tools_toolbar
+                    .sender()
+                    .emit(ToolsToolbarInput::SetShapeFill { rect, ellipse });
             }
             AppInput::ArrowStyleCycled(style) => {
                 // Update the toolbar's local mirror + MenuButton
@@ -1457,7 +1470,15 @@ impl Component for App {
                     SketchBoardOutput::ImageDimensionsChanged { width, height } => {
                         AppInput::ImageDimensionsChanged { width, height }
                     }
-                    SketchBoardOutput::FillShapesChanged(fill) => AppInput::FillShapesChanged(fill),
+                    SketchBoardOutput::FillShapesChanged {
+                        current,
+                        rect,
+                        ellipse,
+                    } => AppInput::FillShapesChanged {
+                        current,
+                        rect,
+                        ellipse,
+                    },
                     SketchBoardOutput::CropEditDimensions { width, height } => {
                         AppInput::CropEditDimensions { width, height }
                     }

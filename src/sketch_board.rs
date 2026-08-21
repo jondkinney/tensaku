@@ -287,7 +287,14 @@ pub enum SketchBoardOutput {
     /// Routed through to the toolbar so its icon + tooltip
     /// reflect the new value without the user clicking the
     /// button manually.
-    FillShapesChanged(bool),
+    /// Fill state changed. `current` is the active shape's, mirrored by
+    /// the bottom-bar bucket; `rect` and `ellipse` are each shape's own,
+    /// so the two tool buttons can show their own fill independently.
+    FillShapesChanged {
+        current: bool,
+        rect: bool,
+        ellipse: bool,
+    },
     /// Live crop-rect dimensions during a drag / typed set. Used
     /// to refresh the crop-mode toolbar's W/H entries WITHOUT
     /// touching the bottom-right output-dimensions readout — the
@@ -759,7 +766,14 @@ const LAYER_PANEL_DEFAULT_WIDTH: f32 = 140.0;
 /// for the second press to register as a "cycle" instead of a
 /// re-selection. Tuned tight so an inadvertent double-press still
 /// reads as the user intentionally drumming.
-const TOOL_CYCLE_MS: u64 = 500;
+/// How long after pressing a tool's key a second press still counts as
+/// the double-tap gesture rather than a plain re-select.
+///
+/// A full second, which is generous for a keyboard gesture, because the
+/// second press is deliberate: you are reaching for it after seeing what
+/// the first one selected. A tighter window made `rr` / `ee` miss often
+/// enough to feel unreliable.
+const TOOL_CYCLE_MS: u64 = 1000;
 
 impl SketchBoard {
     fn refresh_screen(&mut self) {
@@ -1927,6 +1941,33 @@ impl SketchBoard {
     /// variants (Pointer, Crop, Brush, etc.) are no-ops; the
     /// double-press still gets consumed (no visible change) which is
     /// the desired behavior — re-selecting is harmless.
+    /// Fill state for one shape tool, whether or not it is active.
+    ///
+    /// The active tool's lives in `style.fill`; an inactive one falls
+    /// back to whatever it was last set to this session, then to its
+    /// saved default, then to the active tool's — an untouched shape
+    /// tracks the one you are using rather than diverging for no
+    /// reason.
+    fn fill_state_for(&self, tool: Tools) -> bool {
+        if self.active_tool_type() == tool {
+            return self.style.fill;
+        }
+        self.session_fill_per_tool
+            .get(&tool)
+            .copied()
+            .or_else(|| crate::state::load_fill_for_tool(tool))
+            .unwrap_or(self.style.fill)
+    }
+
+    /// Both shapes' fill states plus the active one's, for the toolbar.
+    fn fill_states(&self, current: bool) -> SketchBoardOutput {
+        SketchBoardOutput::FillShapesChanged {
+            current,
+            rect: self.fill_state_for(Tools::Rectangle),
+            ellipse: self.fill_state_for(Tools::Ellipse),
+        }
+    }
+
     fn cycle_tool_style(&mut self, tool: Tools, sender: &ComponentSender<Self>) {
         // The cycle path is intentionally toast-free: emitting the
         // `*Cycled` output below routes through the StyleToolbar's
@@ -2148,7 +2189,7 @@ impl SketchBoard {
                         self.style.fill = saved;
                         sender
                             .output_sender()
-                            .emit(SketchBoardOutput::FillShapesChanged(saved));
+                            .emit(self.fill_states(saved));
                     }
                 }
                 _ => {}
@@ -2351,7 +2392,7 @@ impl SketchBoard {
                 // refreshes.
                 sender
                     .output_sender()
-                    .emit(SketchBoardOutput::FillShapesChanged(new_fill));
+                    .emit(self.fill_states(new_fill));
                 // Forward to the active tool so its next-stroke style
                 // picks up the new fill — but skip Pointer, which
                 // would otherwise apply self.style to every selected
@@ -5372,7 +5413,7 @@ impl Component for SketchBoard {
             SketchBoardInput::SyncFillToToolbar => {
                 sender
                     .output_sender()
-                    .emit(SketchBoardOutput::FillShapesChanged(self.style.fill));
+                    .emit(self.fill_states(self.style.fill));
                 ToolUpdateResult::Unmodified
             }
             SketchBoardInput::SetAnnotationFactor(value) => {

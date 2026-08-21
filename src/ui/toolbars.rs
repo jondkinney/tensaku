@@ -222,6 +222,12 @@ pub struct ToolsToolbar {
     /// image size / Cancel-Crop). Initial value is `Pointer` —
     /// reset to the actual starting tool right before view_output!.
     current_tool: Tools,
+    /// Each shape's OWN fill state, so the Rectangle and Ellipse buttons
+    /// show a filled or outline glyph independently. Both are on screen
+    /// at once, so a single "is fill on" flag cannot describe them —
+    /// `rr` fills the rectangle without touching the ellipse.
+    fill_rect: bool,
+    fill_ellipse: bool,
     /// Last crop (width, height) pushed up from `CropTool`'s
     /// dimensions emit. Mirrored locally so the toolbar can both
     /// refresh the W/H entries (when they're not focused) and
@@ -2227,6 +2233,8 @@ pub enum TopBarLayout {
 
 #[derive(Debug, Copy, Clone)]
 pub enum ToolsToolbarInput {
+    /// Each shape's own fill state, for the Rectangle / Ellipse glyphs.
+    SetShapeFill { rect: bool, ellipse: bool },
     SetVisibility(bool),
     ToggleVisibility,
     SwitchSelectedTool(Tools),
@@ -3376,7 +3384,15 @@ impl Component for ToolsToolbar {
                     set_focus_on_click: false,
                     set_hexpand: false,
 
-                    set_icon_name: "checkbox-unchecked-regular",
+                    // Glyph follows this shape's OWN fill, so the two
+                    // shape buttons can disagree — `rr` fills the
+                    // rectangle without touching the ellipse.
+                    #[watch]
+                    set_icon_name: if model.fill_rect {
+                        "square-filled"
+                    } else {
+                        "checkbox-unchecked-regular"
+                    },
                     // tooltip set programmatically
                     ActionablePlus::set_action::<ToolsAction>: Tools::Rectangle,
                 },
@@ -3386,7 +3402,12 @@ impl Component for ToolsToolbar {
                     set_focus_on_click: false,
                     set_hexpand: false,
 
-                    set_icon_name: "circle-regular",
+                    #[watch]
+                    set_icon_name: if model.fill_ellipse {
+                        "circle-filled"
+                    } else {
+                        "circle-regular"
+                    },
                     // tooltip set programmatically
                     ActionablePlus::set_action::<ToolsAction>: Tools::Ellipse,
                 },
@@ -3605,6 +3626,10 @@ impl Component for ToolsToolbar {
 
     fn update(&mut self, message: Self::Input, sender: ComponentSender<Self>, _root: &Self::Root) {
         match message {
+            ToolsToolbarInput::SetShapeFill { rect, ellipse } => {
+                self.fill_rect = rect;
+                self.fill_ellipse = ellipse;
+            }
             ToolsToolbarInput::SetVisibility(visible) => self.visible = visible,
             ToolsToolbarInput::ToggleVisibility => {
                 self.visible = !self.visible;
@@ -4235,6 +4260,8 @@ impl Component for ToolsToolbar {
             tool_buttons: HashMap::new(),
             tool_action: tool_action.clone().into(),
             current_tool: Tools::Pointer,
+            fill_rect: APP_CONFIG.read().default_fill_shapes(),
+            fill_ellipse: APP_CONFIG.read().default_fill_shapes(),
             crop_width: 0,
             crop_height: 0,
             crop_width_entry: None,
