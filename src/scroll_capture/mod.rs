@@ -17,7 +17,11 @@ use crate::capture;
 pub mod auto_scroll;
 mod stitch;
 
-const BACKDROP_ALPHA: f64 = 0.55;
+/// Dim behind the selection. Matches the area capture's shade
+/// (`.capture-shade` in `region_capture`): the two overlays are the
+/// same tool asking the same question, and a difference in weight
+/// reads as a difference in kind.
+const BACKDROP_ALPHA: f64 = 0.45;
 const BRACKET_LEN: f64 = 22.0;
 const BRACKET_WIDTH: f64 = 3.0;
 const PILL_GAP: f64 = 18.0;

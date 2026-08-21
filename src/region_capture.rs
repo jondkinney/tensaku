@@ -149,7 +149,7 @@ fn build_overlay(
     // longer where it was drawn.
     let shade = std::array::from_fn(|_| {
         let strip = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        strip.add_css_class("region-capture-shade");
+        strip.add_css_class("capture-shade");
         strip
     });
     let outline = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -543,7 +543,7 @@ fn install_css(app: &gtk::Application) {
         ".region-capture-overlay { background: transparent; }
          /* The dim sheet, as strips GTK composites rather than pixels
             cairo blends on every motion event. */
-         .region-capture-shade { background: rgba(0, 0, 0, 0.45); }
+         .capture-shade { background: rgba(0, 0, 0, 0.45); }
          .region-capture-outline {
              border: 1px solid rgba(255, 255, 255, 0.9);
          }
