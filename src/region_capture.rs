@@ -222,15 +222,22 @@ fn build_overlay(
     // outward, and every event here lands on this surface.
     apply_cursor(&fixed, Mode::Area);
 
+    // The same pill the scrolling capture uses, down to the class
+    // names — the two overlays are one tool wearing two hats, and a
+    // second style for the same sentence would say otherwise.
     let hint = gtk::Label::new(Some(Mode::Area.hint()));
-    hint.add_css_class("region-capture-hint");
+    hint.add_css_class("scroll-capture-prompt-label");
+    let hint_pill = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    hint_pill.add_css_class("scroll-capture-pill");
+    hint_pill.add_css_class("scroll-capture-prompt");
+    hint_pill.append(&hint);
     // Centred on screen, like the scrolling capture's prompt: the
     // instructions are the only thing to read before a drag starts, so
     // they belong where the eye already is rather than in a corner it
     // has to find.
-    hint.set_halign(gtk::Align::Center);
-    hint.set_valign(gtk::Align::Center);
-    overlay.add_overlay(&hint);
+    hint_pill.set_halign(gtk::Align::Center);
+    hint_pill.set_valign(gtk::Align::Center);
+    overlay.add_overlay(&hint_pill);
     window.set_child(Some(&overlay));
 
     install_css(app);
@@ -543,12 +550,21 @@ fn install_css(app: &gtk::Application) {
          /* Faint enough to read the screen through, which is the point
             of lining up against it. */
          .region-capture-crosshair { background: rgba(255, 255, 255, 0.22); }
-         .region-capture-hint {
-             background: rgba(0, 0, 0, 0.75);
-             border-radius: 8px;
-             color: #ffffff;
-             font-size: 1.05em;
-             padding: 8px 16px;
+         /* Lifted from the scrolling capture's stylesheet: this
+            overlay is a separate GTK application with its own CSS, so
+            the rules have to exist in both places to look like one
+            tool. */
+         .scroll-capture-pill {
+             background-color: rgba(28, 28, 30, 0.92);
+             border-radius: 999px;
+             padding: 10px 18px;
+             border: 1px solid rgba(255, 255, 255, 0.08);
+             box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+         }
+         .scroll-capture-prompt-label {
+             color: rgba(245, 245, 247, 0.92);
+             font-size: 14px;
+             padding: 0 4px;
          }",
     );
     if let Some(display) = gdk::Display::default() {
