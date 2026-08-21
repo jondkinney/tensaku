@@ -313,13 +313,21 @@ fn build_overlay(
         let state_for_shutter = Rc::clone(&state);
         let shared_for_shutter = Rc::clone(shared);
         let window_for_shutter = window.clone();
-        readout.connect_clicked(move |_| {
+        // A GestureClick in the capture phase, not `connect_clicked`:
+        // the surface underneath carries the selection drag, and a
+        // press that reaches it first becomes a drag rather than a
+        // click on this button.
+        let press = gtk::GestureClick::new();
+        press.set_propagation_phase(gtk::PropagationPhase::Capture);
+        press.connect_pressed(move |gesture, _, _, _| {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
             let choice = committed_region(&state_for_shutter.borrow());
             if let Some(choice) = choice {
                 *shared_for_shutter.borrow_mut() = choice;
                 window_for_shutter.close();
             }
         });
+        readout.add_controller(press);
     }
     // The cursor goes on the widget the pointer is actually over, not
     // the window: GTK resolves it from the widget under the pointer
@@ -848,10 +856,31 @@ pub fn readout_position(
     } else {
         corner.1 - GAP - readout.1
     };
-    (
-        x.clamp(0.0, (screen.0 - readout.0).max(0.0)),
-        y.clamp(0.0, (screen.1 - readout.1).max(0.0)),
-    )
+    // Off the edge, flip to the other side of the corner rather than
+    // sliding along it: a readout pinned to the screen edge ends up
+    // sitting on the selection it is measuring, which is the one place
+    // it must not be.
+    let x = if x < 0.0 || x + readout.0 > screen.0 {
+        let flipped = if corner.0 >= origin.0 {
+            corner.0 - GAP - readout.0
+        } else {
+            corner.0 + GAP
+        };
+        flipped.clamp(0.0, (screen.0 - readout.0).max(0.0))
+    } else {
+        x
+    };
+    let y = if y < 0.0 || y + readout.1 > screen.1 {
+        let flipped = if corner.1 >= origin.1 {
+            corner.1 - GAP - readout.1
+        } else {
+            corner.1 + GAP
+        };
+        flipped.clamp(0.0, (screen.1 - readout.1).max(0.0))
+    } else {
+        y
+    };
+    (x, y)
 }
 
 /// The scroll overlay's `Selection` for a `Rect`, and back. The two
@@ -999,9 +1028,10 @@ mod tests {
         // Dragging down-right: below and right of the corner.
         let (x, y) = readout_position((100.0, 100.0), (500.0, 400.0), size, screen);
         assert!(x > 500.0 && y > 400.0);
-        // Dragging up-left: above and left, clear of the corner.
-        let (x, y) = readout_position((500.0, 400.0), (100.0, 100.0), size, screen);
-        assert!(x + size.0 < 100.0 && y + size.1 < 100.0);
+        // Dragging up-left, with room on that side: above and left,
+        // clear of the corner. (Without room it flips — see below.)
+        let (x, y) = readout_position((1200.0, 900.0), (600.0, 500.0), size, screen);
+        assert!(x + size.0 < 600.0 && y + size.1 < 500.0);
     }
 
     /// The corner you drag is the one you drag off the screen, so the
@@ -1014,6 +1044,22 @@ mod tests {
         assert!(x + size.0 <= screen.0 && y + size.1 <= screen.1);
         let (x, y) = readout_position((500.0, 400.0), (0.0, 0.0), size, screen);
         assert!(x >= 0.0 && y >= 0.0);
+    }
+
+    /// At an edge it flips to the far side of the corner rather than
+    /// sliding along the edge — which would slide it onto the
+    /// selection it is measuring.
+    #[test]
+    fn the_readout_flips_at_an_edge() {
+        let screen = (2000.0, 1200.0);
+        let size = (90.0, 30.0);
+        // Dragging down-right into the bottom-right corner: the
+        // readout would land off-screen, so it moves above and left of
+        // the corner instead.
+        let corner = (1990.0, 1190.0);
+        let (x, y) = readout_position((100.0, 100.0), corner, size, screen);
+        assert!(x + size.0 <= corner.0, "expected a flip left of {corner:?}");
+        assert!(y + size.1 <= corner.1, "expected a flip above {corner:?}");
     }
 
     #[test]
