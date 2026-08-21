@@ -49,6 +49,13 @@ const MOVE_TOOLTIP: &str = "Move this pin";
 /// same reason.
 const PICTURE_TOOLTIP: &str = "Click to open in the editor · Drag into another app to paste it";
 
+/// How often, and how many times, to look for the window before
+/// giving up on placing it. Half a second in total: long enough for a
+/// compositor under load, short enough that a failure doesn't leave a
+/// pin drifting in from the middle of the screen much later.
+const SETTLE_INTERVAL: Duration = Duration::from_millis(50);
+const SETTLE_ATTEMPTS: u32 = 10;
+
 /// Gap between stacked pins.
 const PIN_GAP: i32 = 12;
 
@@ -104,7 +111,7 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
     let window = gtk::Window::builder()
         .resizable(false)
         .decorated(false)
-        .title(PIN_TITLE)
+        .title(pin_title())
         .build();
     window.add_css_class("pin-window");
 
@@ -115,14 +122,30 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
     {
         let slot = next_slot();
         window.connect_map(move |_| {
-            for dispatch in [
-                format!("setfloating,title:^({PIN_TITLE})$"),
-                format!("pin,title:^({PIN_TITLE})$"),
-                format!("alterzorder top,title:^({PIN_TITLE})$"),
-            ] {
-                hypr_dispatch(&dispatch);
-            }
-            place_in_slot(slot);
+            // Not immediately: `map` is this side's word for "shown",
+            // and the compositor has not necessarily registered the
+            // window under its title yet — dispatches sent then report
+            // success and do nothing, which is how a pin ended up
+            // centred and unpinned. Retry until it is there.
+            let attempts = Cell::new(0);
+            gtk::glib::timeout_add_local(SETTLE_INTERVAL, move || {
+                attempts.set(attempts.get() + 1);
+                if !pin_window_exists() {
+                    return if attempts.get() < SETTLE_ATTEMPTS {
+                        gtk::glib::ControlFlow::Continue
+                    } else {
+                        gtk::glib::ControlFlow::Break
+                    };
+                }
+                // Floating first: a tiled window has no position of
+                // its own to set. Then pinned, so it stays put as you
+                // move between workspaces, which is most of what a pin
+                // is for.
+                hypr_dispatch(&format!("hl.dsp.window.float({{ {} }})", pin_selector()));
+                hypr_dispatch(&format!("hl.dsp.window.pin({{ {} }})", pin_selector()));
+                place_in_slot(slot);
+                gtk::glib::ControlFlow::Break
+            });
         });
     }
 
@@ -135,6 +158,9 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
     picture.set_can_shrink(true);
     picture.set_size_request(PIN_SIDE, PIN_SIDE);
 
+    // No border of our own: the compositor draws one around a
+    // floating window, and two frames around one picture is one frame
+    // too many.
     let frame = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     frame.add_css_class("pin-frame");
     frame.append(&picture);
@@ -224,20 +250,56 @@ fn build_toast() -> (gtk::Label, Toast) {
     (label, Rc::new(show))
 }
 
-/// Window title, which is how the compositor is told which window to
-/// float, pin and place — and how pins recognise each other.
+/// Title prefix, shared by every pin so they can recognise each other,
+/// and followed by something unique so a dispatcher can name exactly
+/// one of them.
+///
+/// Without the unique half, `title:^(Tensaku Pin)$` matches every pin
+/// on screen and the compositor acts on whichever it finds first — so
+/// opening a second pin moved the first one into the second's slot and
+/// left the second where it spawned.
 const PIN_TITLE: &str = "Tensaku Pin";
+
+/// This pin's own title.
+fn pin_title() -> String {
+    // The process id is enough: a capture is a process, and a process
+    // has one pin.
+    format!("{PIN_TITLE} {}", std::process::id())
+}
 
 /// Run one Hyprland dispatcher, best-effort.
 ///
 /// Dispatchers rather than window rules: rules have to exist before a
-/// window maps and live in the user's config, and a pin should not
-/// need either.
-fn hypr_dispatch(args: &str) {
+/// window maps and live in the user's config, and a pin should need
+/// neither.
+///
+/// Written in the Lua object API, because a Lua-configured Hyprland
+/// evaluates the dispatch argument as Lua — classic
+/// `movewindowpixel exact X Y,title:...` parses as an expression and
+/// fails, which is how a pin ended up in the middle of the screen
+/// unpinned while every call reported success. The whole expression is
+/// one argument: the window title has a space in it.
+fn hypr_dispatch(expression: &str) {
     let _ = std::process::Command::new("hyprctl")
         .arg("dispatch")
-        .args(args.split(' '))
+        .arg(expression)
         .output();
+}
+
+/// Whether the compositor has this pin's window yet.
+fn pin_window_exists() -> bool {
+    let Ok(output) = std::process::Command::new("hyprctl")
+        .args(["-j", "clients"])
+        .output()
+    else {
+        return false;
+    };
+    String::from_utf8_lossy(&output.stdout).contains(&pin_title())
+}
+
+/// How a dispatcher names this pin, and only this pin.
+fn pin_selector() -> String {
+    format!("window = \"title:^({})$\"", pin_title())
 }
 
 /// Put the pin in `slot`, counting up from the bottom-right corner.
@@ -253,7 +315,10 @@ fn place_in_slot(slot: i32) {
     let side = PIN_SIDE + PIN_PADDING * 2;
     let x = screen_w - EDGE_MARGIN - side;
     let y = screen_h - EDGE_MARGIN - side - slot * pin_step();
-    hypr_dispatch(&format!("movewindowpixel exact {x} {y},title:^({PIN_TITLE})$"));
+    hypr_dispatch(&format!(
+        "hl.dsp.window.move({{ x = {x}, y = {y}, relative = false, {} }})",
+        pin_selector()
+    ));
 }
 
 /// How far apart stacked pins sit, centre to centre.
@@ -325,7 +390,12 @@ fn next_slot() -> i32 {
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|client| client.get("title").and_then(|t| t.as_str()) == Some(PIN_TITLE))
+        .filter(|client| {
+            client
+                .get("title")
+                .and_then(|t| t.as_str())
+                .is_some_and(|title| title.starts_with(PIN_TITLE))
+        })
         .filter_map(|client| {
             let pair = |key: &str| {
                 let v = client.get(key)?.as_array()?;

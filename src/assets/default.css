@@ -538,13 +538,11 @@ dropdown.compact-control > button.combo {
   background: transparent;
 }
 
-/* A frame of its own: the pin needs an edge or it reads as a picture
-   lying loose on the desktop rather than a thing sitting on it. */
+/* The compositor draws the border and the shadow around a floating
+   window, so this is only the mat the picture sits on. Two frames
+   around one picture is one frame too many. */
 .pin-frame {
   background: rgba(28, 28, 30, 0.94);
-  border: 1px solid rgba(255, 255, 255, 0.10);
-  border-radius: 12px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
   padding: 6px;
 }
 
