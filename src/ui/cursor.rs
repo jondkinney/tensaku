@@ -43,6 +43,15 @@ const INNER_LINE_WIDTH: f64 = 1.0;
 /// reasonable minimum.
 const MIN_CURSOR_PX: f64 = 8.0;
 
+/// How far down-right the Counter's arrow sits from the point it
+/// marks, so it clears the digit centered there. Big enough to
+/// uncover the number at the sizes people actually use, small enough
+/// that the arrow still reads as pointing at the badge.
+const POINTER_DODGE: f64 = 14.0;
+
+/// Arrow art extents, from its tip.
+const ARROW_W: f64 = 10.6;
+const ARROW_H: f64 = 17.4;
 
 
 /// Build a circular double-ring cursor for the Brush tool. Diameter
@@ -123,6 +132,63 @@ pub fn build_highlighter_cursor(
         let width = (height / 6.0).max(4.0).min(height);
         build_double_ring_cursor(width, height, hotspot_offset_tex_px)
     }
+}
+
+/// The Counter's pointer, nudged clear of its own preview.
+///
+/// The ghost badge is centered on the click point with the number at
+/// its middle, so a cursor drawn AT that point covers exactly the
+/// thing the preview exists to show. The hotspot stays on the true
+/// point — only the arrow art moves down and right, out of the
+/// digit's way.
+pub fn build_offset_pointer_cursor(device_pixel_ratio: f64) -> Option<gdk::Cursor> {
+    let dpr = device_pixel_ratio.max(1.0);
+    // GTK4 paints cursor textures at a DPR-scaled on-screen size, so
+    // everything here is divided down to keep the arrow the same
+    // apparent size (and the same apparent nudge) on any display.
+    let scale = 1.0 / dpr;
+    let dodge = POINTER_DODGE * scale;
+    let total_w = ((dodge + ARROW_W * scale).ceil() + RING_PAD) as i32;
+    let total_h = ((dodge + ARROW_H * scale).ceil() + RING_PAD) as i32;
+
+    let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, total_w, total_h).ok()?;
+    let ctx = cairo::Context::new(&surface).ok()?;
+    draw_arrow_at(&ctx, dodge, dodge, scale);
+    drop(ctx);
+
+    let pixbuf: Pixbuf = gdk::pixbuf_get_from_surface(&surface, 0, 0, total_w, total_h)?;
+    let texture = gdk::Texture::for_pixbuf(&pixbuf);
+    // Hotspot at the texture's corner: the click point itself carries
+    // no art, because the badge under it is the art.
+    Some(gdk::Cursor::from_texture(&texture, 0, 0, None))
+}
+
+/// Trace the classic arrow pointer with its tip at `(x, y)`, painted
+/// light-on-dark so it stays legible over the badge it sits beside.
+fn draw_arrow_at(ctx: &cairo::Context, x: f64, y: f64, scale: f64) {
+    const POINTS: [(f64, f64); 7] = [
+        (0.0, 0.0),
+        (0.0, 15.4),
+        (3.6, 12.0),
+        (6.1, 17.4),
+        (8.5, 16.3),
+        (5.9, 11.1),
+        (10.6, 10.7),
+    ];
+    ctx.new_path();
+    for (i, (dx, dy)) in POINTS.iter().enumerate() {
+        if i == 0 {
+            ctx.move_to(x + dx * scale, y + dy * scale);
+        } else {
+            ctx.line_to(x + dx * scale, y + dy * scale);
+        }
+    }
+    ctx.close_path();
+    ctx.set_source_rgba(1.0, 1.0, 1.0, 0.98);
+    let _ = ctx.fill_preserve();
+    ctx.set_source_rgba(0.0, 0.0, 0.0, 0.85);
+    ctx.set_line_width(1.3 * scale.max(0.7));
+    let _ = ctx.stroke();
 }
 
 /// Build a thick I-beam (text-selection style) cursor scaled to
@@ -317,6 +383,7 @@ pub fn drawing_tool_cursor(
             band_height_image_px,
             band_vertical_offset_image_px,
         ),
+        Tools::Marker => build_offset_pointer_cursor(device_pixel_ratio),
         _ => None,
     }
 }
@@ -324,3 +391,55 @@ pub fn drawing_tool_cursor(
 // Suppress "unused" if Size is referenced only for the public API.
 #[allow(dead_code)]
 fn _force_use_size(_: Size) {}
+
+#[cfg(test)]
+mod pointer_cursor_tests {
+    use super::{ARROW_H, ARROW_W, POINTER_DODGE, RING_PAD, draw_arrow_at};
+    use relm4::gtk::cairo;
+
+    /// Dump the offset pointer for eyeballing. Ignored — it writes a
+    /// file and proves nothing on its own.
+    #[test]
+    #[ignore]
+    fn dump_offset_pointer() {
+        let dir = std::env::var("TENSAKU_CURSOR_DUMP_DIR").unwrap_or("/tmp".to_string());
+        let w = (POINTER_DODGE + ARROW_W + RING_PAD).ceil() as i32;
+        let h = (POINTER_DODGE + ARROW_H + RING_PAD).ceil() as i32;
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, w, h).unwrap();
+        let ctx = cairo::Context::new(&surface).unwrap();
+        draw_arrow_at(&ctx, POINTER_DODGE, POINTER_DODGE, 1.0);
+        drop(ctx);
+        let mut surface = surface;
+        let stride = surface.stride() as usize;
+        let data = surface.data().unwrap();
+        let mut raw = Vec::with_capacity((w * h * 4) as usize);
+        for row in 0..h as usize {
+            raw.extend_from_slice(&data[row * stride..row * stride + (w as usize) * 4]);
+        }
+        std::fs::write(format!("{dir}/pointer-{w}x{h}.bgra"), &raw).unwrap();
+    }
+
+    /// Nothing may be painted in the square between the hotspot and
+    /// the arrow's tip — that square is where the badge's number
+    /// sits, and covering it defeats the whole preview.
+    #[test]
+    fn the_arrow_leaves_the_hotspot_corner_bare() {
+        let side = (POINTER_DODGE + ARROW_W + RING_PAD).ceil() as i32;
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, side, side).unwrap();
+        let ctx = cairo::Context::new(&surface).unwrap();
+        draw_arrow_at(&ctx, POINTER_DODGE, POINTER_DODGE, 1.0);
+        drop(ctx);
+        let mut surface = surface;
+        let stride = surface.stride() as usize;
+        let data = surface.data().unwrap();
+        // A digit-sized square anchored at the hotspot, minus a pixel
+        // of slack for the arrow outline's antialiasing.
+        let clear = (POINTER_DODGE as usize).saturating_sub(1);
+        for y in 0..clear {
+            for x in 0..clear {
+                let alpha = data[y * stride + x * 4 + 3];
+                assert_eq!(alpha, 0, "pixel ({x}, {y}) covers the badge's number");
+            }
+        }
+    }
+}
