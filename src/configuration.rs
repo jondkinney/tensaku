@@ -100,6 +100,7 @@ pub struct Configuration {
     doctor: bool,
     install_omarchy_wrapper: bool,
     wire_omarchy: bool,
+    wire_capture_key: Option<String>,
     input_filename: Option<String>,
     output_filename: Option<String>,
     fullscreen: Option<Fullscreen>,
@@ -839,6 +840,9 @@ impl Configuration {
         if command_line.wire_omarchy {
             self.wire_omarchy = true;
         }
+        if let Some(key) = &command_line.wire_capture_key {
+            self.wire_capture_key = Some(key.clone());
+        }
         if command_line.early_exit {
             self.early_exit = command_line.early_exit;
             // CLI has higher precedence than config, including explicit
@@ -999,6 +1003,10 @@ impl Configuration {
 
     pub fn wire_omarchy(&self) -> bool {
         self.wire_omarchy
+    }
+
+    pub fn wire_capture_key(&self) -> Option<&str> {
+        self.wire_capture_key.as_deref()
     }
 
     pub fn early_exit_save_as(&self) -> bool {
@@ -1339,6 +1347,7 @@ impl Default for Configuration {
             doctor: false,
             install_omarchy_wrapper: false,
             wire_omarchy: false,
+            wire_capture_key: None,
             input_filename: Some(String::new()),
             output_filename: None,
             fullscreen: None,

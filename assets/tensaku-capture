@@ -1,0 +1,28 @@
+#!/bin/bash
+# Opens Tensaku's own capture overlay, then its editor on what you chose.
+#
+# Drag a region, Space snaps to the window under the pointer, F takes the
+# whole screen, S switches to a scrolling capture — every one of those
+# decided *after* the key is pressed, which is the point: grim+slurp has
+# already asked and answered by the time you change your mind.
+#
+# Bound to a key by `tensaku --wire-capture-key`, replacing Omarchy's
+# `omarchy-capture-screenshot`.
+#
+# The capture lands in the session's screenshot directory under a
+# timestamped name and reaches the clipboard on Enter, so it leaves
+# behind what Omarchy's own screenshot flow leaves behind.
+#
+# `tensaku` is invoked by bare name so this works regardless of how it
+# was installed (~/.cargo/bin, /usr/bin, /usr/local/bin, …); a key
+# binding runs in the user session, where the install dir is on $PATH.
+user_dirs="${XDG_CONFIG_HOME:-$HOME/.config}/user-dirs.dirs"
+[[ -f $user_dirs ]] && source "$user_dirs"
+dir="${OMARCHY_SCREENSHOT_DIR:-${XDG_PICTURES_DIR:-$HOME/Pictures}}"
+mkdir -p "$dir"
+exec tensaku --capture \
+  --output-filename "$dir/tensaku-$(date +%Y-%m-%d_%H-%M-%S).png" \
+  --actions-on-enter save-to-clipboard \
+  --save-after-copy \
+  --copy-command wl-copy \
+  "$@"

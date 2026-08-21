@@ -2448,6 +2448,9 @@ fn main() -> Result<()> {
     if APP_CONFIG.read().wire_omarchy() {
         return omarchy_wrapper::wire();
     }
+    if let Some(key) = APP_CONFIG.read().wire_capture_key() {
+        return omarchy_wrapper::wire_capture_key(key);
+    }
     if APP_CONFIG.read().profile_startup() {
         eprintln!(
             "startup timestamp was {}",

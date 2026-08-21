@@ -77,13 +77,35 @@ pub fn run() -> Result<()> {
 /// Omarchy defaults to `tensaku-edit`; only legacy versions require an
 /// `$OMARCHY_SCREENSHOT_EDITOR` override.
 fn report_omarchy_wrapper() {
+    println!();
+    println!("Omarchy detected — screenshot integration:");
+    report_editor_wiring();
+    report_capture_key();
+}
+
+/// Which capture the screenshot key runs.
+///
+/// Reports rather than judges: binding the key to Tensaku is opt-in, so
+/// leaving Omarchy's own capture in place is a choice, not a fault, and
+/// never counts toward the missing tally.
+fn report_capture_key() {
+    use crate::omarchy_wrapper::bound_capture_key;
+    use tensaku_cli::command_line::DEFAULT_CAPTURE_KEY;
+
+    match bound_capture_key() {
+        Some(key) => println!("  [ ok ]  {key} opens Tensaku's capture overlay"),
+        None => {
+            println!("  [ -- ]  no key opens Tensaku's capture overlay yet");
+            println!("          → run: tensaku --wire-capture-key   (binds {DEFAULT_CAPTURE_KEY})");
+        }
+    }
+}
+
+fn report_editor_wiring() {
     use crate::omarchy_wrapper::{
         Wiring, classify_wiring, configured_editor, installed_wrapper,
         omarchy_capture_defaults_to_tensaku,
     };
-
-    println!();
-    println!("Omarchy detected — screenshot integration:");
 
     let Some(target) = installed_wrapper() else {
         println!("  [miss]  tensaku-edit wrapper not installed");

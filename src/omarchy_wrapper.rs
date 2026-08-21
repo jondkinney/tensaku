@@ -32,6 +32,12 @@ const WRAPPER: &str = include_str!("../assets/tensaku-edit");
 /// Basename of the wrapper Omarchy is wired to invoke.
 const WRAPPER_NAME: &str = "tensaku-edit";
 
+/// The capture wrapper, embedded for the same reason as [`WRAPPER`].
+const CAPTURE_WRAPPER: &str = include_str!("../assets/tensaku-capture");
+
+/// Basename of the wrapper a screenshot key is bound to.
+const CAPTURE_WRAPPER_NAME: &str = "tensaku-capture";
+
 /// Is this an Omarchy session? `$OMARCHY_PATH` is the canonical signal
 /// Omarchy exports; the data-dir check is a fallback for a shell that
 /// didn't inherit it.
@@ -53,19 +59,40 @@ fn is_omarchy_with(omarchy_path: Option<&OsStr>, data_home: Option<&Path>) -> bo
 /// `~/.local/bin/tensaku-edit` — where Omarchy expects the editor
 /// wrapper to live.
 pub(crate) fn wrapper_path() -> Result<PathBuf> {
+    script_path(WRAPPER_NAME)
+}
+
+/// `~/.local/bin/tensaku-capture` — where a screenshot key points.
+pub(crate) fn capture_wrapper_path() -> Result<PathBuf> {
+    script_path(CAPTURE_WRAPPER_NAME)
+}
+
+/// `~/.local/bin/<name>`, the per-user script directory both wrappers
+/// live in.
+fn script_path(name: &str) -> Result<PathBuf> {
     let home = std::env::var_os("HOME").context("HOME is not set")?;
-    Ok(PathBuf::from(home).join(".local/bin").join(WRAPPER_NAME))
+    Ok(PathBuf::from(home).join(".local/bin").join(name))
 }
 
 /// Write the wrapper and mark it executable. Returns its path.
 fn install() -> Result<PathBuf> {
-    let path = wrapper_path()?;
+    install_script(&wrapper_path()?, WRAPPER)
+}
+
+/// Write the capture wrapper and mark it executable. Returns its path.
+fn install_capture_wrapper() -> Result<PathBuf> {
+    install_script(&capture_wrapper_path()?, CAPTURE_WRAPPER)
+}
+
+/// Write one embedded script to `path`, executable, creating its
+/// directory. Returns the path back for the caller to report.
+fn install_script(path: &Path, contents: &str) -> Result<PathBuf> {
     let dir = path.parent().expect("wrapper path always has a parent");
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    std::fs::write(&path, WRAPPER).with_context(|| format!("write {}", path.display()))?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+    std::fs::write(path, contents).with_context(|| format!("write {}", path.display()))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
         .with_context(|| format!("chmod {}", path.display()))?;
-    Ok(path)
+    Ok(path.to_path_buf())
 }
 
 /// How `$OMARCHY_SCREENSHOT_EDITOR` relates to our wrapper.
@@ -683,6 +710,337 @@ fn apply_window_rules(contents: &str) -> WindowRuleOutcome {
     WindowRuleOutcome::Appended(out)
 }
 
+/// Normalise a Hyprland key spec for comparison: `"SUPER + Print"` and
+/// `"super+PRINT"` are the same binding written two ways.
+fn normalise_key(key: &str) -> String {
+    key.chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_uppercase)
+        .collect()
+}
+
+/// The first double- or single-quoted string in `s`, if any.
+fn first_quoted(s: &str) -> Option<(String, usize)> {
+    let (idx, quote) = s.char_indices().find(|(_, c)| *c == '"' || *c == '\'')?;
+    let rest = &s[idx + quote.len_utf8()..];
+    let end = rest.find(quote)?;
+    Some((
+        rest[..end].to_string(),
+        idx + quote.len_utf8() + end + quote.len_utf8(),
+    ))
+}
+
+/// The key an uncommented `o.bind(...)` line binds, if it is one.
+///
+/// Line-wise on purpose. Omarchy's DSL writes one bind per line, and the
+/// block this module appends ends with `hl.unbind` + `o.bind` — which
+/// supersedes anything earlier in the file whether or not we managed to
+/// read it. So a bind written in some shape this doesn't parse costs a
+/// stale line, never a key that fires two commands.
+fn bind_line_key(line: &str) -> Option<String> {
+    let t = line.trim();
+    if t.starts_with("--") {
+        return None;
+    }
+    let rest = t.strip_prefix("o.bind")?.trim_start();
+    let rest = rest.strip_prefix('(')?;
+    first_quoted(rest).map(|(key, _)| key)
+}
+
+/// What an `o.bind(...)` line runs: its third argument, when that is a
+/// plain string. A table form (`{ launch = … }`) has no command string
+/// and reads as `None`.
+fn bind_line_command(line: &str) -> Option<String> {
+    let t = line.trim();
+    let rest = t.strip_prefix("o.bind")?.trim_start();
+    let rest = rest.strip_prefix('(')?;
+    let (_, after_key) = first_quoted(rest)?;
+    let rest = &rest[after_key..];
+    let rest = rest.trim_start().strip_prefix(',')?;
+    // The description may be `nil` rather than a string, in which case
+    // the next quoted run is already the command.
+    let after_desc = match rest.trim_start().strip_prefix("nil") {
+        Some(r) => r.trim_start().strip_prefix(',')?,
+        None => {
+            let (_, end) = first_quoted(rest)?;
+            rest[end..].trim_start().strip_prefix(',')?
+        }
+    };
+    if after_desc.trim_start().starts_with('{') {
+        return None;
+    }
+    first_quoted(after_desc).map(|(cmd, _)| cmd)
+}
+
+/// The human-readable label an `o.bind(...)` line carries — its second
+/// argument, when that is a string rather than `nil`.
+fn bind_line_description(line: &str) -> Option<String> {
+    let t = line.trim();
+    let rest = t.strip_prefix("o.bind")?.trim_start();
+    let rest = rest.strip_prefix('(')?;
+    let (_, after_key) = first_quoted(rest)?;
+    let rest = rest[after_key..]
+        .trim_start()
+        .strip_prefix(',')?
+        .trim_start();
+    // The description is the second argument specifically. Anything but
+    // a string there -- `nil`, a table -- means there is none, and the
+    // command a further argument along must not stand in for it.
+    if !rest.starts_with('"') && !rest.starts_with('\'') {
+        return None;
+    }
+    first_quoted(rest).map(|(desc, _)| desc)
+}
+
+/// Is `line` an uncommented `hl.unbind("<key>")` for `key`?
+fn unbinds_key(line: &str, key: &str) -> bool {
+    let t = line.trim();
+    if t.starts_with("--") {
+        return false;
+    }
+    let Some(rest) = t.strip_prefix("hl.unbind") else {
+        return false;
+    };
+    let Some(rest) = rest.trim_start().strip_prefix('(') else {
+        return false;
+    };
+    first_quoted(rest).is_some_and(|(k, _)| normalise_key(&k) == normalise_key(key))
+}
+
+/// The `o.bind` call pointing `key` at the capture wrapper.
+fn desired_bind_line(key: &str, wrapper: &str) -> String {
+    format!("o.bind(\"{key}\", \"Screenshot\", \"{wrapper}\")")
+}
+
+/// The `hl.unbind` that has to precede it. Omarchy's own config binds
+/// PRINT, and a second bind on a bound key doesn't replace the first —
+/// it joins it, so the key would fire both captures.
+fn desired_unbind_line(key: &str) -> String {
+    format!("hl.unbind(\"{key}\")")
+}
+
+/// The whole commented block, for a file that has no binding yet.
+fn capture_bind_block(key: &str, wrapper: &str) -> String {
+    format!(
+        "\n-- Tensaku's own capture overlay on {key}: drag a region, Space snaps to\n\
+         -- the window under the pointer, F takes the whole screen, S switches to\n\
+         -- a scrolling capture -- each one chosen after the key is pressed, which\n\
+         -- is the point. Replaces Omarchy's grim+slurp `omarchy-capture-screenshot`,\n\
+         -- whose selector has already answered by the time you'd want to change\n\
+         -- the mode. Added by `tensaku --wire-capture-key`.\n\
+         {}\n{}\n",
+        desired_unbind_line(key),
+        desired_bind_line(key, wrapper)
+    )
+}
+
+/// How `local.lua` relates to the capture binding.
+#[derive(Debug, PartialEq, Eq)]
+enum BindOutcome {
+    /// Unbind and bind both present and pointing at our wrapper.
+    AlreadySet,
+    /// An existing bind for the key was rewritten; carries the new
+    /// contents and the commands it replaced, for reporting.
+    Rewritten {
+        contents: String,
+        replaced: Vec<String>,
+    },
+    /// No bind for the key existed; the block was appended.
+    Inserted(String),
+}
+
+/// Reconcile `contents` (a local.lua) with the capture binding. Pure, so
+/// every branch is unit-testable without a Hyprland config on disk.
+fn apply_capture_bind(contents: &str, key: &str, wrapper: &str) -> BindOutcome {
+    let mut lines: Vec<String> = contents.lines().map(str::to_string).collect();
+    let ours: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| bind_line_key(l).is_some_and(|k| normalise_key(&k) == normalise_key(key)))
+        .map(|(i, _)| i)
+        .collect();
+
+    let rejoin = |lines: Vec<String>| {
+        let mut out = lines.join("\n");
+        if contents.ends_with('\n') {
+            out.push('\n');
+        }
+        out
+    };
+
+    // Already ours: the only thing that can still be missing is the
+    // unbind, without which Omarchy's own bind on the key survives
+    // alongside it.
+    if ours.len() == 1 && bind_line_command(&lines[ours[0]]).as_deref() == Some(wrapper) {
+        let idx = ours[0];
+        if lines[..idx].iter().any(|l| unbinds_key(l, key)) {
+            return BindOutcome::AlreadySet;
+        }
+        lines.insert(idx, desired_unbind_line(key));
+        return BindOutcome::Rewritten {
+            contents: rejoin(lines),
+            replaced: Vec::new(),
+        };
+    }
+
+    if let Some(&first) = ours.first() {
+        let replaced: Vec<String> = ours
+            .iter()
+            .filter_map(|&i| bind_line_command(&lines[i]))
+            .filter(|cmd| cmd != wrapper)
+            .collect();
+        // Rewrite in place so the binding stays where the user put it,
+        // dropping any duplicates for the same key further down.
+        let mut kept: Vec<String> = Vec::with_capacity(lines.len() + 1);
+        for (i, line) in lines.iter().enumerate() {
+            if i == first {
+                if !lines[..i].iter().any(|l| unbinds_key(l, key)) {
+                    kept.push(desired_unbind_line(key));
+                }
+                kept.push(desired_bind_line(key, wrapper));
+            } else if !ours.contains(&i) {
+                kept.push(line.clone());
+            }
+        }
+        return BindOutcome::Rewritten {
+            contents: rejoin(kept),
+            replaced,
+        };
+    }
+
+    let mut out = contents.to_string();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&capture_bind_block(key, wrapper));
+    BindOutcome::Inserted(out)
+}
+
+/// The key `local.lua` binds to the capture wrapper, if any. Read-only,
+/// for `--doctor`.
+///
+/// Asked key-first rather than of one fixed key, because someone whose
+/// keyboard sends something other than PRINT wired their own key and is
+/// no less set up for it.
+pub(crate) fn bound_capture_key() -> Option<String> {
+    let wrapper = capture_wrapper_path().ok()?;
+    let contents = std::fs::read_to_string(hypr_local_lua().ok()?).ok()?;
+    contents.lines().find_map(|line| {
+        let key = bind_line_key(line)?;
+        let command = bind_line_command(line)?;
+        // The bind may name the wrapper by full path or, since
+        // ~/.local/bin is on PATH, by bare command.
+        let first = command.split_whitespace().next()?;
+        (Path::new(first) == wrapper || first == CAPTURE_WRAPPER_NAME).then_some(key)
+    })
+}
+
+/// The command Omarchy's shipped config binds `key` to. Best-effort and
+/// read-only: it exists so the user is told what they are giving up, and
+/// a missing Omarchy checkout just means there is nothing to tell them.
+fn omarchy_default_binding(key: &str) -> Option<String> {
+    let dir = xdg_data_home().ok()?.join("omarchy/default/hypr/bindings");
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let Ok(contents) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        for line in contents.lines() {
+            if bind_line_key(line).is_some_and(|k| normalise_key(&k) == normalise_key(key)) {
+                // A launch/webapp table has no command string; its
+                // description is what the user would recognise it by.
+                return bind_line_command(line).or_else(|| bind_line_description(line));
+            }
+        }
+    }
+    None
+}
+
+/// `--wire-capture-key`: bind a key to Tensaku's own capture overlay.
+///
+/// Separate from [`wire`] on purpose. That one only redirects where an
+/// existing screenshot flow lands; this takes a key the desktop already
+/// owns, which is a bigger thing to do to someone's config and should be
+/// asked for by name.
+pub fn wire_capture_key(key: &str) -> Result<()> {
+    let main_lua = hypr_main_lua()?;
+    if !main_lua.exists() {
+        anyhow::bail!(
+            "no {} — this expects a Lua-configured Hyprland (Omarchy 3+).",
+            main_lua.display()
+        );
+    }
+    let wrapper = install_capture_wrapper()?;
+    let wrapper_str = wrapper.to_string_lossy().into_owned();
+    println!("Capture wrapper installed: {wrapper_str}");
+
+    if let Some(previous) = omarchy_default_binding(key) {
+        println!("{key} is currently Omarchy's: {previous}");
+    }
+
+    let local = hypr_local_lua()?;
+    let existing = std::fs::read_to_string(&local).unwrap_or_default();
+    let updated = match apply_capture_bind(&existing, key, &wrapper_str) {
+        BindOutcome::AlreadySet => {
+            println!("local.lua already binds {key} → {wrapper_str}");
+            existing.clone()
+        }
+        BindOutcome::Rewritten { contents, replaced } => {
+            for command in &replaced {
+                println!("Replacing your {key} bind (was: {command})");
+            }
+            println!("Binding {key} → {wrapper_str}");
+            contents
+        }
+        BindOutcome::Inserted(contents) => {
+            println!("Binding {key} → {wrapper_str}");
+            contents
+        }
+    };
+
+    let changed = updated != existing;
+    if changed {
+        if local.exists() {
+            let backup = backup_path(&local);
+            std::fs::copy(&local, &backup)
+                .with_context(|| format!("back up {}", local.display()))?;
+            println!("Backed up {} → {}", local.display(), backup.display());
+        } else if let Some(dir) = local.parent() {
+            std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        }
+        std::fs::write(&local, &updated).with_context(|| format!("write {}", local.display()))?;
+        println!("Wrote {}", local.display());
+    }
+
+    let main_contents = std::fs::read_to_string(&main_lua)
+        .with_context(|| format!("read {}", main_lua.display()))?;
+    let mut reload_needed = changed;
+    if let Some(new_main) = ensure_local_require(&main_contents) {
+        let backup = backup_path(&main_lua);
+        std::fs::copy(&main_lua, &backup)
+            .with_context(|| format!("back up {}", main_lua.display()))?;
+        println!("Backed up {} → {}", main_lua.display(), backup.display());
+        std::fs::write(&main_lua, new_main)
+            .with_context(|| format!("write {}", main_lua.display()))?;
+        println!("Added `require(\"hypr.local\")` to {}", main_lua.display());
+        reload_needed = true;
+    }
+
+    // Binds, unlike `env`, are re-read on reload, so this takes effect
+    // now rather than at the next login.
+    if reload_needed {
+        hypr_reload();
+        report_config_errors();
+    }
+
+    println!();
+    println!("Done — {key} now opens Tensaku's capture overlay.");
+    if !in_hyprland() {
+        println!("(not in a Hyprland session — this takes effect on next Hyprland start.)");
+    }
+    Ok(())
+}
+
 /// `--wire-omarchy`: point `$OMARCHY_SCREENSHOT_EDITOR` at the wrapper —
 /// persistently in Hyprland's envs.conf, and live in the running session —
 /// and float + center the Tensaku window. Ensures the wrapper exists
@@ -1065,5 +1423,150 @@ mod tests {
             classify_wiring(Some(OsString::from("~/.local/bin/tensaku-edit")), &w),
             Wiring::Correct,
         );
+    }
+
+    const WRAPPER: &str = "/home/u/.local/bin/tensaku-capture";
+
+    #[test]
+    fn bind_line_parses_key_and_command() {
+        let line = r#"o.bind("PRINT", "Screenshot", "omarchy-capture-screenshot")"#;
+        assert_eq!(bind_line_key(line).as_deref(), Some("PRINT"));
+        assert_eq!(
+            bind_line_command(line).as_deref(),
+            Some("omarchy-capture-screenshot")
+        );
+    }
+
+    /// Omarchy writes a description of `nil` when the binding shouldn't
+    /// show up in its keybindings menu.
+    #[test]
+    fn bind_line_handles_a_nil_description() {
+        let line = r#"o.bind("CTRL + D", nil, "/home/u/.config/hypr/back.sh")"#;
+        assert_eq!(bind_line_key(line).as_deref(), Some("CTRL + D"));
+        assert_eq!(
+            bind_line_command(line).as_deref(),
+            Some("/home/u/.config/hypr/back.sh")
+        );
+    }
+
+    /// What a table-form binding is recognisable by is its description,
+    /// since it has no command string to report.
+    #[test]
+    fn bind_line_description_is_read_for_table_forms() {
+        let line = r#"o.bind("SUPER + SHIFT + S", "Google Maps", { webapp = "https://maps.google.com/" })"#;
+        assert_eq!(bind_line_description(line).as_deref(), Some("Google Maps"));
+        assert_eq!(bind_line_command(line), None);
+    }
+
+    /// `nil` is not a description, and the command two arguments later
+    /// must not be mistaken for one.
+    #[test]
+    fn a_nil_description_reads_as_absent() {
+        let line = r#"o.bind("CTRL + D", nil, "/home/u/back.sh")"#;
+        assert_eq!(bind_line_description(line), None);
+    }
+
+    /// A launch/focus table is a binding without a command string. The
+    /// key still has to be recognised, or rebinding it would append a
+    /// second bind for the same key.
+    #[test]
+    fn bind_line_table_form_has_a_key_but_no_command() {
+        let line = r#"o.bind("SUPER + SHIFT + O", "Obsidian", { launch = "obsidian" })"#;
+        assert_eq!(bind_line_key(line).as_deref(), Some("SUPER + SHIFT + O"));
+        assert_eq!(bind_line_command(line), None);
+    }
+
+    #[test]
+    fn commented_binds_dont_count() {
+        let line = r#"-- o.bind("PRINT", "Screenshot", "omarchy-capture-screenshot")"#;
+        assert_eq!(bind_line_key(line), None);
+        assert!(!unbinds_key(r#"-- hl.unbind("PRINT")"#, "PRINT"));
+    }
+
+    #[test]
+    fn keys_compare_regardless_of_spacing_and_case() {
+        assert!(unbinds_key(
+            r#"hl.unbind("super+shift+s")"#,
+            "SUPER + SHIFT + S"
+        ));
+    }
+
+    #[test]
+    fn capture_bind_appended_when_absent() {
+        let out = apply_capture_bind("-- existing\n", "PRINT", WRAPPER);
+        let BindOutcome::Inserted(contents) = out else {
+            panic!("expected an insert");
+        };
+        assert!(contents.contains(r#"hl.unbind("PRINT")"#));
+        assert!(contents.contains(&format!(r#"o.bind("PRINT", "Screenshot", "{WRAPPER}")"#)));
+    }
+
+    #[test]
+    fn capture_bind_already_set_is_a_noop() {
+        let contents =
+            format!("hl.unbind(\"PRINT\")\no.bind(\"PRINT\", \"Screenshot\", \"{WRAPPER}\")\n");
+        assert_eq!(
+            apply_capture_bind(&contents, "PRINT", WRAPPER),
+            BindOutcome::AlreadySet
+        );
+    }
+
+    /// Our bind without its unbind leaves Omarchy's own bind on the key
+    /// alive next to ours, so the key fires both captures.
+    #[test]
+    fn a_bind_missing_its_unbind_gains_one() {
+        let contents = format!("o.bind(\"PRINT\", \"Screenshot\", \"{WRAPPER}\")\n");
+        let BindOutcome::Rewritten { contents, replaced } =
+            apply_capture_bind(&contents, "PRINT", WRAPPER)
+        else {
+            panic!("expected a rewrite");
+        };
+        assert!(replaced.is_empty());
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines[0], r#"hl.unbind("PRINT")"#);
+        assert!(lines[1].contains(WRAPPER));
+    }
+
+    /// An existing binding is replaced where it sits, not shadowed from
+    /// the bottom of the file, and the user is told what it ran.
+    #[test]
+    fn an_existing_bind_is_rewritten_in_place() {
+        let contents = "-- top\no.bind(\"PRINT\", \"Screenshot\", \"grim-and-slurp\")\n-- tail\n";
+        let BindOutcome::Rewritten { contents, replaced } =
+            apply_capture_bind(contents, "PRINT", WRAPPER)
+        else {
+            panic!("expected a rewrite");
+        };
+        assert_eq!(replaced, vec!["grim-and-slurp".to_string()]);
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines[0], "-- top");
+        assert_eq!(lines[1], r#"hl.unbind("PRINT")"#);
+        assert!(lines[2].contains(WRAPPER));
+        assert_eq!(lines[3], "-- tail");
+        assert!(!contents.contains("grim-and-slurp"));
+    }
+
+    /// Duplicates for the same key collapse into the one binding, or the
+    /// leftovers would fire alongside it.
+    #[test]
+    fn duplicate_binds_for_the_key_are_dropped() {
+        let contents = "o.bind(\"PRINT\", \"A\", \"one\")\no.bind(\"PRINT\", \"B\", \"two\")\n";
+        let BindOutcome::Rewritten { contents, replaced } =
+            apply_capture_bind(contents, "PRINT", WRAPPER)
+        else {
+            panic!("expected a rewrite");
+        };
+        assert_eq!(replaced, vec!["one".to_string(), "two".to_string()]);
+        assert_eq!(contents.matches("o.bind").count(), 1);
+    }
+
+    /// Another key's binding is none of our business.
+    #[test]
+    fn other_keys_are_left_alone() {
+        let contents = "o.bind(\"SUPER + W\", \"Close\", \"close\")\n";
+        let BindOutcome::Inserted(new) = apply_capture_bind(contents, "PRINT", WRAPPER) else {
+            panic!("expected an insert");
+        };
+        assert!(new.contains(r#"o.bind("SUPER + W", "Close", "close")"#));
     }
 }

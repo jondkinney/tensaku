@@ -344,6 +344,8 @@ Options:
           Reinstall the Omarchy screenshot wrapper (~/.local/bin/tensaku-edit), then exit. Intended for cargo/manual installs and legacy recovery; current Omarchy package installs need no setup
       --wire-omarchy
           Legacy/custom Omarchy override: point its screenshot editor at the tensaku-edit wrapper and add old-style float + center rules, then exit. Current Omarchy already supplies these defaults and needs no wiring
+      --wire-capture-key [<KEY>]
+          Bind a key to Tensaku's own capture overlay (drag a region, Space snaps to a window, F for the whole screen, S for scrolling), replacing Omarchy's grim+slurp screenshot, then exit. Defaults to Print Screen; pass a Hyprland key spec to use another, e.g. --wire-capture-key "SUPER + SHIFT + S"
   -c, --config <CONFIG>
           Path to the config file. Otherwise will be read from XDG_CONFIG_DIR/tensaku/config.toml
   -f, --filename <FILENAME>
@@ -459,6 +461,25 @@ unset uses Omarchy's Tensaku default. The `--install-omarchy-wrapper` and
 `--wire-omarchy` commands remain available for manual installs and older or
 heavily customized Omarchy setups, but normal package installs should not run
 them. `tensaku --doctor` recognizes the stock default as ready.
+
+**Tensaku's own capture** replaces `omarchy-capture-screenshot` for anyone who
+would rather choose the mode after pressing the key than before it. Omarchy's
+screenshot binding runs grim+slurp, whose region selector has already answered
+by the time you decide you wanted the whole screen instead:
+
+```sh
+tensaku --wire-capture-key                        # Print Screen
+tensaku --wire-capture-key "SUPER + SHIFT + S"    # or a key of your choosing
+```
+
+That installs a `~/.local/bin/tensaku-capture` wrapper and writes an unbind
+plus a bind for the key into `~/.config/hypr/local.lua` — the one file Omarchy
+never refreshes — backing the file up first and reloading Hyprland. Pressing
+the key opens the overlay: drag a region, `Space` snaps to the window under the
+pointer, `F` takes the whole screen, `S` switches to a scrolling capture. It is
+opt-in and separate from `--wire-omarchy`, which only redirects where an
+existing screenshot lands. `tensaku --doctor` reports which key, if any, is
+wired.
 
 **Scrolling capture** is a separate mode — `omarchy-capture-screenshot`
 doesn't cover it. Bind a key straight to `tensaku --scroll-capture`,

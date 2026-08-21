@@ -2,6 +2,11 @@ use clap::{Parser, ValueEnum};
 use serde::Deserialize;
 use std::str::FromStr;
 
+/// The key `--wire-capture-key` takes over when given no other. Omarchy
+/// binds it to its own grim+slurp capture, so it is the one worth
+/// replacing — and the one `--doctor` reports on.
+pub const DEFAULT_CAPTURE_KEY: &str = "PRINT";
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None, name="tensaku")]
 pub struct CommandLine {
@@ -37,6 +42,20 @@ pub struct CommandLine {
     /// Current Omarchy already supplies these defaults and needs no wiring.
     #[arg(long, exclusive = true)]
     pub wire_omarchy: bool,
+
+    /// Bind a key to Tensaku's own capture overlay (drag a region, Space
+    /// snaps to a window, F for the whole screen, S for scrolling), replacing
+    /// Omarchy's grim+slurp screenshot, then exit. Defaults to Print Screen;
+    /// pass a Hyprland key spec to use another, e.g. --wire-capture-key
+    /// "SUPER + SHIFT + S".
+    #[arg(
+        long,
+        exclusive = true,
+        num_args = 0..=1,
+        default_missing_value = DEFAULT_CAPTURE_KEY,
+        value_name = "KEY"
+    )]
+    pub wire_capture_key: Option<String>,
 
     /// Path to the config file. Otherwise will be read from XDG_CONFIG_DIR/tensaku/config.toml
     #[arg(short, long)]
