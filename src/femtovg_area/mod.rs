@@ -86,6 +86,25 @@ pub fn set_current_device_pixel_ratio(dpr: f32) {
 }
 
 thread_local! {
+    /// Image→canvas scale published alongside the DPR. Hit tests read
+    /// it to size their tolerances in screen pixels rather than image
+    /// ones, which is what makes a border equally easy to grab at any
+    /// zoom. They run between frames, not inside `draw`, so the last
+    /// published value is the current one.
+    static CURRENT_RENDER_SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
+}
+
+/// The most recently published image→canvas scale.
+pub fn current_render_scale() -> f32 {
+    CURRENT_RENDER_SCALE.with(|c| c.get())
+}
+
+/// Publish the image→canvas scale for the current frame.
+pub fn set_current_render_scale(scale: f32) {
+    CURRENT_RENDER_SCALE.with(|c| c.set(scale));
+}
+
+thread_local! {
     /// True while the renderer is drawing a selected drawable. Read
     /// inside `Drawable::draw` impls that want to render selection
     /// decorations themselves (e.g. text's blue outline) at the

@@ -728,11 +728,13 @@ fn halo_css_pad(zoom: f32) -> f32 {
     (HALO_PAD * zoom.min(1.0)).max(MIN_HALO_PAD)
 }
 
-/// Picking slack for a border grab, in image pixels before zoom
-/// scaling. Deliberately fatter than [`HIT_TOLERANCE`]: the border is
-/// now the *only* way to grab a large annotation while a drawing tool
-/// is armed, so it has to be forgiving to aim at.
-pub const EDGE_HIT_TOLERANCE: f32 = 14.0;
+/// Picking slack for a border grab, in CSS pixels on screen —
+/// [`edge_hit_tolerance`] converts it into image units at the current
+/// zoom. Deliberately fatter than [`HIT_TOLERANCE`]: the border is
+/// the *only* way to grab a large annotation while a drawing tool is
+/// armed, so it has to be forgiving to aim at, and it is aimed at
+/// with a pointer on a screen rather than at image pixels.
+pub const EDGE_HIT_TOLERANCE: f32 = 18.0;
 
 /// Whether `point` falls in the band straddling `rect`'s perimeter.
 ///
@@ -800,8 +802,22 @@ pub fn click_grabs_drawable(armed: Option<Tools>, drawable: &dyn Drawable, point
     grab_rule(
         armed,
         drawable.tool_type(),
-        drawable.edge_hit_test(point, EDGE_HIT_TOLERANCE),
+        drawable.edge_hit_test(point, edge_hit_tolerance()),
     )
+}
+
+/// The border-grab band in image units, sized so it stays
+/// [`EDGE_HIT_TOLERANCE`] CSS pixels wide on screen at any zoom.
+///
+/// A fixed band in image units is the wrong shape for this: a 6K
+/// capture is usually viewed at well under half scale, where 14 image
+/// pixels is barely five on screen and the border is a hairline to
+/// aim at. Aiming happens on screen, so the tolerance belongs there.
+pub fn edge_hit_tolerance() -> f32 {
+    let dpr = crate::femtovg_area::current_device_pixel_ratio().max(0.0001);
+    // Image px per CSS px: 1.0 at the 100% view on a non-HiDPI screen.
+    let zoom = (crate::femtovg_area::current_render_scale() / dpr).max(0.0001);
+    EDGE_HIT_TOLERANCE / zoom
 }
 
 /// The rule behind `click_grabs_drawable`, split from the `Drawable`
@@ -1757,6 +1773,27 @@ mod canvas_transform_tests {
 mod edge_hit_tests {
     use super::{EDGE_HIT_TOLERANCE, HIT_TOLERANCE, Tools, bbox_edge_hit, grab_rule};
     use crate::math::{Rect, Vec2D};
+
+    /// A band sized in screen pixels has to widen as the canvas
+    /// zooms out — that is the whole point of measuring it there.
+    /// A 6K capture at 40% is the common case, and a fixed image-space
+    /// band leaves a five-pixel hairline to aim at.
+    #[test]
+    fn the_band_widens_as_the_canvas_shrinks() {
+        // Same shape as `edge_hit_tolerance`, without the thread-local
+        // the renderer publishes (no frame has been drawn in a test).
+        fn band(zoom: f32) -> f32 {
+            EDGE_HIT_TOLERANCE / zoom.max(0.0001)
+        }
+        assert_eq!(band(1.0), EDGE_HIT_TOLERANCE);
+        assert!(band(0.4) > band(1.0) * 2.0);
+        assert!(band(2.0) < band(1.0));
+        // ... and the on-screen width is the same at every zoom,
+        // which is the property being bought.
+        for zoom in [0.25_f32, 0.4, 1.0, 3.0] {
+            assert!((band(zoom) * zoom - EDGE_HIT_TOLERANCE).abs() < 0.01);
+        }
+    }
 
     /// The counter stamps over a text box; every other armed tool
     /// still grabs it anywhere, which is what stops the Text tool

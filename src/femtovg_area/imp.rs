@@ -2393,6 +2393,7 @@ impl FemtoVgAreaMut {
         // Publish DPR for text/UI sizing during the offscreen render
         // (used for save/clipboard export).
         super::set_current_device_pixel_ratio(self.device_pixel_ratio);
+        super::set_current_render_scale(self.effective_scale_or_fallback());
         let bounds = (
             Vec2D::zero(),
             Vec2D::new(
@@ -2513,6 +2514,7 @@ impl FemtoVgAreaMut {
         // (text editing handles, outlines) inside `Drawable::draw`
         // without us having to thread it through every impl.
         super::set_current_device_pixel_ratio(self.device_pixel_ratio);
+        super::set_current_render_scale(self.effective_scale_or_fallback());
 
         // Choose between the regular pan/zoom transform and a
         // committed-crop fit transform. The crop fit centers and
