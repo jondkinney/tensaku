@@ -3834,6 +3834,71 @@ impl SketchBoard {
             .set_hover_preview(pos)
     }
 
+    /// Open the stacking menu over the annotation at `widget_pos`,
+    /// returning whether there was one to open it for.
+    ///
+    /// Right-clicking outside the current selection selects what was
+    /// clicked first — the menu acts on the selection, and moving
+    /// something the user can't see is selected would be a surprise.
+    /// Right-clicking inside a multi-selection keeps it, so the menu
+    /// restacks the whole group.
+    fn open_annotation_menu(&mut self, widget_pos: Vec2D, sender: &ComponentSender<Self>) -> bool {
+        let image_pos = self.renderer.abs_canvas_to_image_coordinates(widget_pos);
+        let Some(id) = self.renderer.hit_test(image_pos, crate::tools::HIT_TOLERANCE) else {
+            return false;
+        };
+        let pointer = self.tools.get(&Tools::Pointer);
+        let already_selected = pointer.borrow().selected_drawables().contains(&id);
+        if !already_selected {
+            pointer.borrow_mut().set_selected_drawables(vec![id]);
+            self.refresh_screen();
+        }
+
+        let menu = gtk::Popover::builder()
+            .has_arrow(false)
+            .autohide(true)
+            .build();
+        menu.add_css_class("annotation-menu");
+        let items = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        // Front and back only. The layer panel (F7) carries the
+        // one-step moves and drag-to-reorder; a context menu that
+        // reproduced all four would be a worse version of it.
+        for (label, direction) in [
+            ("Bring to front", PanelMoveDir::ToTop),
+            ("Send to back", PanelMoveDir::ToBottom),
+        ] {
+            let button = gtk::Button::with_label(label);
+            button.add_css_class("flat");
+            button.set_focusable(false);
+            button.set_focus_on_click(false);
+            let input = sender.input_sender().clone();
+            let menu_for_click = menu.clone();
+            button.connect_clicked(move |_| {
+                input.emit(SketchBoardInput::PanelMoveSelected(direction));
+                menu_for_click.popdown();
+            });
+            items.append(&button);
+        }
+        menu.set_child(Some(&items));
+        menu.set_parent(&self.renderer);
+        menu.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
+            widget_pos.x as i32,
+            widget_pos.y as i32,
+            1,
+            1,
+        )));
+        // Unparent on close or the popover leaks as a child of the
+        // canvas, and hand focus back so the next keystroke is a tool
+        // shortcut rather than nothing.
+        let renderer = self.renderer.clone();
+        menu.connect_closed(move |m| {
+            m.unparent();
+            renderer.grab_focus();
+        });
+        menu.popup();
+        true
+    }
+
     /// Tools whose next annotation has a size the plain wheel sets.
     /// Pointer keeps the wheel for panning; Crop and Spotlight claim
     /// it earlier in the chain for their own primary adjustment.
@@ -5287,6 +5352,22 @@ impl Component for SketchBoard {
                     };
 
                     if resize_consumed {
+                        return;
+                    }
+
+                    // A right-click on an annotation opens the stacking
+                    // menu. It runs before the conversion below because
+                    // the hit test wants image coordinates and the
+                    // popover wants widget ones, and this is the last
+                    // point where `me.pos` still holds the latter. A
+                    // right-click on empty canvas isn't ours: it falls
+                    // through to whatever `actions-on-right-click`
+                    // configures.
+                    if let InputEvent::Mouse(me) = &ie
+                        && me.type_ == MouseEventType::Click
+                        && me.button == MouseButton::Secondary
+                        && self.open_annotation_menu(me.pos, &outer_sender)
+                    {
                         return;
                     }
 
