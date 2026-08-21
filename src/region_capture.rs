@@ -73,10 +73,10 @@ impl Mode {
     fn hint(self) -> &'static str {
         match self {
             Mode::Area => {
-                "Drag to select  ·  Space: window  ·  F: full screen  ·  S: scrolling  ·  Esc"
+                "Drag to select  ·  Space: window  ·  R: last region  ·  F: full screen  ·  S: scrolling  ·  Esc"
             }
             Mode::Window => {
-                "Click a window  ·  Space: back to area  ·  F: full screen  ·  S: scrolling  ·  Esc"
+                "Click a window  ·  Space: area  ·  R: last region  ·  F: full screen  ·  S: scrolling  ·  Esc"
             }
         }
     }
@@ -433,10 +433,23 @@ fn to_image_rect(rect: Rect, scale: f64, frozen: &Pixbuf) -> Rect {
 }
 
 /// The choice a commit would make right now, in image pixels.
+///
+/// Remembers the logical rectangle on the way out, so the next capture
+/// can restore it: the saved value has to be in the overlay's own
+/// coordinates, since that is what a restored selection is drawn in.
 fn committed_region(state: &State) -> Option<RegionOutcome> {
-    let rect = pending_rect(state)?;
-    let rect = to_image_rect(rect, state.image_scale, &state.frozen);
-    (rect.width > 0 && rect.height > 0).then_some(RegionOutcome::Region(rect))
+    let logical = pending_rect(state)?;
+    let rect = to_image_rect(logical, state.image_scale, &state.frozen);
+    if rect.width <= 0 || rect.height <= 0 {
+        return None;
+    }
+    crate::state::save_capture_last_region([
+        logical.x as f64,
+        logical.y as f64,
+        logical.width as f64,
+        logical.height as f64,
+    ]);
+    Some(RegionOutcome::Region(rect))
 }
 
 fn install_pointer(
@@ -542,6 +555,31 @@ fn install_keys(
                     Some(choice) => finish(choice),
                     None => gtk::glib::Propagation::Stop,
                 }
+            }
+            // The last region, back as a live selection. Same shot
+            // twice means the same framing -- documentation sequences,
+            // before-and-afters -- without re-dragging it by eye and
+            // landing three pixels off.
+            gdk::Key::r | gdk::Key::R => {
+                let restored = crate::state::load_capture_last_region();
+                let Some([x, y, w, h]) = restored else {
+                    return gtk::glib::Propagation::Stop;
+                };
+                let mut state = state.borrow_mut();
+                state.mode = Mode::Area;
+                state.selection = Some(Rect {
+                    x: x.round() as i32,
+                    y: y.round() as i32,
+                    width: w.round() as i32,
+                    height: h.round() as i32,
+                });
+                // The readout follows the pointer during a drag; with
+                // nothing dragged, park it on the restored corner.
+                state.origin = (x, y);
+                state.pointer = (x + w, y + h);
+                hint.set_text(state.mode.hint());
+                layout_shade(&state);
+                gtk::glib::Propagation::Stop
             }
             gdk::Key::space => {
                 {

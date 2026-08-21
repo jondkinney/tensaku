@@ -115,6 +115,8 @@ pub struct PersistedState {
     /// key. Incidental UI state, not a preference — hence state.toml.
     #[serde(default)]
     pub scroll_capture_last_region: Option<[f64; 4]>,
+    #[serde(default)]
+    pub capture_last_region: Option<[f64; 4]>,
     /// Legacy Preferences value; migrated to `config.toml` at startup.
     #[serde(default)]
     pub park_pointer_during_manual_scroll_capture: Option<bool>,
@@ -440,6 +442,24 @@ pub fn load_scroll_capture_last_region() -> Option<[f64; 4]> {
 pub fn save_scroll_capture_last_region(region: [f64; 4]) {
     let mut state = load();
     state.scroll_capture_last_region = Some(region);
+    save(&state);
+}
+
+/// The region (`[x, y, w, h]`, overlay-logical px) of the most recent
+/// area capture, or `None` when none has run yet.
+///
+/// Kept apart from the scrolling capture's: the two are used for
+/// different things -- a column of a page versus a panel of an app --
+/// and sharing one slot would have each overwrite the other's.
+pub fn load_capture_last_region() -> Option<[f64; 4]> {
+    load().capture_last_region
+}
+
+/// Remember the region an area capture just took, so the next one can
+/// reselect it and frame the shot identically.
+pub fn save_capture_last_region(region: [f64; 4]) {
+    let mut state = load();
+    state.capture_last_region = Some(region);
     save(&state);
 }
 
