@@ -1606,6 +1606,28 @@ fn auto_fit_scale(
     (inner_w / content_w).min(fit_h).min(max_scale)
 }
 
+
+/// Add one spotlight's punch-out path to `paths`, and — when it
+/// magnifies — a second copy to `magnifiers` with the rect to sample
+/// and the factor to enlarge it by.
+fn collect_spotlight(
+    drawable: &dyn Drawable,
+    paths: &mut Vec<Path>,
+    magnifiers: &mut Vec<(Path, crate::math::Rect, f32)>,
+) {
+    let mut punch = Path::new();
+    drawable.append_spotlight_path(&mut punch);
+    let magnification = drawable.spotlight_magnification();
+    if magnification > 1.0
+        && let Some(rect) = drawable.bounds()
+    {
+        let mut lens = Path::new();
+        drawable.append_spotlight_path(&mut lens);
+        magnifiers.push((lens, rect, magnification));
+    }
+    paths.push(punch);
+}
+
 impl FemtoVgAreaMut {
     pub fn commit(&mut self, drawable: Box<dyn Drawable>) -> DrawableId {
         let id = DrawableId(self.next_drawable_id);
@@ -3009,6 +3031,9 @@ impl FemtoVgAreaMut {
         // also be spotlights when a user grabs an existing spotlight
         // to move it — surface those too so the live drag follows.
         let mut paths: Vec<Path> = Vec::new();
+        // Openings that magnify, kept beside the punch-out paths: same
+        // shape, plus the rect to sample and how far to enlarge it.
+        let mut magnifiers: Vec<(Path, crate::math::Rect, f32)> = Vec::new();
         let dragging_active = self.active_tool.borrow().dragging_drawable_id();
         let dragging_pointer = self.pointer_tool.borrow().dragging_drawable_id();
         let extra_dragging = self.pointer_tool.borrow().extra_dragging_ids();
@@ -3023,17 +3048,13 @@ impl FemtoVgAreaMut {
                 continue;
             }
             if s.drawable.is_spotlight() {
-                let mut p = Path::new();
-                s.drawable.append_spotlight_path(&mut p);
-                paths.push(p);
+                collect_spotlight(s.drawable.as_ref(), &mut paths, &mut magnifiers);
             }
         }
         // In-flight spotlight copies from a group/move drag.
         for d in self.pointer_tool.borrow().extra_dragging_drawables() {
             if d.is_spotlight() {
-                let mut p = Path::new();
-                d.append_spotlight_path(&mut p);
-                paths.push(p);
+                collect_spotlight(d, &mut paths, &mut magnifiers);
             }
         }
         {
@@ -3041,18 +3062,14 @@ impl FemtoVgAreaMut {
             if let Some(d) = at.get_drawable()
                 && d.is_spotlight()
             {
-                let mut p = Path::new();
-                d.append_spotlight_path(&mut p);
-                paths.push(p);
+                collect_spotlight(d, &mut paths, &mut magnifiers);
             }
         }
         if !Rc::ptr_eq(&self.active_tool, &self.pointer_tool)
             && let Some(d) = self.pointer_tool.borrow().get_drawable()
             && d.is_spotlight()
         {
-            let mut p = Path::new();
-            d.append_spotlight_path(&mut p);
-            paths.push(p);
+            collect_spotlight(d, &mut paths, &mut magnifiers);
         }
         if paths.is_empty() {
             return Ok(());
@@ -3168,6 +3185,23 @@ impl FemtoVgAreaMut {
             canvas.scissor(sx, sy, sw, sh);
         }
 
+        // Sample each loupe's region BEFORE the dim sheet lands on it:
+        // the opening shows undimmed content, and a rounded corner or a
+        // freehand edge would otherwise pull dimmed pixels in from the
+        // parts of the bounding box the shape doesn't cover.
+        let lenses: Vec<(&Path, femtovg::ImageId, crate::math::Rect, f32)> = magnifiers
+            .iter()
+            .filter_map(|(path, rect, magnification)| {
+                let (x, y, w, h) = crate::tools::canvas_region(canvas, rect.pos, rect.size)?;
+                let sub =
+                    super::read_framebuffer_region(canvas.height() as usize, x, y, w, h)?;
+                let id = canvas
+                    .create_image(sub.as_ref(), ImageFlags::empty())
+                    .ok()?;
+                Some((path, id, *rect, *magnification))
+            })
+            .collect();
+
         if build_result.is_ok() {
             for tile in &tiles {
                 let mut final_path = Path::new();
@@ -3175,7 +3209,30 @@ impl FemtoVgAreaMut {
                 let composited = Paint::image(tile.id, tile.x, tile.y, tile.w, tile.h, 0.0, 1.0);
                 canvas.fill_path(&final_path, &composited);
             }
+            // Then the loupes, over the sheet and inside their own
+            // openings: each region painted into a rect that many times
+            // its size about the same centre, so the fill clips away
+            // everything but the enlarged middle.
+            for (path, id, rect, magnification) in &lenses {
+                let grown = rect.size * *magnification;
+                let centre = rect.pos + rect.size * 0.5;
+                canvas.fill_path(
+                    path,
+                    &Paint::image(
+                        *id,
+                        centre.x - grown.x / 2.0,
+                        centre.y - grown.y / 2.0,
+                        grown.x,
+                        grown.y,
+                        0.0,
+                        1.0,
+                    ),
+                );
+            }
             canvas.flush();
+        }
+        for (_, id, _, _) in &lenses {
+            canvas.delete_image(*id);
         }
         for tile in &tiles {
             canvas.delete_image(tile.id);

@@ -98,68 +98,22 @@ impl Drawable for SpotlightKind {
     }
 
     /// Spotlights render in a separate pass at the end of the frame
-    /// (see `FemtoVgAreaMut::render`); their main-pass `draw` does
-    /// nothing at 1x so they don't render twice and so the dark
-    /// overlay sits on top of every other annotation.
-    ///
-    /// Above 1x the shape becomes a loupe, and that has to happen
-    /// here: the region is read back and painted into its own path,
-    /// enlarged about the shape's centre. By this point the main pass
-    /// has drawn the background and every annotation beneath, so what
-    /// gets magnified is what a reader would have seen there — and
-    /// the punch-out that follows reveals it, since the hole is the
-    /// same path.
+    /// (see `FemtoVgAreaMut::render`); their main-pass `draw` is a
+    /// no-op so they don't render twice and so the dark overlay sits
+    /// on top of every other annotation. The renderer skips them in
+    /// the annotation loop entirely, which is why magnification lives
+    /// in that pass rather than here.
     fn draw(
         &self,
-        canvas: &mut femtovg::Canvas<femtovg::renderer::OpenGl>,
+        _canvas: &mut femtovg::Canvas<femtovg::renderer::OpenGl>,
         _font: femtovg::FontId,
         _bounds: (Vec2D, Vec2D),
     ) -> Result<()> {
-        let magnification = self.magnification();
-        if magnification <= 1.0 {
-            return Ok(());
-        }
-        let Some(rect) = self.bounds() else {
-            return Ok(());
-        };
-        let Some((x, y, w, h)) = super::canvas_region(canvas, rect.pos, rect.size) else {
-            return Ok(());
-        };
-        let Some(sub) =
-            crate::femtovg_area::read_framebuffer_region(canvas.height() as usize, x, y, w, h)
-        else {
-            return Ok(());
-        };
-        // Read fresh every frame rather than cached: a loupe shows what
-        // is under it NOW, so moving an annotation beneath one has to
-        // change what it shows. The cost is bounded by the loupe's own
-        // area, which is small by the nature of the tool.
-        let image = canvas.create_image(sub.as_ref(), femtovg::ImageFlags::empty())?;
-
-        // Paint the region into a rect `magnification` times its size,
-        // centred on the same point. The path fill clips it, so what
-        // survives is the middle of the region blown up to fill the
-        // shape — a loupe, without a separate sampling step.
-        let grown = rect.size * magnification;
-        let centre = rect.pos + rect.size * 0.5;
-        let mut path = Path::new();
-        self.append_spotlight_path(&mut path);
-        canvas.fill_path(
-            &path,
-            &Paint::image(
-                image,
-                centre.x - grown.x / 2.0,
-                centre.y - grown.y / 2.0,
-                grown.x,
-                grown.y,
-                0.0,
-                1.0,
-            ),
-        );
-        // The paint has to outlive the fill, so hand the texture to
-        // the end-of-frame drain rather than deleting it here.
-        crate::femtovg_area::queue_image_deletion(image);
         Ok(())
+    }
+
+    fn spotlight_magnification(&self) -> f32 {
+        self.magnification()
     }
 
     fn is_spotlight(&self) -> bool {

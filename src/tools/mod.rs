@@ -469,6 +469,14 @@ pub trait Drawable: DrawableClone + Debug {
         self.hit_test(point, tolerance)
     }
 
+    /// Loupe factor for a spotlight: 1.0 is an ordinary spotlight,
+    /// above that the renderer magnifies what the opening reveals.
+    /// Read by the spotlight pass, which is the only place a
+    /// spotlight renders at all.
+    fn spotlight_magnification(&self) -> f32 {
+        1.0
+    }
+
     /// A hover-only preview of an annotation that hasn't been created
     /// yet. It is editor furniture: drawn on screen, never exported.
     fn is_hover_preview(&self) -> bool {
