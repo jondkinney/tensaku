@@ -1,23 +1,33 @@
 //! Pin the finished shot to the desktop.
 //!
-//! A pinned capture is a small always-on-top window in a corner of the
-//! screen, showing what the editor produced. It exists so a reference
-//! can stay visible while you work in another window — the thing a
-//! screenshot is usually *for* — instead of living in a file you have
-//! to keep re-opening.
+//! A pinned capture is a small window in the corner of the screen
+//! showing what the editor produced. It exists so a reference can stay
+//! visible while you work in another window — the thing a screenshot
+//! is usually *for* — instead of living in a file you have to keep
+//! re-opening.
 //!
 //! Two decisions worth knowing:
 //!
-//! - **It is a layer surface**, like the scroll-capture overlay, which
-//!   is what keeps it above ordinary windows without asking the
-//!   compositor for a rule. A layer surface has no titlebar and the
-//!   compositor won't move it, so dragging is implemented here by
-//!   walking the anchor margins.
+//! - **It is an ordinary floating window**, and its handle asks the
+//!   compositor to drag it. A compositor moves a floating window
+//!   during its own frame with the client out of the loop, which is
+//!   why that feels instant; a client-positioned surface — which is
+//!   what this was, as a layer surface walking its own anchor margins
+//!   — cannot be anywhere but a round trip behind the pointer.
 //! - **Edit keeps the annotations live.** The pin and the editor are
 //!   the same process, so Edit hides the pin and shows the editor
 //!   window again with every drawable still where it was, still
 //!   movable. Nothing is serialised and nothing is flattened; the
 //!   cost is that the pin lasts as long as the process does.
+//!
+//! Off Hyprland it degrades rather than breaking. The drag is the
+//! standard `xdg_toplevel.move` request that every compositor
+//! implements, so it works anywhere. Floating, pinning across
+//! workspaces and landing in a corner slot are Hyprland dispatchers,
+//! and a Wayland client cannot place itself without something like
+//! them: elsewhere the pin opens wherever the compositor decides, and
+//! draws its own border, since nothing promises one around an
+//! undecorated window.
 
 use crate::ui::toolbars::RobustTooltipExt;
 use relm4::gtk::gdk_pixbuf::InterpType;
@@ -133,7 +143,7 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
 
     // Float it, show it on every workspace, and put it in its slot —
     // once it has a surface for the compositor to match on.
-    {
+    if on_hyprland() {
         let slot = next_slot();
         window.connect_map(move |_| {
             // Not immediately: `map` is this side's word for "shown",
@@ -172,13 +182,22 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
     picture.set_can_shrink(true);
     picture.set_size_request(frame_w, frame_h);
 
-    // The picture is the whole window. The compositor draws the border
-    // and the shadow around a floating window, so a mat and a rounded
-    // corner of our own are a second frame inside the first — and the
-    // dark edge they leave reads as part of the shot rather than as
-    // part of the desktop.
+    // On Hyprland the picture is the whole window: the compositor
+    // draws the border and the shadow around a floating window, and a
+    // mat of our own would be a second frame inside the first.
+    //
+    // Elsewhere there is no such promise for an undecorated window, so
+    // the pin brings its own edge rather than reading as a picture
+    // lying loose on the desktop.
     let overlay = gtk::Overlay::new();
-    overlay.set_child(Some(&picture));
+    if on_hyprland() {
+        overlay.set_child(Some(&picture));
+    } else {
+        let frame = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        frame.add_css_class("pin-frame");
+        frame.append(&picture);
+        overlay.set_child(Some(&frame));
+    }
 
     // The picture and the Edit button do the same thing, so they share
     // one callback rather than each getting a copy of the intent.
@@ -277,6 +296,15 @@ fn pin_title() -> String {
     // The process id is enough: a capture is a process, and a process
     // has one pin.
     format!("{PIN_TITLE} {}", std::process::id())
+}
+
+/// Whether the compositor is Hyprland, and so whether the pin can ask
+/// to be floated, pinned and placed.
+///
+/// Everything gated on this is a nicety: without it the pin still
+/// opens, still drags, and still does everything its toolbar offers.
+fn on_hyprland() -> bool {
+    std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some()
 }
 
 /// Run one Hyprland dispatcher, best-effort.
@@ -584,12 +612,14 @@ fn install_move(window: &gtk::Window, target: &gtk::Button) {
     let press = gtk::GestureClick::new();
     let window = window.clone();
     press.connect_pressed(move |gesture, _, x, y| {
-        // Hand the drag to the compositor. Hyprland moves a floating
-        // window during its own frame, with the client out of the
-        // loop, which is why dragging one feels instant and why every
-        // attempt to move this window ourselves trailed by a frame:
-        // a client-positioned surface cannot be anywhere but one round
-        // trip behind the pointer.
+        // Hand the drag to the compositor. It moves the window during
+        // its own frame with the client out of the loop, which is why
+        // this feels instant where every attempt to move the window
+        // ourselves trailed: a client-positioned surface cannot be
+        // anywhere but one round trip behind the pointer.
+        //
+        // `xdg_toplevel.move` is the standard request every compositor
+        // implements, so this much works off Hyprland too.
         crate::ui::toolbars::dismiss_active_tooltip();
         let Some(surface) = window.surface() else {
             return;
