@@ -190,14 +190,56 @@ impl Blur {
     ///    result reads as a soft blur rather than a four-corner
     ///    gradient.
     ///
-    /// Fallback: if the rect is flush against any canvas edge we can't
-    /// sample a fringe outside the screenshot, so we degrade to solid
-    /// black. The "no interior pixel contributes" contract is preserved.
+    /// How far outside the rect to sample, in canvas pixels: past the
+    /// selection glow, which reaches a full halo width beyond the
+    /// edge (a `halo`-wide stroke centred on a path inflated by half
+    /// of it), plus a couple of pixels for the stroke's antialiasing.
+    ///
+    /// Applied whether or not this blur is currently selected, so the
+    /// region doesn't change colour when you click it — and so the
+    /// cached image stays valid across a selection change.
+    fn fringe_gap(canvas: &femtovg::Canvas<femtovg::renderer::OpenGl>) -> usize {
+        let dpr = crate::femtovg_area::current_device_pixel_ratio();
+        let scale = canvas.transform().average_scale().max(0.0001);
+        let glow_canvas_px = super::halo_in_image_units(canvas, dpr) * scale;
+        glow_canvas_px.ceil().max(0.0) as usize + 2
+    }
+
+    /// The widest sampling gap up to `desired` that keeps the whole
+    /// band inside the canvas, or `None` when not even one pixel fits.
+    fn fitting_gap(
+        desired: usize,
+        pos_x: usize,
+        pos_y: usize,
+        width: usize,
+        height: usize,
+        canvas_w: usize,
+        canvas_h: usize,
+    ) -> Option<usize> {
+        let room = pos_x
+            .min(pos_y)
+            .min(canvas_w.saturating_sub(pos_x + width))
+            .min(canvas_h.saturating_sub(pos_y + height));
+        let gap = desired.min(room);
+        (gap >= 1).then_some(gap)
+    }
+
+    /// The fringe is sampled `gap` pixels out rather than one, because
+    /// a selected annotation's glow is painted immediately before it
+    /// draws — so the pixels touching the rect are halo blue, and
+    /// seeding from them turned the whole region blue. `gap` steps
+    /// clear of the glow and lands on the wallpaper the region is
+    /// supposed to blend into.
+    ///
+    /// Fallback: if the rect is too close to a canvas edge to sample a
+    /// fringe outside the screenshot, we degrade to solid black. The
+    /// "no interior pixel contributes" contract is preserved.
     fn secure_blur(
         canvas: &mut femtovg::Canvas<femtovg::renderer::OpenGl>,
         pos: Vec2D,
         size: Vec2D,
         sigma: f32,
+        gap: usize,
     ) -> Result<ImageId> {
         let (pos_x, pos_y, width, height) = Self::canvas_region(canvas, pos, size)
             .ok_or_else(|| anyhow!("blur region off-canvas"))?;
@@ -205,26 +247,35 @@ impl Blur {
         let canvas_w = canvas.width() as usize;
         let canvas_h = canvas.height() as usize;
 
-        if pos_x < 1 || pos_y < 1 || pos_x + width + 1 >= canvas_w || pos_y + height + 1 >= canvas_h
-        {
+        // Near an edge there may not be room for the full step-out.
+        // Take the widest that fits rather than falling back to black:
+        // a fringe one pixel from the glow still beats a black box.
+        let gap = Self::fitting_gap(gap, pos_x, pos_y, width, height, canvas_w, canvas_h);
+        let Some(gap) = gap else {
             let buf = vec![RGBA8::new(0, 0, 0, 255); width * height];
             let img = Img::new(buf, width, height);
             return Ok(canvas.create_image(img.as_ref(), ImageFlags::empty())?);
-        }
+        };
 
-        // One readback of the rect plus its 1-px fringe, instead of the
-        // whole framebuffer. The fringes are then sliced out of it: row
-        // 0 and row `height + 1` are north/south, columns 0 and
-        // `width + 1` are west/east.
-        let outer =
-            crate::femtovg_area::read_framebuffer_region(canvas_h, pos_x - 1, pos_y - 1, width + 2, height + 2)
-                .ok_or_else(|| anyhow!("framebuffer readback failed"))?;
-        let outer_w = width + 2;
+        // One readback of the rect plus its surrounding band, instead
+        // of the whole framebuffer. The outermost ring of that band is
+        // then sliced out: its first and last rows are north/south, its
+        // first and last columns west/east.
+        let outer = crate::femtovg_area::read_framebuffer_region(
+            canvas_h,
+            pos_x - gap,
+            pos_y - gap,
+            width + 2 * gap,
+            height + 2 * gap,
+        )
+        .ok_or_else(|| anyhow!("framebuffer readback failed"))?;
+        let outer_w = width + 2 * gap;
+        let outer_h = height + 2 * gap;
         let px = outer.buf();
-        let north = |i: usize| px[1 + i];
-        let south = |i: usize| px[(height + 1) * outer_w + 1 + i];
-        let west = |j: usize| px[(j + 1) * outer_w];
-        let east = |j: usize| px[(j + 1) * outer_w + width + 1];
+        let north = |i: usize| px[gap + i];
+        let south = |i: usize| px[(outer_h - 1) * outer_w + gap + i];
+        let west = |j: usize| px[(j + gap) * outer_w];
+        let east = |j: usize| px[(j + gap) * outer_w + outer_w - 1];
 
         let mut out: Vec<RGBA8> = Vec::with_capacity(width * height);
         let w_f = width as f32;
@@ -474,6 +525,7 @@ impl Drawable for Blur {
                         self.style
                             .size
                             .to_blur_factor(self.style.annotation_size_factor),
+                        Self::fringe_gap(canvas),
                     ),
                     BlurStyle::Pixelate => Self::pixelate(
                         canvas,
@@ -726,5 +778,33 @@ impl Tool for BlurTool {
 
     fn set_blur_style(&mut self, style: BlurStyle) {
         self.blur_style = style;
+    }
+}
+
+#[cfg(test)]
+mod fringe_tests {
+    use super::Blur;
+
+    /// A region with room all round samples at the full step-out.
+    #[test]
+    fn a_roomy_region_gets_the_gap_it_asked_for() {
+        assert_eq!(Blur::fitting_gap(8, 100, 100, 200, 200, 1000, 1000), Some(8));
+    }
+
+    /// Near an edge, take the widest band that still fits rather than
+    /// reading outside the framebuffer.
+    #[test]
+    fn a_region_near_an_edge_narrows_the_band() {
+        assert_eq!(Blur::fitting_gap(8, 3, 100, 200, 200, 1000, 1000), Some(3));
+        assert_eq!(Blur::fitting_gap(8, 100, 100, 200, 200, 305, 1000), Some(5));
+    }
+
+    /// Flush against an edge there is no fringe at all, which is the
+    /// caller's signal to black the region out instead of seeding it
+    /// from pixels it isn't allowed to read.
+    #[test]
+    fn a_flush_region_has_no_fringe() {
+        assert_eq!(Blur::fitting_gap(8, 0, 100, 200, 200, 1000, 1000), None);
+        assert_eq!(Blur::fitting_gap(8, 100, 100, 200, 200, 300, 1000), None);
     }
 }
