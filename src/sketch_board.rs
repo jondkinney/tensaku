@@ -374,6 +374,43 @@ pub enum InputEvent {
     Text(TextEventMsg),
 }
 
+/// Modifiers we refuse to believe until a key event has confirmed them.
+///
+/// These are the ones that change what a gesture means: Shift
+/// constrains, Alt centres, Ctrl zooms.
+const UNTRUSTED_UNTIL_CONFIRMED: ModifierType = ModifierType::SHIFT_MASK
+    .union(ModifierType::CONTROL_MASK)
+    .union(ModifierType::ALT_MASK);
+
+/// Modifier state to act on, given what the pointer event reported and
+/// whether a key event has confirmed the keyboard state yet.
+///
+/// Tensaku is launched from a screenshot keybind. If that bind carries
+/// modifiers — Omarchy's own suggestions include chords like
+/// `SUPER + SHIFT + S` — the window takes focus while they are still
+/// physically down, and their RELEASE goes to the compositor that owns
+/// the binding rather than to us. So we are told they are held, and go
+/// on being told until some later key event refreshes the state.
+///
+/// That makes the first gesture of a capture come out wrong: the first
+/// rectangle a square, the first shape centred on the press instead of
+/// cornered at it. Any keypress clears it, which is why it reads as
+/// "sometimes the first thing I do is wrong" rather than a reproducible
+/// bug — and whether you ever see it depends entirely on which bind you
+/// launched from.
+///
+/// So don't trust a modifier we have never seen arrive. The cost is
+/// that a deliberate Shift-drag as the very first action of a session
+/// goes unconstrained; that is rarer than launching from a modified
+/// bind, and it is one undo away.
+fn trusted_modifiers(reported: ModifierType, keyboard_confirmed: bool) -> ModifierType {
+    if keyboard_confirmed {
+        reported
+    } else {
+        reported - UNTRUSTED_UNTIL_CONFIRMED
+    }
+}
+
 // from https://flatuicolors.com/palette/au
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
@@ -615,6 +652,10 @@ fn apply_size_steps(mut size: crate::style::Size, steps: i32) -> crate::style::S
 
 pub struct SketchBoard {
     renderer: FemtoVGArea,
+    /// Set by the first key event of the session. Until then the
+    /// modifiers a pointer event reports are not believed — see
+    /// [`trusted_modifiers`].
+    keyboard_confirmed: bool,
     active_tool: Rc<RefCell<dyn Tool>>,
     tools: ToolsManager,
     style: Style,
@@ -4699,6 +4740,23 @@ impl Component for SketchBoard {
             },
             _ => None,
         };
+        // A key event tells us what is actually held; a pointer event
+        // before one cannot be trusted about it. See
+        // [`trusted_modifiers`].
+        if matches!(
+            &msg,
+            SketchBoardInput::InputEvent(InputEvent::Key(_) | InputEvent::KeyRelease(_))
+        ) {
+            self.keyboard_confirmed = true;
+        }
+        let msg = match msg {
+            SketchBoardInput::InputEvent(InputEvent::Mouse(mut me)) => {
+                me.modifier = trusted_modifiers(me.modifier, self.keyboard_confirmed);
+                SketchBoardInput::InputEvent(InputEvent::Mouse(me))
+            }
+            other => other,
+        };
+
         // handle resize ourselves, pass everything else to tool
         let result = match msg {
             SketchBoardInput::InputEvent(mut ie) => {
@@ -5729,6 +5787,7 @@ impl Component for SketchBoard {
 
         let mut model = Self {
             renderer: FemtoVGArea::default(),
+            keyboard_confirmed: false,
             active_tool: tools.get(&initial_tool),
             style: Style {
                 color: crate::state::initial_color(),
@@ -6161,5 +6220,46 @@ mod tests {
         fs::create_dir_all(&saved_dir).expect("create saved dir");
 
         SketchBoard::write_save_as_last_dir(temp.path(), &saved_dir.join("image.png"));
+    }
+}
+
+#[cfg(test)]
+mod launch_chord_tests {
+    use super::{ModifierType, trusted_modifiers};
+
+    /// Before any key event, the gesture-changing modifiers are not
+    /// believed — this is the stale state left by a launch chord whose
+    /// release went to the compositor.
+    #[test]
+    fn gesture_modifiers_are_ignored_until_a_key_confirms_them() {
+        for reported in [
+            ModifierType::SHIFT_MASK,
+            ModifierType::CONTROL_MASK,
+            ModifierType::ALT_MASK,
+            ModifierType::SHIFT_MASK | ModifierType::ALT_MASK,
+        ] {
+            assert_eq!(trusted_modifiers(reported, false), ModifierType::empty());
+        }
+    }
+
+    /// Once a key event has told us what is held, the reported state is
+    /// taken at face value again.
+    #[test]
+    fn everything_is_believed_once_confirmed() {
+        let held = ModifierType::SHIFT_MASK | ModifierType::CONTROL_MASK;
+        assert_eq!(trusted_modifiers(held, true), held);
+    }
+
+    /// Only the modifiers that change what a gesture means are
+    /// suppressed. Anything else a pointer event carries — button
+    /// state, Super, lock state — passes through untouched, so this
+    /// cannot disturb unrelated handling.
+    #[test]
+    fn unrelated_state_is_never_stripped() {
+        let other = ModifierType::SUPER_MASK | ModifierType::BUTTON1_MASK | ModifierType::LOCK_MASK;
+        assert_eq!(trusted_modifiers(other, false), other);
+        // ...and a mix keeps the harmless half.
+        let mixed = other | ModifierType::SHIFT_MASK;
+        assert_eq!(trusted_modifiers(mixed, false), other);
     }
 }
