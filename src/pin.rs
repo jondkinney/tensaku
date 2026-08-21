@@ -19,10 +19,12 @@
 //!   movable. Nothing is serialised and nothing is flattened; the
 //!   cost is that the pin lasts as long as the process does.
 
+use crate::ui::toolbars::RobustTooltipExt;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use relm4::gtk::{self, gdk_pixbuf::Pixbuf, prelude::*};
 use std::cell::Cell;
 use std::rc::Rc;
+use std::time::Duration;
 
 /// Width of a pinned capture, in CSS pixels. Height follows the
 /// image's aspect. Big enough to read a line of text in a terminal
@@ -31,6 +33,10 @@ const PIN_WIDTH: i32 = 280;
 
 /// Gap between the pin and the screen edge it starts anchored to.
 const EDGE_MARGIN: i32 = 24;
+
+/// How long a confirmation stays up. Long enough to read two words,
+/// short enough that it doesn't sit on the image.
+const TOAST_MS: u64 = 1400;
 
 /// What the pin can do to the session that owns it.
 pub struct PinActions {
@@ -46,10 +52,28 @@ pub struct PinActions {
     /// "where is this file" is a question you ask of a pinned shot
     /// whether or not you remembered to save it first.
     pub path_known: bool,
+    /// The saved file, when there is one. Only the drag-out needs the
+    /// path itself: a drop target that takes files wants a file, and
+    /// there isn't one to offer until the shot has been saved.
+    pub saved_path: Option<String>,
+}
+
+/// Flash a short message over the pinned image.
+pub type Toast = Rc<dyn Fn(&str)>;
+
+/// A live pin: the window, and a handle for confirming what its
+/// buttons did.
+pub struct Pin {
+    pub window: gtk::Window,
+    /// Flash a short message over the image. Called when a copy
+    /// actually lands, not when its button is pressed — copying a path
+    /// can wait on a Save As dialog, and a confirmation shown before
+    /// the thing happens is just a lie with good timing.
+    pub toast: Toast,
 }
 
 /// Build and show the pin window for `image`.
-pub fn open(image: &Pixbuf, actions: PinActions) -> gtk::Window {
+pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
     let window = gtk::Window::builder()
         .resizable(false)
         .decorated(false)
@@ -84,8 +108,11 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> gtk::Window {
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(&picture));
 
-    let controls = build_controls(&window, actions);
+    let controls = build_controls(&window, image, actions);
     overlay.add_overlay(&controls);
+
+    let (toast_label, toast) = build_toast();
+    overlay.add_overlay(&toast_label);
 
     // The toolbar is furniture: it would cover the top of the image it
     // describes, so it appears on hover and gets out of the way again.
@@ -105,7 +132,38 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> gtk::Window {
 
     window.set_child(Some(&overlay));
     window.present();
-    window
+    Pin { window, toast }
+}
+
+/// The confirmation strip and the closure that flashes it.
+fn build_toast() -> (gtk::Label, Toast) {
+    let label = gtk::Label::new(None);
+    label.add_css_class("pin-toast");
+    label.set_halign(gtk::Align::Center);
+    label.set_valign(gtk::Align::End);
+    label.set_margin_bottom(10);
+    label.set_visible(false);
+
+    // Each showing takes a ticket; a timer only hides the toast if its
+    // ticket is still the current one. Without that, two copies in
+    // quick succession would have the first timer hide the second
+    // message early.
+    let generation = Rc::new(Cell::new(0u64));
+    let label_for_show = label.clone();
+    let show = move |message: &str| {
+        label_for_show.set_text(message);
+        label_for_show.set_visible(true);
+        let ticket = generation.get().wrapping_add(1);
+        generation.set(ticket);
+        let label = label_for_show.clone();
+        let generation = generation.clone();
+        relm4::gtk::glib::timeout_add_local_once(Duration::from_millis(TOAST_MS), move || {
+            if generation.get() == ticket {
+                label.set_visible(false);
+            }
+        });
+    };
+    (label, Rc::new(show))
 }
 
 /// Fit `PIN_WIDTH` while keeping the capture's aspect, and never let a
@@ -122,7 +180,7 @@ fn scaled_size(image_width: i32, image_height: i32) -> (i32, i32) {
 }
 
 /// The hover toolbar: edit, copy, copy path, close.
-fn build_controls(window: &gtk::Window, actions: PinActions) -> gtk::Box {
+fn build_controls(window: &gtk::Window, image: &Pixbuf, actions: PinActions) -> gtk::Box {
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     controls.add_css_class("pin-controls");
     controls.set_halign(gtk::Align::End);
@@ -135,7 +193,10 @@ fn build_controls(window: &gtk::Window, actions: PinActions) -> gtk::Box {
         b.add_css_class("flat");
         b.set_focusable(false);
         b.set_focus_on_click(false);
-        b.set_tooltip_text(Some(tooltip));
+        // The app's own tooltips, not GTK's: stock ones strand
+        // themselves open when a `leave` goes missing, which on a
+        // hover-revealed toolbar is every time it hides.
+        b.install_tooltip(tooltip);
         b
     };
 
@@ -144,7 +205,24 @@ fn build_controls(window: &gtk::Window, actions: PinActions) -> gtk::Box {
         on_copy,
         on_copy_path,
         path_known,
+        saved_path,
     } = actions;
+
+    // Drag-out handle. It needs a control of its own because the image
+    // itself already drags — that moves the pin — and one gesture
+    // can't mean both "take this file somewhere" and "put this window
+    // somewhere".
+    let drag_out = button(
+        "re-order-dots-horizontal-regular",
+        if saved_path.is_some() {
+            "Drag the file out"
+        } else {
+            "Drag the image out"
+        },
+    );
+    drag_out.add_css_class("pin-drag-handle");
+    install_drag_out(&drag_out, image, saved_path);
+    controls.append(&drag_out);
 
     let edit = button("pen-regular", "Edit again");
     edit.connect_clicked(move |_| on_edit());
@@ -162,10 +240,7 @@ fn build_controls(window: &gtk::Window, actions: PinActions) -> gtk::Box {
             "Save the shot, then copy its path"
         },
     );
-    copy_path.connect_clicked(move |btn| {
-        on_copy_path();
-        btn.set_tooltip_text(Some("Path copied"));
-    });
+    copy_path.connect_clicked(move |_| on_copy_path());
     controls.append(&copy_path);
 
     let close = button("dismiss-regular", "Close");
@@ -174,6 +249,40 @@ fn build_controls(window: &gtk::Window, actions: PinActions) -> gtk::Box {
     controls.append(&close);
 
     controls
+}
+
+/// Carry the shot out of the pin and into another application.
+///
+/// Two payloads where possible: the file, which is what a file manager
+/// or an upload field wants, and the image itself, which is what a
+/// chat window or an editor takes. An unsaved pin has no file to
+/// offer, so it drags the image alone rather than a path to nothing.
+fn install_drag_out(handle: &gtk::Button, image: &Pixbuf, saved_path: Option<String>) {
+    let texture = gtk::gdk::Texture::for_pixbuf(image);
+    let source = gtk::DragSource::new();
+    source.set_actions(gtk::gdk::DragAction::COPY);
+
+    let provider = match saved_path {
+        Some(path) => {
+            let file = gtk::gio::File::for_path(&path);
+            gtk::gdk::ContentProvider::new_union(&[
+                gtk::gdk::ContentProvider::for_value(&file.to_value()),
+                gtk::gdk::ContentProvider::for_value(&texture.to_value()),
+                gtk::gdk::ContentProvider::for_value(&path.to_value()),
+            ])
+        }
+        None => gtk::gdk::ContentProvider::for_value(&texture.to_value()),
+    };
+    source.set_content(Some(&provider));
+
+    // The dragged image follows the pointer, so the drop lands where
+    // the picture is rather than where an invisible hotspot happens to
+    // be. Scaled down for the same reason a drag icon always is.
+    let (icon_w, icon_h) = scaled_size(image.width(), image.height());
+    source.connect_drag_begin(move |source, _| {
+        source.set_icon(Some(&texture), icon_w / 2, icon_h / 2);
+    });
+    handle.add_controller(source);
 }
 
 /// Drag the pin around by its image.

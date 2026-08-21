@@ -548,6 +548,27 @@ dropdown.compact-control > button.combo {
   padding: 2px;
 }
 
+/* Confirmation strip: sits over the bottom of the pinned image for a
+   moment after a copy lands. Same scrim as the controls so the two
+   read as one piece of furniture. */
+.pin-toast {
+  background: rgba(0, 0, 0, 0.65);
+  border-radius: 6px;
+  color: #ffffff;
+  font-size: 0.85em;
+  padding: 3px 10px;
+}
+
+/* The drag handle reads as a grip rather than a command: same size as
+   its neighbours, dimmer until hovered. */
+.pin-drag-handle {
+  opacity: 0.7;
+}
+
+.pin-drag-handle:hover {
+  opacity: 1;
+}
+
 .pin-controls button {
   min-width: 26px;
   min-height: 26px;

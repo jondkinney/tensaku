@@ -80,6 +80,10 @@ pub enum SketchBoardInput {
     ExitCropToPreviousTool,
     /// Mirror the current `style.fill` out to the StyleToolbar after
     /// a programmatic toggle (the `F` keyboard shortcut routes
+    /// The pinned window's Edit button: close the pin and hand the
+    /// editor back.
+    PinEdit,
+
     /// The pinned window's Copy-path button.
     PinCopyPath,
 
@@ -691,9 +695,10 @@ pub struct SketchBoard {
     style: Style,
     im_context: gtk::IMMulticontext,
     last_saved_filepath: RefCell<Option<String>>,
-    /// The pinned window, held so it outlives this call. Dropping the
-    /// handle would close the pin the moment it opened.
-    pinned_window: RefCell<Option<gtk::Window>>,
+    /// The live pin, held so it outlives the call that made it —
+    /// dropping the handle would close the window the moment it
+    /// opened — and so a completed copy can confirm itself on it.
+    pinned: RefCell<Option<crate::pin::Pin>>,
     /// Last (selected drawable id, size, size-factor) tuple we pushed
     /// to the toolbar via `SelectionStyleChanged`. We re-emit when
     /// any of these change — flips of the active selection AND
@@ -1459,6 +1464,15 @@ impl SketchBoard {
         self.save_bytes_to_external_process(texture.save_to_png_bytes().as_ref(), command)
     }
 
+    /// Flash a confirmation on the pin, if one is up. Called where a
+    /// copy succeeds rather than where its button is pressed, so the
+    /// message describes something that has happened.
+    fn confirm_on_pin(&self, message: &str) {
+        if let Some(pin) = self.pinned.borrow().as_ref() {
+            (pin.toast)(message);
+        }
+    }
+
     /// Put `image` in a pinned window and tell App to step aside.
     ///
     /// The pin is built here rather than in App because this is where
@@ -1470,12 +1484,12 @@ impl SketchBoard {
         let copy_image = image.clone();
         let copy_sender = sender.input_sender().clone();
         let path_sender = sender.input_sender().clone();
-        let edit_sender = sender.output_sender().clone();
-        let window = crate::pin::open(
+        let edit_sender = sender.input_sender().clone();
+        let pin = crate::pin::open(
             image,
             crate::pin::PinActions {
                 on_edit: Box::new(move || {
-                    edit_sender.emit(SketchBoardOutput::PinEditRequested);
+                    edit_sender.emit(SketchBoardInput::PinEdit);
                 }),
                 // Routed back through the ordinary copy path so a pinned
                 // copy is byte-identical to one made from the editor,
@@ -1488,9 +1502,10 @@ impl SketchBoard {
                     path_sender.emit(SketchBoardInput::PinCopyPath);
                 }),
                 path_known: self.last_saved_filepath.borrow().is_some(),
+                saved_path: self.last_saved_filepath.borrow().clone(),
             },
         );
-        *self.pinned_window.borrow_mut() = Some(window);
+        *self.pinned.borrow_mut() = Some(pin);
         sender.output_sender().emit(SketchBoardOutput::PinOpened);
     }
 
@@ -1518,6 +1533,7 @@ impl SketchBoard {
         match result {
             Err(e) => println!("Error saving {e}"),
             Ok(()) => {
+                self.confirm_on_pin("Copied image");
                 log_result(
                     "Copied to clipboard.",
                     !APP_CONFIG.read().disable_notifications(),
@@ -1554,10 +1570,13 @@ impl SketchBoard {
                 &format!("Error copying filepath: {e}"),
                 !APP_CONFIG.read().disable_notifications(),
             ),
-            Ok(()) => log_result(
-                &format!("Filepath copied to clipboard: {}", filepath),
-                !APP_CONFIG.read().disable_notifications(),
-            ),
+            Ok(()) => {
+                self.confirm_on_pin("Copied path");
+                log_result(
+                    &format!("Filepath copied to clipboard: {}", filepath),
+                    !APP_CONFIG.read().disable_notifications(),
+                )
+            }
         }
     }
 
@@ -5813,6 +5832,18 @@ impl Component for SketchBoard {
                 });
                 ToolUpdateResult::Unmodified
             }
+            SketchBoardInput::PinEdit => {
+                // Take the pin down on the way back to the editor: two
+                // views of the same document, one of them stale the
+                // moment the other is edited.
+                if let Some(pin) = self.pinned.borrow_mut().take() {
+                    pin.window.close();
+                }
+                sender
+                    .output_sender()
+                    .emit(SketchBoardOutput::PinEditRequested);
+                ToolUpdateResult::Unmodified
+            }
             SketchBoardInput::PinCopyPath => {
                 // A pinned shot has often never been saved, so the
                 // path it would be copied from doesn't exist yet.
@@ -6282,7 +6313,7 @@ impl Component for SketchBoard {
             tools,
             im_context,
             last_saved_filepath: RefCell::new(None),
-            pinned_window: RefCell::new(None),
+            pinned: RefCell::new(None),
             last_synced_selection: None,
             last_was_multi_selection: false,
             tool_before_crop: None,

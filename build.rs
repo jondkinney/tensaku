@@ -104,6 +104,9 @@ fn main() -> Result<(), io::Error> {
             "pin-regular",
             "dismiss-regular",
             "link-regular",
+            // The pin's drag-out handle: six dots, the same shape file
+            // managers use for "pick this up and take it somewhere".
+            "re-order-dots-horizontal-regular",
             // (The arrow-style picker uses cairo-drawn previews
             // matching the real arrow shapes; no icons needed.)
             // Layer-panel toggle button (F7).
