@@ -143,31 +143,27 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
 
     // Float it, show it on every workspace, and put it in its slot —
     // once it has a surface for the compositor to match on.
-    if on_hyprland() {
-        let slot = next_slot();
+    let desktop = Desktop::detect();
+    if desktop.places_windows() {
+        let slot = next_slot(desktop);
         window.connect_map(move |_| {
             // Not immediately: `map` is this side's word for "shown",
             // and the compositor has not necessarily registered the
-            // window under its title yet — dispatches sent then report
-            // success and do nothing, which is how a pin ended up
-            // centred and unpinned. Retry until it is there.
+            // window under its title yet — a request naming a window
+            // that isn't there reports success and does nothing, which
+            // is how a pin ended up centred and unpinned. Retry until
+            // it is there.
             let attempts = Cell::new(0);
             gtk::glib::timeout_add_local(SETTLE_INTERVAL, move || {
                 attempts.set(attempts.get() + 1);
-                if !pin_window_exists() {
+                if !desktop.sees_pin() {
                     return if attempts.get() < SETTLE_ATTEMPTS {
                         gtk::glib::ControlFlow::Continue
                     } else {
                         gtk::glib::ControlFlow::Break
                     };
                 }
-                // Floating first: a tiled window has no position of
-                // its own to set. Then pinned, so it stays put as you
-                // move between workspaces, which is most of what a pin
-                // is for.
-                hypr_dispatch(&format!("hl.dsp.window.float({{ {} }})", pin_selector()));
-                hypr_dispatch(&format!("hl.dsp.window.pin({{ {} }})", pin_selector()));
-                place_in_slot(slot);
+                desktop.arrange(slot);
                 gtk::glib::ControlFlow::Break
             });
         });
@@ -190,7 +186,7 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
     // the pin brings its own edge rather than reading as a picture
     // lying loose on the desktop.
     let overlay = gtk::Overlay::new();
-    if on_hyprland() {
+    if desktop.places_windows() {
         overlay.set_child(Some(&picture));
     } else {
         let frame = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -298,13 +294,177 @@ fn pin_title() -> String {
     format!("{PIN_TITLE} {}", std::process::id())
 }
 
-/// Whether the compositor is Hyprland, and so whether the pin can ask
-/// to be floated, pinned and placed.
+/// The compositors this pin knows how to ask for placement.
 ///
-/// Everything gated on this is a nicety: without it the pin still
-/// opens, still drags, and still does everything its toolbar offers.
-fn on_hyprland() -> bool {
-    std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some()
+/// Wayland has no protocol for a window to position itself — that is
+/// deliberate, and every corner-placed window on Wayland goes through
+/// compositor-specific IPC. So this is a short list rather than a
+/// capability check, and everything gated on it is a nicety: an
+/// unrecognised compositor still gets a pin that opens, drags, edits,
+/// copies and drags out. It just lands where the compositor decides.
+#[derive(Clone, Copy, PartialEq)]
+enum Desktop {
+    Hyprland,
+    Sway,
+    Unknown,
+}
+
+impl Desktop {
+    fn detect() -> Self {
+        if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
+            Desktop::Hyprland
+        } else if std::env::var_os("SWAYSOCK").is_some() {
+            Desktop::Sway
+        } else {
+            Desktop::Unknown
+        }
+    }
+
+    fn places_windows(self) -> bool {
+        self != Desktop::Unknown
+    }
+
+    /// Float this pin, show it on every workspace, and put it in
+    /// `slot`.
+    ///
+    /// Floating first in both: a tiled window has no position of its
+    /// own to set.
+    fn arrange(self, slot: i32) {
+        let Some((screen_w, screen_h)) = self.screen_size() else {
+            return;
+        };
+        let (frame_w, frame_h) = pin_size();
+        let x = screen_w - EDGE_MARGIN - frame_w;
+        let y = screen_h - EDGE_MARGIN - frame_h - slot * pin_step();
+        match self {
+            Desktop::Hyprland => {
+                let selector = format!("window = \"title:^({})$\"", pin_title());
+                hypr_dispatch(&format!("hl.dsp.window.float({{ {selector} }})"));
+                hypr_dispatch(&format!("hl.dsp.window.pin({{ {selector} }})"));
+                hypr_dispatch(&format!(
+                    "hl.dsp.window.move({{ x = {x}, y = {y}, relative = false, {selector} }})"
+                ));
+            }
+            Desktop::Sway => {
+                sway_command(&format!(
+                    "[title=\"^{}$\"] floating enable, sticky enable, \
+                     move absolute position {x} {y}",
+                    pin_title()
+                ));
+            }
+            Desktop::Unknown => {}
+        }
+    }
+
+    /// The focused output's size in logical pixels.
+    fn screen_size(self) -> Option<(i32, i32)> {
+        match self {
+            Desktop::Hyprland => {
+                let monitor = crate::display::hyprland_focused_monitor()?;
+                // Hyprland reports device pixels; windows are placed
+                // in logical ones.
+                let scale = (monitor.scale as f64).max(0.0001);
+                Some((
+                    (monitor.width as f64 / scale).round() as i32,
+                    (monitor.height as f64 / scale).round() as i32,
+                ))
+            }
+            Desktop::Sway => {
+                let outputs: serde_json::Value =
+                    serde_json::from_str(&sway_query("get_outputs")?).ok()?;
+                let focused = outputs
+                    .as_array()?
+                    .iter()
+                    .find(|o| o.get("focused").and_then(|f| f.as_bool()) == Some(true))?;
+                // Sway's rect is already logical.
+                let rect = focused.get("rect")?;
+                Some((
+                    rect.get("width")?.as_i64()? as i32,
+                    rect.get("height")?.as_i64()? as i32,
+                ))
+            }
+            Desktop::Unknown => None,
+        }
+    }
+
+    /// Where every pin currently sits, in logical pixels.
+    fn pin_rects(self) -> Vec<(i32, i32, i32, i32)> {
+        match self {
+            Desktop::Hyprland => hyprland_pin_rects(),
+            Desktop::Sway => sway_pin_rects(),
+            Desktop::Unknown => Vec::new(),
+        }
+    }
+
+    /// Whether this pin's window has reached the compositor yet.
+    fn sees_pin(self) -> bool {
+        let listing = match self {
+            Desktop::Hyprland => {
+                let output = std::process::Command::new("hyprctl")
+                    .args(["-j", "clients"])
+                    .output()
+                    .ok();
+                output.map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            }
+            Desktop::Sway => sway_query("get_tree"),
+            Desktop::Unknown => None,
+        };
+        listing.is_some_and(|text| text.contains(&pin_title()))
+    }
+}
+
+/// Run one sway command, best-effort.
+fn sway_command(command: &str) {
+    let _ = std::process::Command::new("swaymsg").arg(command).output();
+}
+
+/// Ask sway for one of its JSON trees.
+fn sway_query(kind: &str) -> Option<String> {
+    let output = std::process::Command::new("swaymsg")
+        .args(["-t", kind, "-r"])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Every pin in sway's tree, with its geometry.
+///
+/// The tree is nested, so this walks it: a floating pin hangs off a
+/// workspace's floating list rather than sitting beside the tiled
+/// windows.
+fn sway_pin_rects() -> Vec<(i32, i32, i32, i32)> {
+    let Some(text) = sway_query("get_tree") else {
+        return Vec::new();
+    };
+    let Ok(tree) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    let mut pending = vec![tree];
+    while let Some(node) = pending.pop() {
+        if node
+            .get("name")
+            .and_then(|n| n.as_str())
+            .is_some_and(|name| name.starts_with(PIN_TITLE))
+            && let Some(rect) = node.get("rect")
+        {
+            let field = |key: &str| rect.get(key)?.as_i64().map(|v| v as i32);
+            if let (Some(x), Some(y), Some(w), Some(h)) =
+                (field("x"), field("y"), field("width"), field("height"))
+            {
+                found.push((x, y, w, h));
+            }
+        }
+        for key in ["nodes", "floating_nodes"] {
+            if let Some(children) = node.get(key).and_then(|c| c.as_array()) {
+                pending.extend(children.iter().cloned());
+            }
+        }
+    }
+    found
 }
 
 /// Run one Hyprland dispatcher, best-effort.
@@ -324,41 +484,6 @@ fn hypr_dispatch(expression: &str) {
         .arg("dispatch")
         .arg(expression)
         .output();
-}
-
-/// Whether the compositor has this pin's window yet.
-fn pin_window_exists() -> bool {
-    let Ok(output) = std::process::Command::new("hyprctl")
-        .args(["-j", "clients"])
-        .output()
-    else {
-        return false;
-    };
-    String::from_utf8_lossy(&output.stdout).contains(&pin_title())
-}
-
-/// How a dispatcher names this pin, and only this pin.
-fn pin_selector() -> String {
-    format!("window = \"title:^({})$\"", pin_title())
-}
-
-/// Put the pin in `slot`, counting up from the bottom-right corner.
-fn place_in_slot(slot: i32) {
-    let Some(monitor) = crate::display::hyprland_focused_monitor() else {
-        return;
-    };
-    let scale = (monitor.scale as f64).max(0.0001);
-    let (screen_w, screen_h) = (
-        (monitor.width as f64 / scale).round() as i32,
-        (monitor.height as f64 / scale).round() as i32,
-    );
-    let (frame_w, frame_h) = pin_size();
-    let x = screen_w - EDGE_MARGIN - frame_w;
-    let y = screen_h - EDGE_MARGIN - frame_h - slot * pin_step();
-    hypr_dispatch(&format!(
-        "hl.dsp.window.move({{ x = {x}, y = {y}, relative = false, {} }})",
-        pin_selector()
-    ));
 }
 
 /// How far apart stacked pins sit, centre to centre.
@@ -402,31 +527,33 @@ fn first_free_slot(occupied: &[i32]) -> i32 {
 /// tell a pin that has been dragged away from one that hasn't. A
 /// compositor that can't be asked answers zero, and the new pin lands
 /// in the corner like the first one.
-fn next_slot() -> i32 {
+fn next_slot(desktop: Desktop) -> i32 {
+    let Some(screen) = desktop.screen_size() else {
+        return 0;
+    };
+    let occupied: Vec<i32> = desktop
+        .pin_rects()
+        .into_iter()
+        .filter_map(|rect| slot_of(rect, screen))
+        .collect();
+    first_free_slot(&occupied)
+}
+
+/// Every pin Hyprland knows about, with its geometry.
+fn hyprland_pin_rects() -> Vec<(i32, i32, i32, i32)> {
     let Ok(output) = std::process::Command::new("hyprctl")
         .args(["-j", "clients"])
         .output()
     else {
-        return 0;
+        return Vec::new();
     };
     let Ok(text) = String::from_utf8(output.stdout) else {
-        return 0;
+        return Vec::new();
     };
     let Ok(clients) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return 0;
+        return Vec::new();
     };
-    let Some(monitor) = crate::display::hyprland_focused_monitor() else {
-        return 0;
-    };
-    // The monitor reports device pixels; windows are placed in logical
-    // ones.
-    let scale = (monitor.scale as f64).max(0.0001);
-    let screen = (
-        (monitor.width as f64 / scale).round() as i32,
-        (monitor.height as f64 / scale).round() as i32,
-    );
-
-    let occupied: Vec<i32> = clients
+    clients
         .as_array()
         .into_iter()
         .flatten()
@@ -445,9 +572,7 @@ fn next_slot() -> i32 {
             let (w, h) = pair("size")?;
             Some((x, y, w, h))
         })
-        .filter_map(|rect| slot_of(rect, screen))
-        .collect();
-    first_free_slot(&occupied)
+        .collect()
 }
 
 /// A square thumbnail of `image` that fills `side` and centre-crops,
@@ -779,7 +904,10 @@ mod tests {
         let base = screen.1 - EDGE_MARGIN - frame_h;
         // Dragged left, and dragged up between two slots.
         assert_eq!(slot_of((x - 300, base, side, side), screen), None);
-        assert_eq!(slot_of((x, base - pin_step() / 2, side, side), screen), None);
+        assert_eq!(
+            slot_of((x, base - pin_step() / 2, side, side), screen),
+            None
+        );
     }
 
     /// The next pin takes the lowest gap, not the top of the pile.
