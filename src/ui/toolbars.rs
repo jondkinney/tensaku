@@ -5800,7 +5800,7 @@ impl Component for StyleToolbar {
             }
             StyleToolbarInput::SetFillShapes(fill) => {
                 // Mirror sketch_board's flipped `style.fill` (driven
-                // by the `F` keyboard shortcut) without broadcasting
+                // by double-tapping the shape's own key) without broadcasting
                 // back upstream — sketch_board has already applied
                 // the change everywhere it needs to land.
                 self.fill_shapes = fill;

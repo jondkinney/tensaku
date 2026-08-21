@@ -1987,6 +1987,24 @@ impl SketchBoard {
                     .output_sender()
                     .emit(SketchBoardOutput::TextBackgroundCycled(next));
             }
+            Tools::Rectangle | Tools::Ellipse => {
+                // A shape's own key, pressed twice, toggles ITS fill —
+                // `rr` for the rectangle, `ee` for the ellipse. These are
+                // the two tools with no style variants to cycle, so the
+                // double-tap did nothing for them, and fill is the
+                // setting a shape actually has.
+                //
+                // Routed through the existing `ToggleFill` event rather
+                // than flipping anything here, so the double-tap inherits
+                // everything the toolbar button already does: the
+                // per-shape session record, the toast, the icon refresh,
+                // forwarding to the active tool, and applying to a
+                // fillable selection. `is_cycle` only fires when this tool
+                // is already active, so the toggle always lands on the
+                // shape whose key was pressed.
+                sender.input(SketchBoardInput::ToolbarEvent(ToolbarEvent::ToggleFill));
+                sender.input(SketchBoardInput::SyncFillToToolbar);
+            }
             Tools::Highlighter => {
                 let next = self.cycle_seed_highlighter().next();
                 self.tools
@@ -2785,21 +2803,6 @@ impl SketchBoard {
                     sender.input(SketchBoardInput::new_text_event(TextEventMsg::Commit(
                         txt.to_string(),
                     )));
-                } else if txt == "f" || txt == "F" {
-                    // `F` toggles Fill Shape. Handled here (rather
-                    // than in the key-pressed chain below) because
-                    // GTK's IM context consumes printable letter
-                    // keys before they reach the EventControllerKey
-                    // path — same reason `p`, `c`, etc. tool
-                    // shortcuts are matched off `TextEventMsg::Commit`.
-                    // Route via the existing `ToggleFill` event so
-                    // sketch_board's `&mut self` handler does the
-                    // flip + dispatch, and follow up with a sync
-                    // signal to the toolbar (the button-click path
-                    // updates its own mirror locally; from a
-                    // keyboard toggle, we have to push instead).
-                    sender.input(SketchBoardInput::ToolbarEvent(ToolbarEvent::ToggleFill));
-                    sender.input(SketchBoardInput::SyncFillToToolbar);
                 } else if let Some(ch) = txt.chars().next()
                     && let Some(tool) = APP_CONFIG.read().keybinds().get_tool(ch)
                 {
