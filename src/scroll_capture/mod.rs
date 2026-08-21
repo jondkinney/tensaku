@@ -3410,10 +3410,16 @@ fn build_prompt_pill() -> gtk::Box {
     pill.add_css_class("scroll-capture-prompt");
     // Names the way out as well as the way in: this overlay is modal
     // and full-screen, and A is how you get to an ordinary capture
-    // without closing it and pressing a different keybind.
-    let label = gtk::Label::new(Some(
-        "Drag to capture the scrolling part of the screen  ·  A: normal capture",
-    ));
+    // without closing it and pressing a different keybind. The restore
+    // key is configurable, so the hint asks what it is rather than
+    // claiming R and being wrong for anyone who changed it.
+    let restore = crate::APP_CONFIG
+        .read()
+        .scroll_capture_restore_region_shortcut()
+        .to_string();
+    let label = gtk::Label::new(Some(&format!(
+        "Drag to capture the scrolling part of the screen  ·  {restore}: last region  ·  A: normal capture"
+    )));
     label.add_css_class("scroll-capture-prompt-label");
     pill.append(&label);
     pill
