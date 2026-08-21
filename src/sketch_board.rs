@@ -2585,6 +2585,17 @@ impl SketchBoard {
                 // Same no-auto-save rule as spotlight darkness.
                 self.dispatch_style_change()
             }
+            ToolbarEvent::SpotlightMagnificationChanged(value) => {
+                // Per-drawable, so this both sets what the next
+                // spotlight gets and applies to any selected one --
+                // the same path every other style field takes.
+                self.style.spotlight_magnification = value;
+                self.dispatch_style_change()
+            }
+            ToolbarEvent::SaveSpotlightMagnificationAsDefault => {
+                crate::state::save_spotlight_magnification(self.style.spotlight_magnification);
+                ToolUpdateResult::Unmodified
+            }
             ToolbarEvent::SaveSpotlightDarknessAsDefault => {
                 crate::state::save_spotlight_darkness(self.style.spotlight_darkness);
                 ToolUpdateResult::Unmodified

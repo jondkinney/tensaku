@@ -123,24 +123,6 @@ impl Blur {
 
     /// Canvas-pixel rect covered by `(pos, size)`, clamped to the
     /// framebuffer. `None` when nothing of it is on screen.
-    fn canvas_region(
-        canvas: &femtovg::Canvas<femtovg::renderer::OpenGl>,
-        pos: Vec2D,
-        size: Vec2D,
-    ) -> Option<(usize, usize, usize, usize)> {
-        let transform = canvas.transform();
-        let origin = transform.transform_point(pos.x, pos.y);
-        let extent = size * transform.average_scale();
-        let cw = canvas.width() as f32;
-        let ch = canvas.height() as f32;
-        let x0 = origin.0.floor().clamp(0.0, cw);
-        let y0 = origin.1.floor().clamp(0.0, ch);
-        let x1 = (origin.0 + extent.x).ceil().clamp(0.0, cw);
-        let y1 = (origin.1 + extent.y).ceil().clamp(0.0, ch);
-        let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
-        (w > 0 && h > 0).then_some((x0 as usize, y0 as usize, w, h))
-    }
-
     fn blur(
         canvas: &mut femtovg::Canvas<femtovg::renderer::OpenGl>,
         pos: Vec2D,
@@ -148,7 +130,7 @@ impl Blur {
         sigma: f32,
     ) -> Result<ImageId> {
         let (x, y, w, h) =
-            Self::canvas_region(canvas, pos, size).ok_or_else(|| anyhow!("blur region off-canvas"))?;
+            super::canvas_region(canvas, pos, size).ok_or_else(|| anyhow!("blur region off-canvas"))?;
         let sub = crate::femtovg_area::read_framebuffer_region(canvas.height() as usize, x, y, w, h)
             .ok_or_else(|| anyhow!("framebuffer readback failed"))?;
 
@@ -241,7 +223,7 @@ impl Blur {
         sigma: f32,
         gap: usize,
     ) -> Result<ImageId> {
-        let (pos_x, pos_y, width, height) = Self::canvas_region(canvas, pos, size)
+        let (pos_x, pos_y, width, height) = super::canvas_region(canvas, pos, size)
             .ok_or_else(|| anyhow!("blur region off-canvas"))?;
 
         let canvas_w = canvas.width() as usize;
@@ -350,7 +332,7 @@ impl Blur {
         size: Vec2D,
         cell_px: f32,
     ) -> Result<ImageId> {
-        let (x, y, src_w, src_h) = Self::canvas_region(canvas, pos, size)
+        let (x, y, src_w, src_h) = super::canvas_region(canvas, pos, size)
             .ok_or_else(|| anyhow!("blur region off-canvas"))?;
         let canvas_cell = (cell_px * canvas.transform().average_scale())
             .round()

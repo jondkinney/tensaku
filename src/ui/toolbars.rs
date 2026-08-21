@@ -1549,6 +1549,7 @@ pub struct StyleToolbar {
     /// Spotlight overlay darkness (0.10–0.90). Persisted across launches
     /// via state.rs; restored here on init.
     spotlight_darkness: f32,
+    spotlight_magnification: f32,
     /// Highlighter stroke opacity (0.10–1.00). Persisted likewise.
     highlighter_opacity: f32,
     /// Brush post-stroke smoothing iterations (Chaikin passes,
@@ -2128,6 +2129,8 @@ pub enum ToolbarEvent {
     /// User picked "Save as default" from the opacity slider's
     /// right-click menu — write the live value to state.toml.
     SaveHighlighterOpacityAsDefault,
+    SpotlightMagnificationChanged(f32),
+    SaveSpotlightMagnificationAsDefault,
     /// Brush post-stroke smoothing iterations (0–4 Chaikin passes).
     /// Applies on the very next stroke; in-flight stroke isn't
     /// re-smoothed.
@@ -2423,6 +2426,7 @@ pub enum StyleToolbarInput {
     /// reflects the saved default (or the user's overridden default)
     /// instead of the previous session's drag.
     SetSpotlightDarkness(f32),
+    SetSpotlightMagnification(f32),
     SetHighlighterOpacity(f32),
     SetBrushPostSmooth(usize),
     /// Re-read the persisted brush-smoothness default and re-position
@@ -5564,6 +5568,46 @@ impl Component for StyleToolbar {
                     } @spotlight_value_changed,
                 },
 
+                // Loupe factor. Sits beside Darkness because the two
+                // describe the same shape from opposite sides: how
+                // much the overlay hides, and how much the opening
+                // enlarges. 1x is the left end, so a spotlight is a
+                // plain spotlight until you ask for otherwise.
+                #[name(spotlight_magnify_slider)]
+                gtk::Scale {
+                    add_css_class: "compact-slider",
+                    set_orientation: gtk::Orientation::Horizontal,
+                    set_focusable: true,
+                    set_focus_on_click: false,
+                    set_hexpand: false,
+                    set_width_request: CLUSTER_SLIDER_WIDTH,
+                    set_valign: gtk::Align::Center,
+                    set_range: (
+                        crate::tools::MIN_SPOTLIGHT_MAGNIFICATION as f64,
+                        crate::tools::MAX_SPOTLIGHT_MAGNIFICATION as f64,
+                    ),
+                    set_increments: (0.05, 0.25),
+                    set_draw_value: false,
+                    #[watch]
+                    #[block_signal(spotlight_magnify_changed)]
+                    set_value: model.spotlight_magnification as f64,
+                    add_mark: (1.0, gtk::PositionType::Bottom, Some("Magnify")),
+                    #[watch]
+                    set_visible: model.current_tool == Tools::Spotlight,
+                    connect_value_changed[sender] => move |scale| {
+                        // Detent at 1x: the "off" end is the value
+                        // people return to, and it should not need a
+                        // pixel-precise drag to land on.
+                        let mut v = scale.value() as f32;
+                        if v < crate::tools::MIN_SPOTLIGHT_MAGNIFICATION + 0.06 {
+                            v = crate::tools::MIN_SPOTLIGHT_MAGNIFICATION;
+                            scale.set_value(v as f64);
+                        }
+                        sender.input_sender().emit(StyleToolbarInput::SetSpotlightMagnification(v));
+                        sender.output_sender().emit(ToolbarEvent::SpotlightMagnificationChanged(v));
+                    } @spotlight_magnify_changed,
+                },
+
                 #[name(highlighter_slider)]
                 gtk::Scale {
                     add_css_class: "compact-slider",
@@ -5785,6 +5829,7 @@ impl Component for StyleToolbar {
                 // selection and clobber its other style fields.
                 self.current_size = style.size;
                 self.fill_shapes = style.fill;
+                self.spotlight_magnification = style.spotlight_magnification;
                 if let Some(label) = &self.fill_tooltip_label {
                     label.set_text(fill_tooltip_text(self.fill_shapes));
                 }
@@ -5945,6 +5990,9 @@ impl Component for StyleToolbar {
                     }
                 }
             }
+            StyleToolbarInput::SetSpotlightMagnification(value) => {
+                self.spotlight_magnification = value;
+            }
             StyleToolbarInput::SetSpotlightDarkness(value) => {
                 // Slider widget's `set_value` is `#[watch]`ed on this
                 // field with the upstream signal blocked, so the
@@ -5993,6 +6041,7 @@ impl Component for StyleToolbar {
             visible: !APP_CONFIG.read().default_hide_toolbars(),
             current_tool: initial_tool,
             spotlight_darkness: crate::state::load_spotlight_darkness().unwrap_or(0.50),
+            spotlight_magnification: crate::state::load_spotlight_magnification().unwrap_or(1.0),
             highlighter_opacity: crate::state::load_highlighter_opacity().unwrap_or(0.40),
             brush_post_smooth_iterations: crate::state::load_brush_post_smooth_iterations()
                 .unwrap_or_else(|| APP_CONFIG.read().brush_post_smooth_iterations()),
@@ -6157,6 +6206,13 @@ impl Component for StyleToolbar {
             attach_save_default_popover(&widgets.spotlight_slider, move || {
                 s.output_sender()
                     .emit(ToolbarEvent::SaveSpotlightDarknessAsDefault);
+            });
+        }
+        {
+            let s = sender.clone();
+            attach_save_default_popover(&widgets.spotlight_magnify_slider, move || {
+                s.output_sender()
+                    .emit(ToolbarEvent::SaveSpotlightMagnificationAsDefault);
             });
         }
         {

@@ -792,6 +792,30 @@ impl StackBand {
     }
 }
 
+/// The framebuffer rectangle covered by the image-space rect
+/// `(pos, size)`, clamped to the canvas — `(x, y, w, h)` in canvas
+/// pixels, or `None` when the rect lands entirely off-canvas.
+///
+/// Shared by the tools that read back what is under them: the blur
+/// resamples it, the spotlight magnifies it.
+pub fn canvas_region(
+    canvas: &Canvas<OpenGl>,
+    pos: Vec2D,
+    size: Vec2D,
+) -> Option<(usize, usize, usize, usize)> {
+    let transform = canvas.transform();
+    let origin = transform.transform_point(pos.x, pos.y);
+    let extent = size * transform.average_scale();
+    let cw = canvas.width() as f32;
+    let ch = canvas.height() as f32;
+    let x0 = origin.0.floor().clamp(0.0, cw);
+    let y0 = origin.1.floor().clamp(0.0, ch);
+    let x1 = (origin.0 + extent.x).ceil().clamp(0.0, cw);
+    let y1 = (origin.1 + extent.y).ceil().clamp(0.0, ch);
+    let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+    (w > 0 && h > 0).then_some((x0 as usize, y0 as usize, w, h))
+}
+
 /// Does a click at `point` grab `drawable`, or fall through to the
 /// drawing tool `armed` behind it? `armed` is `None` when the Pointer
 /// tool is active, which grabs anywhere.
@@ -1292,7 +1316,9 @@ pub use highlight::{HighlightTool, HighlighterStyle, Highlighters};
 pub use line::LineTool;
 pub use pasted_image::PastedImage;
 pub use rectangle::RectangleTool;
-pub use spotlight::SpotlightTool;
+pub use spotlight::{
+    MAX_SPOTLIGHT_MAGNIFICATION, MIN_SPOTLIGHT_MAGNIFICATION, SpotlightTool,
+};
 pub use text::{Text, TextBackground, TextTool};
 
 use self::{brush::BrushTool, marker::MarkerTool, pointer::PointerTool};

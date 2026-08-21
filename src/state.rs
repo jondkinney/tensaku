@@ -32,6 +32,8 @@ pub struct PersistedState {
     /// 40% default.
     #[serde(default)]
     pub highlighter_opacity: Option<f32>,
+    #[serde(default)]
+    pub spotlight_magnification: Option<f32>,
     /// Legacy Preferences value; migrated to `config.toml` at startup.
     #[serde(default)]
     pub annotation_size_factor: Option<f32>,
@@ -453,6 +455,16 @@ pub fn save_spotlight_darkness(value: f32) {
 
 pub fn load_highlighter_opacity() -> Option<f32> {
     load().highlighter_opacity
+}
+
+pub fn load_spotlight_magnification() -> Option<f32> {
+    load().spotlight_magnification
+}
+
+pub fn save_spotlight_magnification(value: f32) {
+    let mut state = load();
+    state.spotlight_magnification = Some(value);
+    save(&state);
 }
 
 pub fn save_highlighter_opacity(value: f32) {

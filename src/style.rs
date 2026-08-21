@@ -28,6 +28,12 @@ pub struct Style {
     /// (per-stroke), unlike spotlight_darkness which is global. UI clamps
     /// to 0.10–1.00.
     pub highlighter_opacity: f32,
+    /// Spotlight loupe factor. 1.0 shows the region untouched; above
+    /// that it magnifies about the shape's centre. Per-drawable, like
+    /// highlighter_opacity and unlike spotlight_darkness — darkness
+    /// belongs to the one shared overlay, while how far a loupe
+    /// magnifies is a property of that loupe. UI clamps to 1.0–4.0.
+    pub spotlight_magnification: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -94,6 +100,7 @@ impl Default for Style {
             annotation_size_factor: APP_CONFIG.read().annotation_size_factor(),
             spotlight_darkness: crate::state::load_spotlight_darkness().unwrap_or(0.50),
             highlighter_opacity: crate::state::load_highlighter_opacity().unwrap_or(0.40),
+            spotlight_magnification: crate::state::load_spotlight_magnification().unwrap_or(1.0),
         }
     }
 }
