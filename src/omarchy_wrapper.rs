@@ -326,48 +326,67 @@ fn packaged_wrapper_exists() -> bool {
 
 /// Legacy pre-Lua Omarchy's `$XDG_CONFIG_HOME/hypr/envs.conf`, falling back
 /// to `~/.config/...`.
-fn hypr_envs_conf() -> Result<PathBuf> {
+fn hypr_config_dir() -> Result<PathBuf> {
     let base = if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME").filter(|d| !d.is_empty()) {
         PathBuf::from(dir)
     } else {
         let home = std::env::var_os("HOME").context("HOME is not set")?;
         PathBuf::from(home).join(".config")
     };
-    Ok(base.join("hypr").join("envs.conf"))
+    Ok(base.join("hypr"))
 }
 
-/// Sibling `bindings.conf`, used only to detect conflicting inline binds.
-fn hypr_bindings_conf() -> Result<PathBuf> {
-    Ok(hypr_envs_conf()?.with_file_name("bindings.conf"))
+/// Omarchy's personal-overrides file. Everything Tensaku writes goes
+/// here: it is the one config file Omarchy never refreshes, so an
+/// `omarchy refresh hyprland` can't drop our wiring.
+fn hypr_local_lua() -> Result<PathBuf> {
+    Ok(hypr_config_dir()?.join("local.lua"))
+}
+
+/// The config entry point, which has to `require` the overrides file.
+fn hypr_main_lua() -> Result<PathBuf> {
+    Ok(hypr_config_dir()?.join("hyprland.lua"))
+}
+
+/// Sibling `bindings.lua`, used only to detect conflicting inline binds.
+fn hypr_bindings_lua() -> Result<PathBuf> {
+    Ok(hypr_config_dir()?.join("bindings.lua"))
 }
 
 /// The canonical Hyprland env directive wiring the screenshot editor.
 fn desired_env_line(wrapper: &str) -> String {
-    format!("env = OMARCHY_SCREENSHOT_EDITOR,{wrapper}")
+    format!("hl.env(\"OMARCHY_SCREENSHOT_EDITOR\", \"{wrapper}\")")
 }
 
 /// If `line` is an `env = OMARCHY_SCREENSHOT_EDITOR,<value>` directive,
 /// return its `<value>` (trimmed). Comments (`#…`) don't match because
 /// they don't start with `env`.
 fn env_line_value(line: &str) -> Option<String> {
-    let rest = line.trim().strip_prefix("env")?.trim_start();
-    let rest = rest.strip_prefix('=')?.trim_start();
-    let rest = rest.strip_prefix("OMARCHY_SCREENSHOT_EDITOR")?.trim_start();
-    let value = rest.strip_prefix(',')?.trim();
+    let t = line.trim();
+    if t.starts_with("--") {
+        return None; // Lua comment
+    }
+    let rest = t.strip_prefix("hl.env")?.trim_start();
+    let rest = rest.strip_prefix('(')?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let rest = rest.strip_prefix("OMARCHY_SCREENSHOT_EDITOR")?;
+    let rest = rest.strip_prefix('"')?.trim_start();
+    let rest = rest.strip_prefix(',')?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let value = rest.split('"').next()?;
     Some(value.to_string())
 }
 
-/// The `OMARCHY_SCREENSHOT_EDITOR` value configured in legacy `envs.conf`, if
+/// The `OMARCHY_SCREENSHOT_EDITOR` value configured in `local.lua`, if
 /// any.
 ///
 /// Unlike the live `$OMARCHY_SCREENSHOT_EDITOR` (which reflects the running
 /// session and goes stale after `--wire-omarchy` until the next login), this
-/// is the *persistent* override on older Omarchy. Current Omarchy needs no
-/// directive because its capture script defaults to `tensaku-edit`. First
+/// is the *persistent* override. First
 /// matching directive wins, mirroring [`apply_env_line`]. Read-only and
 /// best-effort: a missing or unreadable file reads as "not configured".
 pub(crate) fn configured_editor() -> Option<OsString> {
-    let path = hypr_envs_conf().ok()?;
+    let path = hypr_local_lua().ok()?;
     let contents = std::fs::read_to_string(path).ok()?;
     contents
         .lines()
@@ -422,7 +441,7 @@ fn apply_env_line(contents: &str, wrapper: &str) -> EnvLineOutcome {
         if !out.is_empty() {
             out.push('\n');
         }
-        out.push_str("# Tensaku screenshot editor (set by `tensaku --wire-omarchy`).\n");
+        out.push_str("-- Tensaku screenshot editor (set by `tensaku --wire-omarchy`).\n");
         out.push_str(&desired);
         out.push('\n');
         EnvLineOutcome::Inserted(out)
@@ -450,14 +469,19 @@ fn apply_live(wrapper: &str) {
         println!("(not in a Hyprland session — this takes effect on next Hyprland start.)");
         return;
     }
-    // `.output()` (not `.status()`) so hyprctl's own "ok" doesn't leak
-    // into our report.
+    // `eval`, not `keyword`: a Lua-configured Hyprland rejects `keyword`
+    // outright ("keyword can't work with non-legacy parsers"). And it
+    // reports that failure on stdout while still exiting 0, so trusting
+    // the exit status alone claims success for a command that did
+    // nothing — check for hyprctl's "ok" instead.
+    //
+    // `.output()` (not `.status()`) also keeps hyprctl's own chatter out
+    // of our report.
     let ok = std::process::Command::new("hyprctl")
-        .arg("keyword")
-        .arg("env")
-        .arg(format!("OMARCHY_SCREENSHOT_EDITOR,{wrapper}"))
+        .arg("eval")
+        .arg(desired_env_line(wrapper))
         .output()
-        .map(|o| o.status.success())
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "ok")
         .unwrap_or(false);
     if ok {
         println!("Applied to the running Hyprland session (effective immediately).");
@@ -471,7 +495,7 @@ fn apply_live(wrapper: &str) {
 /// and the live env, so the wiring wouldn't take effect for that bind. We
 /// don't edit bindings.conf (by design) — just flag it.
 fn warn_conflicting_binds(wrapper: &str) {
-    let Ok(path) = hypr_bindings_conf() else {
+    let Ok(path) = hypr_bindings_lua() else {
         return;
     };
     let Ok(contents) = std::fs::read_to_string(&path) else {
@@ -532,36 +556,106 @@ fn report_config_errors() {
 const WINDOW_CLASS: &str = "dev.tensaku.Tensaku";
 
 /// `$XDG_CONFIG_HOME/hypr/hyprland.conf` (sibling of envs.conf).
-fn hypr_main_conf() -> Result<PathBuf> {
-    Ok(hypr_envs_conf()?.with_file_name("hyprland.conf"))
-}
-
 /// Is there an uncommented `windowrule = <action>, match:class <our class>`?
 fn has_class_rule(contents: &str, action: &str) -> bool {
-    let needle = format!("match:class {WINDOW_CLASS}");
-    contents.lines().any(|l| {
-        let t = l.trim();
-        !t.starts_with('#')
-            && t.starts_with("windowrule")
-            && t.contains(action)
-            && t.contains(&needle)
-    })
+    window_rule_calls(contents)
+        .iter()
+        .any(|call| call.contains(WINDOW_CLASS) && call.contains(action))
 }
 
-/// The float/center rules that let Tensaku size its own window.
+/// Every `o.window(...)` call in `contents`, comments stripped and each
+/// call flattened onto one line.
+///
+/// Lua rules are routinely written across several lines, so scanning a
+/// line at a time sees `o.window("dev.tensaku.Tensaku", {` and
+/// `float = true,` as unrelated and concludes the rule is missing —
+/// which appends a duplicate to a config that was already wired.
+fn window_rule_calls(contents: &str) -> Vec<String> {
+    let stripped = contents
+        .lines()
+        .map(|l| match l.find("--") {
+            Some(i) => &l[..i],
+            None => l,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut calls = Vec::new();
+    let mut rest = stripped.as_str();
+    while let Some(idx) = rest.find("o.window") {
+        let after = &rest[idx..];
+        // Take to the paren that closes the call, so the whole rule
+        // body is considered however it is laid out.
+        let mut depth = 0i32;
+        let mut end = after.len();
+        for (i, c) in after.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        calls.push(after[..end].split_whitespace().collect::<Vec<_>>().join(" "));
+        rest = &after[end..];
+    }
+    calls
+}
+
+/// The float/center/opacity rules that let Tensaku size its own window
+/// and render it opaque.
 fn window_rules_block() -> String {
     format!(
-        "\n# Tensaku: float + center its window. Tensaku sizes its own window\n\
-         # around the capture, so it must float with no fixed-size rule. The\n\
-         # `tag -floating-window` undoes a distro default (e.g. Omarchy's) that\n\
-         # would otherwise pin a fixed size. Added by `tensaku --wire-omarchy`.\n\
-         windowrule = tag -floating-window, match:class {WINDOW_CLASS}\n\
-         windowrule = float on, match:class {WINDOW_CLASS}\n\
-         windowrule = center on, match:class {WINDOW_CLASS}\n"
+        "\n-- Tensaku: float + center its window. Tensaku sizes its own window\n\
+         -- around the capture, so it must float with no fixed-size rule. The\n\
+         -- `-floating-window` tag undoes an Omarchy default that would\n\
+         -- otherwise pin a fixed size. Added by `tensaku --wire-omarchy`.\n\
+         o.window(\"{WINDOW_CLASS}\", {{ tag = \"-floating-window\", float = true, center = true }})\n\
+         -- Force full opacity. Omarchy tags every window `default-opacity` and\n\
+         -- then applies `opacity 0.985 0.96`, so ~1.5%% of whatever sits behind\n\
+         -- the window blends into it -- and an image editor is the one place\n\
+         -- that must not happen. Over a dark window behind, Tensaku's canvas\n\
+         -- background #2E3440 composites to #2D333F, which reads as banding or\n\
+         -- ghosting across large flat areas of the canvas and looks like a\n\
+         -- rendering fault in the image being edited, even though what gets\n\
+         -- saved is untouched. Steam, qemu and retroarch opt out the same way.\n\
+         o.window(\"{WINDOW_CLASS}\", {{ tag = \"-default-opacity\", opacity = \"1 1\" }})\n"
     )
 }
 
-/// How hyprland.conf relates to Tensaku's window rules.
+/// `hyprland.lua` only loads `local.lua` if it says so. Return the new
+/// contents when the `require` has to be added, `None` when it is
+/// already there.
+///
+/// Omarchy's own template ends with this line, so in practice it is
+/// present; adding it covers a hand-rolled config, and keeps our wiring
+/// from silently doing nothing.
+fn ensure_local_require(contents: &str) -> Option<String> {
+    let present = contents.lines().any(|l| {
+        let t = l.trim();
+        !t.starts_with("--") && t.contains("require") && t.contains("hypr.local")
+    });
+    if present {
+        return None;
+    }
+    let mut out = contents.to_string();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(
+        "\n-- Personal overrides, including Tensaku's wiring. Added by\n\
+         -- `tensaku --wire-omarchy`.\n\
+         require(\"hypr.local\")\n",
+    );
+    Some(out)
+}
+
+/// How `local.lua` relates to Tensaku's window rules.
 #[derive(Debug, PartialEq, Eq)]
 enum WindowRuleOutcome {
     /// float + center for our class already present — nothing to add.
@@ -573,7 +667,7 @@ enum WindowRuleOutcome {
 /// Append Tensaku's window rules unless float + center for our class are
 /// already present (so a hand-written setup isn't duplicated). Pure.
 fn apply_window_rules(contents: &str) -> WindowRuleOutcome {
-    if has_class_rule(contents, "float on") && has_class_rule(contents, "center on") {
+    if has_class_rule(contents, "float") && has_class_rule(contents, "-default-opacity") {
         return WindowRuleOutcome::AlreadyPresent;
     }
     let mut out = contents.to_string();
@@ -589,70 +683,79 @@ fn apply_window_rules(contents: &str) -> WindowRuleOutcome {
 /// and float + center the Tensaku window. Ensures the wrapper exists
 /// first; never edits keybinds.
 pub fn wire() -> Result<()> {
+    let main_lua = hypr_main_lua()?;
+    if !main_lua.exists() {
+        anyhow::bail!(
+            "no {} — this expects a Lua-configured Hyprland (Omarchy 3+).",
+            main_lua.display()
+        );
+    }
     let wrapper = find_or_install_wrapper()?;
     let wrapper_str = wrapper.to_string_lossy().into_owned();
 
-    let envs = hypr_envs_conf()?;
-    let existing = std::fs::read_to_string(&envs).unwrap_or_default();
-    match apply_env_line(&existing, &wrapper_str) {
+    // Everything goes in local.lua: Omarchy never refreshes it, so an
+    // `omarchy refresh hyprland` can't drop the wiring.
+    let local = hypr_local_lua()?;
+    let existing = std::fs::read_to_string(&local).unwrap_or_default();
+    let mut updated = match apply_env_line(&existing, &wrapper_str) {
         EnvLineOutcome::AlreadySet => {
-            println!("envs.conf already wires OMARCHY_SCREENSHOT_EDITOR → {wrapper_str}");
+            println!("local.lua already wires OMARCHY_SCREENSHOT_EDITOR → {wrapper_str}");
+            existing.clone()
         }
         EnvLineOutcome::Updated(new) | EnvLineOutcome::Inserted(new) => {
-            if envs.exists() {
-                let backup = backup_path(&envs);
-                std::fs::copy(&envs, &backup)
-                    .with_context(|| format!("back up {}", envs.display()))?;
-                println!("Backed up {} → {}", envs.display(), backup.display());
-            } else if let Some(dir) = envs.parent() {
-                std::fs::create_dir_all(dir)
-                    .with_context(|| format!("create {}", dir.display()))?;
-            }
-            std::fs::write(&envs, new).with_context(|| format!("write {}", envs.display()))?;
-            println!(
-                "Set OMARCHY_SCREENSHOT_EDITOR → {wrapper_str}\n  in {}",
-                envs.display()
-            );
+            println!("Setting OMARCHY_SCREENSHOT_EDITOR → {wrapper_str}");
+            new
+        }
+    };
+
+    // Float + center so Tensaku can size itself around the capture, and
+    // full opacity so the window behind doesn't blend into the canvas.
+    match apply_window_rules(&updated) {
+        WindowRuleOutcome::AlreadyPresent => {
+            println!("local.lua already floats, centers and un-dims the Tensaku window.");
+        }
+        WindowRuleOutcome::Appended(new) => {
+            println!("Adding float + center + opacity rules for {WINDOW_CLASS}");
+            updated = new;
         }
     }
 
-    // Float + center the Tensaku window so it can size itself around the
-    // capture (otherwise a tiling layout, or a distro's fixed-size rule,
-    // fights it). Written to hyprland.conf; applied live via reload below.
-    let conf = hypr_main_conf()?;
-    let mut rules_changed = false;
-    if conf.exists() {
-        let existing_rules = std::fs::read_to_string(&conf).unwrap_or_default();
-        match apply_window_rules(&existing_rules) {
-            WindowRuleOutcome::AlreadyPresent => {
-                println!("hyprland.conf already floats + centers the Tensaku window.");
-            }
-            WindowRuleOutcome::Appended(new) => {
-                let backup = backup_path(&conf);
-                std::fs::copy(&conf, &backup)
-                    .with_context(|| format!("back up {}", conf.display()))?;
-                println!("Backed up {} → {}", conf.display(), backup.display());
-                std::fs::write(&conf, new).with_context(|| format!("write {}", conf.display()))?;
-                println!(
-                    "Added float + center window rules for {WINDOW_CLASS}\n  in {}",
-                    conf.display()
-                );
-                rules_changed = true;
-            }
+    let changed = updated != existing;
+    if changed {
+        if local.exists() {
+            let backup = backup_path(&local);
+            std::fs::copy(&local, &backup)
+                .with_context(|| format!("back up {}", local.display()))?;
+            println!("Backed up {} → {}", local.display(), backup.display());
+        } else if let Some(dir) = local.parent() {
+            std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
         }
-    } else {
-        println!("(no {} — skipping window rules)", conf.display());
+        std::fs::write(&local, &updated).with_context(|| format!("write {}", local.display()))?;
+        println!("Wrote {}", local.display());
     }
 
-    // Apply live. Window rules are re-applied on reload (env directives are
-    // not), so reload first, then re-assert the env so reload doesn't drop it.
-    if rules_changed {
+    // A local.lua nothing loads would be wiring that silently does nothing.
+    let main_contents = std::fs::read_to_string(&main_lua)
+        .with_context(|| format!("read {}", main_lua.display()))?;
+    let mut reload_needed = changed;
+    if let Some(new_main) = ensure_local_require(&main_contents) {
+        let backup = backup_path(&main_lua);
+        std::fs::copy(&main_lua, &backup)
+            .with_context(|| format!("back up {}", main_lua.display()))?;
+        println!("Backed up {} → {}", main_lua.display(), backup.display());
+        std::fs::write(&main_lua, new_main)
+            .with_context(|| format!("write {}", main_lua.display()))?;
+        println!("Added `require(\"hypr.local\")` to {}", main_lua.display());
+        reload_needed = true;
+    }
+
+    // Reload picks up both the window rules and, since they live in the
+    // config now, the env directive.
+    if reload_needed {
         hypr_reload();
-    }
-    apply_live(&wrapper_str);
-    if rules_changed {
         report_config_errors();
     }
+    apply_live(&wrapper_str);
 
     warn_conflicting_binds(&wrapper_str);
 
@@ -668,30 +771,35 @@ mod tests {
     #[test]
     fn env_line_value_parses_variants() {
         assert_eq!(
-            env_line_value("env = OMARCHY_SCREENSHOT_EDITOR,/usr/bin/tensaku-edit").as_deref(),
+            env_line_value(r#"hl.env("OMARCHY_SCREENSHOT_EDITOR", "/usr/bin/tensaku-edit")"#)
+                .as_deref(),
             Some("/usr/bin/tensaku-edit")
         );
-        // No spaces around '='.
+        // Whitespace variations Lua allows.
         assert_eq!(
-            env_line_value("env=OMARCHY_SCREENSHOT_EDITOR,/x").as_deref(),
+            env_line_value(r#"hl.env ( "OMARCHY_SCREENSHOT_EDITOR" ,  "/x" )"#).as_deref(),
             Some("/x")
         );
-        // Leading indentation and trailing space tolerated.
         assert_eq!(
-            env_line_value("   env = OMARCHY_SCREENSHOT_EDITOR,/x  ").as_deref(),
+            env_line_value(r#"   hl.env("OMARCHY_SCREENSHOT_EDITOR","/x")   "#).as_deref(),
             Some("/x")
         );
         // Comments and other vars don't match.
-        assert!(env_line_value("# env = OMARCHY_SCREENSHOT_EDITOR,/x").is_none());
-        assert!(env_line_value("env = SOMETHING_ELSE,/x").is_none());
+        assert!(env_line_value(r#"-- hl.env("OMARCHY_SCREENSHOT_EDITOR", "/x")"#).is_none());
+        assert!(env_line_value(r#"hl.env("SOMETHING_ELSE", "/x")"#).is_none());
+        // The legacy conf syntax is not Lua and must not be recognised,
+        // or a stale envs.conf line would read as already wired.
+        assert!(env_line_value("env = OMARCHY_SCREENSHOT_EDITOR,/x").is_none());
     }
 
     #[test]
     fn apply_env_line_inserts_when_absent() {
-        match apply_env_line("# Extra env variables\n", "/usr/bin/tensaku-edit") {
+        match apply_env_line("-- Extra env variables\n", "/usr/bin/tensaku-edit") {
             EnvLineOutcome::Inserted(s) => {
-                assert!(s.contains("env = OMARCHY_SCREENSHOT_EDITOR,/usr/bin/tensaku-edit"));
-                assert!(s.starts_with("# Extra env variables\n"));
+                assert!(s.contains(
+                    r#"hl.env("OMARCHY_SCREENSHOT_EDITOR", "/usr/bin/tensaku-edit")"#
+                ));
+                assert!(s.starts_with("-- Extra env variables\n"));
             }
             other => panic!("expected Inserted, got {other:?}"),
         }
@@ -699,7 +807,7 @@ mod tests {
 
     #[test]
     fn apply_env_line_already_set_is_noop() {
-        let contents = "env = OMARCHY_SCREENSHOT_EDITOR,/usr/bin/tensaku-edit\n";
+        let contents = "hl.env(\"OMARCHY_SCREENSHOT_EDITOR\", \"/usr/bin/tensaku-edit\")\n";
         assert_eq!(
             apply_env_line(contents, "/usr/bin/tensaku-edit"),
             EnvLineOutcome::AlreadySet
@@ -708,10 +816,12 @@ mod tests {
 
     #[test]
     fn apply_env_line_updates_when_different() {
-        let contents = "a\nenv = OMARCHY_SCREENSHOT_EDITOR,/old/path\nb\n";
+        let contents = "a\nhl.env(\"OMARCHY_SCREENSHOT_EDITOR\", \"/old/path\")\nb\n";
         match apply_env_line(contents, "/usr/bin/tensaku-edit") {
             EnvLineOutcome::Updated(s) => {
-                assert!(s.contains("env = OMARCHY_SCREENSHOT_EDITOR,/usr/bin/tensaku-edit"));
+                assert!(s.contains(
+                    r#"hl.env("OMARCHY_SCREENSHOT_EDITOR", "/usr/bin/tensaku-edit")"#
+                ));
                 assert!(!s.contains("/old/path"));
                 assert!(s.starts_with("a\n") && s.trim_end().ends_with('b'));
             }
@@ -726,18 +836,68 @@ mod tests {
             inline_bind_editor_value(bind).as_deref(),
             Some("/home/u/.local/bin/tensaku-edit")
         );
-        // The envs.conf comma form is not an inline bind value.
-        assert!(inline_bind_editor_value("env = OMARCHY_SCREENSHOT_EDITOR,/x").is_none());
+        // The config directive is not an inline bind value.
+        assert!(
+            inline_bind_editor_value(r#"hl.env("OMARCHY_SCREENSHOT_EDITOR", "/x")"#).is_none()
+        );
+    }
+
+    /// Rules written across several lines — the normal Lua layout, and
+    /// what Omarchy's own config uses — must be recognised, or wiring an
+    /// already-wired config appends a duplicate rule.
+    #[test]
+    fn multi_line_rules_are_recognised() {
+        let c = "o.window(\"dev.tensaku.Tensaku\", {\n\
+                 \u{20}\u{20}animation = \"none\",\n\
+                 \u{20}\u{20}tag = \"-floating-window\",\n\
+                 \u{20}\u{20}float = true,\n\
+                 \u{20}\u{20}center = true,\n\
+                 })\n\
+                 o.window(\"dev.tensaku.Tensaku\", { tag = \"-default-opacity\", opacity = \"1 1\" })\n";
+        assert!(has_class_rule(c, "float"));
+        assert!(has_class_rule(c, "-default-opacity"));
+        assert_eq!(apply_window_rules(c), WindowRuleOutcome::AlreadyPresent);
+    }
+
+    /// A rule for a different class must not satisfy ours, even when the
+    /// two calls sit next to each other.
+    #[test]
+    fn another_class_rule_does_not_count() {
+        let c = "o.window(\"org.other.App\", { float = true, tag = \"-default-opacity\" })\n";
+        assert!(!has_class_rule(c, "float"));
+        assert!(matches!(
+            apply_window_rules(c),
+            WindowRuleOutcome::Appended(_)
+        ));
+    }
+
+    #[test]
+    fn local_require_added_only_when_missing() {
+        // Omarchy's template already ends with it.
+        assert!(ensure_local_require("require(\"hypr.local\")\n").is_none());
+        assert!(ensure_local_require("require('hypr.local')\n").is_none());
+        // A commented-out one doesn't load anything.
+        let out = ensure_local_require("-- require(\"hypr.local\")\n")
+            .expect("commented require must not count");
+        assert!(out.contains("require(\"hypr.local\")"));
+        // Absent entirely.
+        let out = ensure_local_require("require(\"hypr.monitors\")\n")
+            .expect("expected the require to be added");
+        assert!(out.contains("require(\"hypr.local\")"));
+        assert!(out.starts_with("require(\"hypr.monitors\")\n"));
     }
 
     #[test]
     fn window_rules_appended_when_absent() {
-        match apply_window_rules("# my hypr config\n") {
+        match apply_window_rules("-- my hypr config\n") {
             WindowRuleOutcome::Appended(s) => {
-                assert!(s.contains("float on, match:class dev.tensaku.Tensaku"));
-                assert!(s.contains("center on, match:class dev.tensaku.Tensaku"));
-                assert!(s.contains("tag -floating-window, match:class dev.tensaku.Tensaku"));
-                assert!(s.starts_with("# my hypr config\n"));
+                assert!(s.contains(r#"o.window("dev.tensaku.Tensaku""#));
+                assert!(s.contains("float = true"));
+                assert!(s.contains("center = true"));
+                assert!(s.contains(r#"tag = "-floating-window""#));
+                assert!(s.contains(r#"tag = "-default-opacity""#));
+                assert!(s.contains(r#"opacity = "1 1""#));
+                assert!(s.starts_with("-- my hypr config\n"));
             }
             other => panic!("expected Appended, got {other:?}"),
         }
@@ -745,14 +905,29 @@ mod tests {
 
     #[test]
     fn window_rules_already_present_is_noop() {
-        let c = "windowrule = float on, match:class dev.tensaku.Tensaku\n\
-                 windowrule = center on, match:class dev.tensaku.Tensaku\n";
+        let c = "o.window(\"dev.tensaku.Tensaku\", { float = true, center = true })\n\
+                 o.window(\"dev.tensaku.Tensaku\", { tag = \"-default-opacity\", opacity = \"1 1\" })\n";
         assert_eq!(apply_window_rules(c), WindowRuleOutcome::AlreadyPresent);
+    }
+
+    /// A config wired before the opacity rule existed still needs it —
+    /// float + center alone must not count as complete, or an existing
+    /// install keeps the translucent window that ghosts whatever is
+    /// behind it into the canvas.
+    #[test]
+    fn window_rules_without_opacity_are_topped_up() {
+        let c = "o.window(\"dev.tensaku.Tensaku\", { float = true, center = true })\n";
+        let WindowRuleOutcome::Appended(out) = apply_window_rules(c) else {
+            panic!("expected the opacity rule to be appended");
+        };
+        assert!(out.contains(r#"tag = "-default-opacity""#));
+        assert!(out.contains(r#"opacity = "1 1""#));
     }
 
     #[test]
     fn window_rules_commented_out_dont_count() {
-        let c = "# windowrule = float on, match:class dev.tensaku.Tensaku\n";
+        let c = "-- o.window(\"dev.tensaku.Tensaku\", { float = true })\n\
+                 -- o.window(\"dev.tensaku.Tensaku\", { tag = \"-default-opacity\" })\n";
         assert!(matches!(
             apply_window_rules(c),
             WindowRuleOutcome::Appended(_)
@@ -761,8 +936,8 @@ mod tests {
 
     #[test]
     fn window_rules_partial_appends_full_block() {
-        // float present but no center → still append the full block.
-        let c = "windowrule = float on, match:class dev.tensaku.Tensaku\n";
+        // float present but no opacity opt-out → still append the block.
+        let c = "o.window(\"dev.tensaku.Tensaku\", { float = true, center = true })\n";
         assert!(matches!(
             apply_window_rules(c),
             WindowRuleOutcome::Appended(_)
