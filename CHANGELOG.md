@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0](https://github.com/jondkinney/tensaku/compare/v0.27.0...v0.28.0) - 2026-08-21
+
+### Added
+
+- *(scroll-capture)* hands-off pointer — park once, pause on leave
+- *(pin)* close the column gap behind a dragged-away pin
+- *(pin)* right-click names a pin
+- *(pin)* survivors close the gap when a pin closes
+- *(omarchy)* --wire-capture-key binds a key to Tensaku's own capture
+
+### Fixed
+
+- *(scroll-capture)* park the pointer using the output's fractional scale
+- *(pin)* delete the drag snapshot when the pin closes, not on destroy
+- *(capture)* keep overlay chrome from taking the pointer's picks
+
 ## [0.27.0](https://github.com/jondkinney/tensaku/compare/v0.26.7...v0.27.0) - 2026-08-21
 
 ### Added
