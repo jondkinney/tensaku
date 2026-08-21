@@ -1153,10 +1153,17 @@ impl SketchBoard {
         actions: Vec<Action>,
         sender: ComponentSender<Self>,
     ) {
+        // Every action that needs the finished pixels. A miss here is
+        // silent — the action still runs, it just finds `None` where
+        // the image should be — so it is the first place to look when
+        // an action appears to do nothing at all.
         let needs_pixbuf = actions.iter().any(|action| {
             matches!(
                 action,
-                Action::SaveToClipboard | Action::SaveToFile | Action::SaveToFileAs
+                Action::SaveToClipboard
+                    | Action::SaveToFile
+                    | Action::SaveToFileAs
+                    | Action::Pin
             )
         });
 
