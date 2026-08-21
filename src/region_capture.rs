@@ -35,6 +35,12 @@ use crate::windows::{WindowTarget, visible_windows, window_at};
 /// scrolling capture's prompt, which sits at the same height.
 const HINT_MARGIN_BOTTOM: i32 = 48;
 
+/// Edge grip and move puck sizes, in logical pixels. The grips match
+/// the tolerance `hit_test_handle` already uses, so what you see is
+/// what you can grab.
+const GRIP: i32 = 12;
+const PUCK: i32 = 30;
+
 /// Ignore drags this small: a click that wobbles by a pixel is a click,
 /// and capturing a 3×2 region helps nobody.
 const MIN_DRAG: f64 = 8.0;
@@ -108,6 +114,11 @@ struct State {
     /// what the saved file will measure, not what the overlay shows.
     readout: gtk::Box,
     readout_label: gtk::Label,
+    /// Eight edge grips and the move puck, shown on a settled
+    /// selection so a restored region reads as adjustable rather than
+    /// as a picture of where the last one was.
+    grips: [gtk::Box; 8],
+    puck: gtk::Box,
     /// The overlay's size in logical pixels, learned once it maps.
     size: (i32, i32),
     /// Image pixels per logical pixel, learned at draw time — the
@@ -186,8 +197,31 @@ fn build_overlay(
     readout.append(&readout_label);
     readout.set_visible(false);
 
+    let grips: [gtk::Box; 8] = std::array::from_fn(|_| {
+        let grip = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        grip.add_css_class("capture-grip");
+        grip.set_size_request(GRIP, GRIP);
+        grip.set_visible(false);
+        grip
+    });
+    let puck = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    puck.add_css_class("capture-puck");
+    puck.set_size_request(PUCK, PUCK);
+    puck.set_visible(false);
+    {
+        // A plus, the way every move affordance draws one. A label
+        // rather than two nested bars: the glyph is in every font and
+        // needs no layout of its own.
+        let cross = gtk::Label::new(Some("+"));
+        cross.set_hexpand(true);
+        cross.set_vexpand(true);
+        puck.append(&cross);
+    }
+
     let state = Rc::new(RefCell::new(State {
         frozen: frozen.clone(),
+        grips: grips.clone(),
+        puck: puck.clone(),
         readout: readout.clone(),
         readout_label: readout_label.clone(),
         fixed: fixed.clone(),
@@ -243,6 +277,10 @@ fn build_overlay(
         fixed.put(guide, 0.0, 0.0);
     }
     fixed.put(&readout, 0.0, 0.0);
+    for grip in &grips {
+        fixed.put(grip, 0.0, 0.0);
+    }
+    fixed.put(&puck, 0.0, 0.0);
     overlay.add_overlay(&fixed);
     // The cursor goes on the widget the pointer is actually over, not
     // the window: GTK resolves it from the widget under the pointer
@@ -330,6 +368,7 @@ fn layout_shade(state: &State) {
         }
         state.outline.set_visible(false);
         state.readout.set_visible(false);
+        hide_grips(state);
         layout_crosshair(state, true);
         return;
     };
@@ -356,6 +395,7 @@ fn layout_shade(state: &State) {
     } else {
         state.readout.set_visible(false);
     }
+    layout_grips(state, rect);
     // Once there is a rectangle, it is the thing being aimed — the
     // guides would just be two more lines over it.
     layout_crosshair(state, false);
@@ -369,6 +409,58 @@ fn apply_cursor(widget: &gtk::Fixed, mode: Mode) {
         Mode::Area => "crosshair",
         Mode::Window => "pointer",
     }));
+}
+
+/// Put the eight grips on the selection's edges and the puck at its
+/// middle, or hide them.
+///
+/// Only on a settled selection: during a drag the rectangle is already
+/// following the pointer, and eight squares chasing it would be
+/// noise. Their positions are the same ones `hit_test_handle` answers
+/// for, so a grip is exactly where the grab is.
+fn layout_grips(state: &State, rect: Rect) {
+    if state.dragging || rect.width < 1 || rect.height < 1 {
+        hide_grips(state);
+        return;
+    }
+    let (x, y, w, h) = (
+        rect.x as f64,
+        rect.y as f64,
+        rect.width as f64,
+        rect.height as f64,
+    );
+    let half = GRIP as f64 / 2.0;
+    let spots = [
+        (x, y),
+        (x + w / 2.0, y),
+        (x + w, y),
+        (x + w, y + h / 2.0),
+        (x + w, y + h),
+        (x + w / 2.0, y + h),
+        (x, y + h),
+        (x, y + h / 2.0),
+    ];
+    for (grip, (cx, cy)) in state.grips.iter().zip(spots) {
+        state.fixed.move_(grip, cx - half, cy - half);
+        grip.set_visible(true);
+    }
+
+    // The puck needs room of its own — on a small region it would
+    // cover the thing being framed.
+    let puck_fits = w > PUCK as f64 * 2.0 && h > PUCK as f64 * 2.0;
+    state.fixed.move_(
+        &state.puck,
+        x + w / 2.0 - PUCK as f64 / 2.0,
+        y + h / 2.0 - PUCK as f64 / 2.0,
+    );
+    state.puck.set_visible(puck_fits);
+}
+
+fn hide_grips(state: &State) {
+    for grip in &state.grips {
+        grip.set_visible(false);
+    }
+    state.puck.set_visible(false);
 }
 
 /// Show the selection's pixel size beside the corner being dragged.
@@ -730,6 +822,20 @@ fn install_css(app: &gtk::Application) {
             cairo blends on every motion event. */
          .capture-shade { background: rgba(0, 0, 0, 0.45); }
          .capture-readout { padding: 4px 10px; }
+         /* Grips and puck: the scrolling capture's white-on-dark, so a
+            selection looks the same in either overlay. */
+         .capture-grip {
+             background: rgba(255, 255, 255, 0.92);
+             border-radius: 3px;
+             box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+         }
+         .capture-puck {
+             background: rgba(20, 20, 26, 0.84);
+             border: 2px solid rgba(255, 255, 255, 0.92);
+             border-radius: 999px;
+             color: rgba(255, 255, 255, 0.92);
+             font-size: 17px;
+         }
          .region-capture-outline {
              border: 1px solid rgba(255, 255, 255, 0.9);
          }
