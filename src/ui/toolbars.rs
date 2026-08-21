@@ -99,6 +99,19 @@ fn show_tooltip(popover: &gtk::Popover) {
     popover.popup();
 }
 
+/// Pop down whatever tooltip is showing, if any.
+///
+/// For gestures that move the widget out from under the pointer: GTK
+/// keeps re-triggering the hover, and the tooltip tags along beside
+/// the thing being dragged.
+pub fn dismiss_active_tooltip() {
+    ACTIVE_TOOLTIP.with(|active| {
+        if let Some(popover) = active.borrow_mut().take() {
+            popover.popdown();
+        }
+    });
+}
+
 fn hide_tooltip(popover: &gtk::Popover) {
     popover.popdown();
     ACTIVE_TOOLTIP.with(|active| {

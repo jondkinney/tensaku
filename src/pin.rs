@@ -49,10 +49,13 @@ const MOVE_TOOLTIP: &str = "Move this pin";
 /// same reason.
 const PICTURE_TOOLTIP: &str = "Click to open in the editor · Drag into another app to paste it";
 
-/// How often a dragged pin asks where the pointer is. 16ms is a frame
-/// at 60Hz: often enough to look attached, rare enough that the socket
-/// round-trip costs nothing.
-const FOLLOW_INTERVAL: Duration = Duration::from_millis(16);
+/// How often a dragged pin asks where the pointer is.
+///
+/// Twice a frame at 60Hz. The cost is a socket round-trip, which is
+/// sub-millisecond; the win is that a step is never more than half a
+/// frame stale before it is drawn, which is the difference between a
+/// pin that feels attached to the pointer and one that trails it.
+const FOLLOW_INTERVAL: Duration = Duration::from_millis(8);
 
 /// Gap between stacked pins.
 const PIN_GAP: i32 = 12;
@@ -183,7 +186,7 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
 
     // The picture is the shot: clicking it opens the shot, dragging it
     // carries the shot somewhere.
-    picture.set_tooltip_text(Some(PICTURE_TOOLTIP));
+    picture.install_tooltip(PICTURE_TOOLTIP);
     picture.set_cursor_from_name(Some("pointer"));
     install_drag_out(&picture, image, saved_path_for_drag);
     {
@@ -438,17 +441,9 @@ fn install_drag_out(handle: &gtk::Picture, image: &Pixbuf, saved_path: Option<St
             source.set_icon(Some(&icon), icon_w / 2, icon_h / 2);
         });
     }
-    {
-        // Same tooltip problem as the move handle: a drag-out leaves
-        // the pointer over a picture that is now carrying something,
-        // and the tooltip follows it around.
-        let handle_begin = handle.clone();
-        source.connect_drag_begin(move |_, _| handle_begin.set_has_tooltip(false));
-        let handle_end = handle.clone();
-        source.connect_drag_end(move |_, _, _| {
-            handle_end.set_tooltip_text(Some(PICTURE_TOOLTIP));
-        });
-    }
+    // Same problem on a drag-out: the pointer is over a picture that
+    // is now carrying something, and the tooltip follows it.
+    source.connect_drag_begin(|_, _| crate::ui::toolbars::dismiss_active_tooltip());
     handle.add_controller(source);
 }
 
@@ -492,7 +487,6 @@ fn install_move(window: &gtk::Window, target: &gtk::Button, bottom_margin: i32) 
     let press = gtk::GestureClick::new();
     {
         let window = window.clone();
-        let target_press = target.clone();
         let right = right.clone();
         let bottom = bottom.clone();
         let dragging = dragging.clone();
@@ -506,14 +500,9 @@ fn install_move(window: &gtk::Window, target: &gtk::Button, bottom_margin: i32) 
             if dragging.replace(true) {
                 return;
             }
-            // The tooltip would otherwise reappear on every step: the
-            // window slides out from under the pointer, which GTK
-            // reads as a fresh hover.
-            target_press.set_has_tooltip(false);
 
             let start = (right.get(), bottom.get());
             let window = window.clone();
-            let target_tick = target_press.clone();
             let right = right.clone();
             let bottom = bottom.clone();
             let dragging = dragging.clone();
@@ -523,9 +512,12 @@ fn install_move(window: &gtk::Window, target: &gtk::Button, bottom_margin: i32) 
             // was falling behind.
             gtk::glib::timeout_add_local(FOLLOW_INTERVAL, move || {
                 if !dragging.get() {
-                    target_tick.set_tooltip_text(Some(MOVE_TOOLTIP));
                     return gtk::glib::ControlFlow::Break;
                 }
+                // Every tick, because the pointer never leaves the
+                // handle during a drag: nothing else would take the
+                // tooltip down, and it would tag along beside the pin.
+                crate::ui::toolbars::dismiss_active_tooltip();
                 let Some((x, y)) = crate::hypr::cursor_position() else {
                     return gtk::glib::ControlFlow::Continue;
                 };
