@@ -224,9 +224,12 @@ fn build_overlay(
 
     let hint = gtk::Label::new(Some(Mode::Area.hint()));
     hint.add_css_class("region-capture-hint");
+    // Centred on screen, like the scrolling capture's prompt: the
+    // instructions are the only thing to read before a drag starts, so
+    // they belong where the eye already is rather than in a corner it
+    // has to find.
     hint.set_halign(gtk::Align::Center);
-    hint.set_valign(gtk::Align::End);
-    hint.set_margin_bottom(48);
+    hint.set_valign(gtk::Align::Center);
     overlay.add_overlay(&hint);
     window.set_child(Some(&overlay));
 
