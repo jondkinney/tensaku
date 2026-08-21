@@ -20,12 +20,10 @@
 //!   cost is that the pin lasts as long as the process does.
 
 use crate::ui::toolbars::RobustTooltipExt;
-use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use relm4::gtk::gdk_pixbuf::InterpType;
 use relm4::gtk::{self, gdk_pixbuf::Pixbuf, prelude::*};
-use std::cell::{Cell, RefCell};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+
+use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -50,27 +48,6 @@ const MOVE_TOOLTIP: &str = "Move this pin";
 /// The preview's tooltip, hidden while a drag-out is in flight for the
 /// same reason.
 const PICTURE_TOOLTIP: &str = "Click to open in the editor · Drag into another app to paste it";
-
-/// How often the follower thread reads the pointer.
-///
-/// Far faster than a frame, because it costs nothing on the UI thread:
-/// whatever the compositor answers, the freshest reading is already
-/// waiting when the next frame asks for it.
-const POLL_INTERVAL: Duration = Duration::from_millis(2);
-
-/// How far ahead of the pointer to place a dragged pin. Measured: the
-/// pin lands about 12ms behind the pointer, and that is a frame of
-/// compositor work rather than anything this side can skip.
-const LEAD: Duration = Duration::from_millis(12);
-
-/// Most a lead may add, in pixels. Past a flick this fast the guess is
-/// worth less than the overshoot it causes.
-const LEAD_CAP: i32 = 48;
-
-/// How much of each reading folds into the smoothed speed. Low enough
-/// that a jittery hand doesn't throw the lead around, high enough that
-/// a change of direction is followed within a frame or two.
-const VELOCITY_BLEND: f32 = 0.35;
 
 /// Gap between stacked pins.
 const PIN_GAP: i32 = 12;
@@ -127,32 +104,27 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
     let window = gtk::Window::builder()
         .resizable(false)
         .decorated(false)
+        .title(PIN_TITLE)
         .build();
     window.add_css_class("pin-window");
 
-    window.init_layer_shell();
-    // Overlay, not Top: a pinned reference is meant to stay visible
-    // over whatever you switch to, which is the entire point of
-    // pinning it rather than leaving the editor open.
-    window.set_layer(Layer::Overlay);
-    window.set_anchor(Edge::Right, true);
-    window.set_anchor(Edge::Bottom, true);
-    window.set_namespace(Some(PIN_NAMESPACE));
-    // Stack above whatever is already pinned instead of landing on
-    // top of it. Each capture is its own process, so the count comes
-    // from the compositor rather than from a shared list.
-    // Every pin is the same square, so a slot is just an index —
-    // and the lowest free one, so a pin dragged out of the column
-    // leaves its place for the next.
-    let bottom = EDGE_MARGIN + next_slot() * pin_step();
-    window.set_margin(Edge::Right, EDGE_MARGIN);
-    window.set_margin(Edge::Bottom, bottom);
-    // OnDemand rather than Exclusive: the pin should never swallow the
-    // keystrokes of whatever the user is actually working in, but Esc
-    // has to reach it once it is clicked.
-    window.set_keyboard_mode(KeyboardMode::OnDemand);
-
     window.set_default_size(PIN_SIDE + PIN_PADDING * 2, PIN_SIDE + PIN_PADDING * 2);
+
+    // Float it, show it on every workspace, and put it in its slot —
+    // once it has a surface for the compositor to match on.
+    {
+        let slot = next_slot();
+        window.connect_map(move |_| {
+            for dispatch in [
+                format!("setfloating,title:^({PIN_TITLE})$"),
+                format!("pin,title:^({PIN_TITLE})$"),
+                format!("alterzorder top,title:^({PIN_TITLE})$"),
+            ] {
+                hypr_dispatch(&dispatch);
+            }
+            place_in_slot(slot);
+        });
+    }
 
     // Scale the pixels here rather than asking the widget to shrink
     // them. A `Picture`'s natural size is its image's, so a 6K capture
@@ -179,7 +151,7 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
         on_edit: Box::new(move || edit_for_controls()),
         ..actions
     };
-    let controls = build_controls(&window, bottom, actions);
+    let controls = build_controls(&window, actions);
     overlay.add_overlay(&controls);
 
     let (toast_label, toast) = build_toast();
@@ -252,8 +224,37 @@ fn build_toast() -> (gtk::Label, Toast) {
     (label, Rc::new(show))
 }
 
-/// Layer-surface namespace, so pins can count each other.
-const PIN_NAMESPACE: &str = "tensaku-pin";
+/// Window title, which is how the compositor is told which window to
+/// float, pin and place — and how pins recognise each other.
+const PIN_TITLE: &str = "Tensaku Pin";
+
+/// Run one Hyprland dispatcher, best-effort.
+///
+/// Dispatchers rather than window rules: rules have to exist before a
+/// window maps and live in the user's config, and a pin should not
+/// need either.
+fn hypr_dispatch(args: &str) {
+    let _ = std::process::Command::new("hyprctl")
+        .arg("dispatch")
+        .args(args.split(' '))
+        .output();
+}
+
+/// Put the pin in `slot`, counting up from the bottom-right corner.
+fn place_in_slot(slot: i32) {
+    let Some(monitor) = crate::display::hyprland_focused_monitor() else {
+        return;
+    };
+    let scale = (monitor.scale as f64).max(0.0001);
+    let (screen_w, screen_h) = (
+        (monitor.width as f64 / scale).round() as i32,
+        (monitor.height as f64 / scale).round() as i32,
+    );
+    let side = PIN_SIDE + PIN_PADDING * 2;
+    let x = screen_w - EDGE_MARGIN - side;
+    let y = screen_h - EDGE_MARGIN - side - slot * pin_step();
+    hypr_dispatch(&format!("movewindowpixel exact {x} {y},title:^({PIN_TITLE})$"));
+}
 
 /// How far apart stacked pins sit, centre to centre.
 fn pin_step() -> i32 {
@@ -290,15 +291,15 @@ fn first_free_slot(occupied: &[i32]) -> i32 {
 
 /// Which slot a new pin should take.
 ///
-/// Asks the compositor where the existing pins actually are, rather
-/// than keeping a count: every capture is a separate process, a file
-/// of slots would go stale the first time one crashed, and a count
-/// can't tell a pin that has been dragged away from one that hasn't.
-/// A compositor that can't be asked answers zero, and the new pin
-/// lands in the corner like the first one.
+/// Asks the compositor where the existing pins are, rather than
+/// keeping a count: every capture is a separate process, a file of
+/// slots would go stale the first time one crashed, and a count can't
+/// tell a pin that has been dragged away from one that hasn't. A
+/// compositor that can't be asked answers zero, and the new pin lands
+/// in the corner like the first one.
 fn next_slot() -> i32 {
     let Ok(output) = std::process::Command::new("hyprctl")
-        .args(["-j", "layers"])
+        .args(["-j", "clients"])
         .output()
     else {
         return 0;
@@ -306,32 +307,33 @@ fn next_slot() -> i32 {
     let Ok(text) = String::from_utf8(output.stdout) else {
         return 0;
     };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+    let Ok(clients) = serde_json::from_str::<serde_json::Value>(&text) else {
         return 0;
     };
     let Some(monitor) = crate::display::hyprland_focused_monitor() else {
         return 0;
     };
-    // The monitor reports device pixels; layers are placed in logical
-    // ones, which is the space the margins are in too.
+    // The monitor reports device pixels; windows are placed in logical
+    // ones.
     let scale = (monitor.scale as f64).max(0.0001);
     let screen = (
         (monitor.width as f64 / scale).round() as i32,
         (monitor.height as f64 / scale).round() as i32,
     );
 
-    let occupied: Vec<i32> = json
-        .as_object()
+    let occupied: Vec<i32> = clients
+        .as_array()
         .into_iter()
-        .flat_map(|monitors| monitors.values())
-        .filter_map(|monitor| monitor.get("levels")?.as_object())
-        .flat_map(|levels| levels.values())
-        .filter_map(|layers| layers.as_array())
         .flatten()
-        .filter(|layer| layer.get("namespace").and_then(|n| n.as_str()) == Some(PIN_NAMESPACE))
-        .filter_map(|layer| {
-            let field = |key: &str| layer.get(key)?.as_i64().map(|v| v as i32);
-            Some((field("x")?, field("y")?, field("w")?, field("h")?))
+        .filter(|client| client.get("title").and_then(|t| t.as_str()) == Some(PIN_TITLE))
+        .filter_map(|client| {
+            let pair = |key: &str| {
+                let v = client.get(key)?.as_array()?;
+                Some((v.first()?.as_i64()? as i32, v.get(1)?.as_i64()? as i32))
+            };
+            let (x, y) = pair("at")?;
+            let (w, h) = pair("size")?;
+            Some((x, y, w, h))
         })
         .filter_map(|rect| slot_of(rect, screen))
         .collect();
@@ -360,7 +362,7 @@ fn cover_thumbnail(image: &Pixbuf, side: i32) -> Pixbuf {
 }
 
 /// The hover toolbar: edit, copy, copy path, close.
-fn build_controls(window: &gtk::Window, bottom_margin: i32, actions: PinActions) -> gtk::Box {
+fn build_controls(window: &gtk::Window, actions: PinActions) -> gtk::Box {
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     controls.add_css_class("pin-controls");
     controls.set_halign(gtk::Align::End);
@@ -395,7 +397,7 @@ fn build_controls(window: &gtk::Window, bottom_margin: i32, actions: PinActions)
     // a drag carries it into another app.
     let move_handle = button("re-order-dots-horizontal-regular", MOVE_TOOLTIP);
     move_handle.add_css_class("pin-drag-handle");
-    install_move(window, &move_handle, bottom_margin);
+    install_move(window, &move_handle);
     controls.append(&move_handle);
 
     let edit = button("pen-regular", "Edit again");
@@ -494,175 +496,46 @@ fn fit_within(width: i32, height: i32, max: i32) -> (i32, i32) {
 /// anchors are on the far edges, so a rightward drag *shrinks* the
 /// right margin. The margins are held here rather than read back
 /// because `LayerShell` exposes no getter for them.
-fn install_move(window: &gtk::Window, target: &gtk::Button, bottom_margin: i32) {
-    let right = Rc::new(Cell::new(EDGE_MARGIN));
-    let bottom = Rc::new(Cell::new(bottom_margin));
-
+fn install_move(window: &gtk::Window, target: &gtk::Button) {
     let press = gtk::GestureClick::new();
-    {
-        let window = window.clone();
-        let right = right.clone();
-        let bottom = bottom.clone();
-        press.connect_pressed(move |_, _, _, _| {
-            let Some(origin) = crate::hypr::cursor_position() else {
-                return;
-            };
-            let start = (right.get(), bottom.get());
-
-            // The pointer is read on a thread of its own. Asking for
-            // it inline stalled the UI thread for five milliseconds at
-            // the ninetieth percentile — the compositor answers slowly
-            // exactly when it is busy, which is precisely when we have
-            // just asked it to move a window. Off-thread, the answer
-            // is always waiting and never in the way.
-            let cursor = Arc::new(CursorFollow::new(origin));
-            {
-                let cursor = Arc::clone(&cursor);
-                std::thread::spawn(move || {
-                    let mut last = std::time::Instant::now();
-                    while cursor.following.load(Ordering::Relaxed) {
-                        if let Some((x, y)) = crate::hypr::cursor_position() {
-                            let now = std::time::Instant::now();
-                            cursor.sample(x, y, now.duration_since(last).as_secs_f32());
-                            last = now;
-                        }
-                        std::thread::sleep(POLL_INTERVAL);
-                    }
-                });
-            }
-
-            let right = right.clone();
-            let bottom = bottom.clone();
-            let cursor_for_tick = Arc::clone(&cursor);
-            // On the frame clock rather than a timer: a margin can
-            // only take effect on a frame, so setting it more often
-            // than that is work the compositor throws away, and
-            // setting it on any other cadence means landing a step
-            // late.
-            window.add_tick_callback(move |window, _| {
-                if !cursor_for_tick.following.load(Ordering::Relaxed) {
-                    crate::ui::toolbars::dismiss_active_tooltip();
-                    return gtk::glib::ControlFlow::Break;
-                }
-                // Every frame: the pointer never leaves the handle
-                // during a drag, so nothing else takes the tooltip
-                // down.
-                crate::ui::toolbars::dismiss_active_tooltip();
-
-                let (x, y) = cursor_for_tick.predicted();
-                // Anchored bottom-right, so moving right shrinks the
-                // right margin. Clamped so a pin can't be pushed off
-                // the edge it hangs from and out of reach.
-                let new_right = (start.0 - (x - origin.0)).max(0);
-                let new_bottom = (start.1 - (y - origin.1)).max(0);
-                if (new_right, new_bottom) != (right.get(), bottom.get()) {
-                    right.set(new_right);
-                    bottom.set(new_bottom);
-                    window.set_margin(Edge::Right, new_right);
-                    window.set_margin(Edge::Bottom, new_bottom);
-                }
-                gtk::glib::ControlFlow::Continue
-            });
-            // The gesture's own end, and a pointer that leaves without
-            // one — a compositor grab ending, the window outrunning the
-            // pointer — both have to stop the follow, or the pin
-            // chases the cursor forever.
-            let stop = Arc::clone(&cursor);
-            RELEASE.with(|slot| *slot.borrow_mut() = Some(stop));
-        });
-    }
-    {
-        press.connect_released(|_, _, _, _| stop_following());
-    }
-    {
-        let cancel = gtk::EventControllerMotion::new();
-        cancel.connect_leave(|_| stop_following());
-        target.add_controller(cancel);
-    }
+    let window = window.clone();
+    press.connect_pressed(move |gesture, _, x, y| {
+        // Hand the drag to the compositor. Hyprland moves a floating
+        // window during its own frame, with the client out of the
+        // loop, which is why dragging one feels instant and why every
+        // attempt to move this window ourselves trailed by a frame:
+        // a client-positioned surface cannot be anywhere but one round
+        // trip behind the pointer.
+        crate::ui::toolbars::dismiss_active_tooltip();
+        let Some(surface) = window.surface() else {
+            return;
+        };
+        let Ok(toplevel) = surface.downcast::<gtk::gdk::Toplevel>() else {
+            return;
+        };
+        let Some(device) = gesture.device() else {
+            return;
+        };
+        // The compositor wants the grab in surface coordinates; the
+        // gesture reports them relative to the handle it is on.
+        let (sx, sy) = target_origin(gesture).unwrap_or((0.0, 0.0));
+        toplevel.begin_move(
+            &device,
+            gesture.current_button() as i32,
+            sx + x,
+            sy + y,
+            gesture.current_event_time(),
+        );
+    });
     target.add_controller(press);
 }
 
-/// The pointer position a drag is following, shared with the thread
-/// that reads it.
-struct CursorFollow {
-    x: AtomicI32,
-    y: AtomicI32,
-    /// Pointer speed in pixels per second, smoothed. Used to place the
-    /// pin where the pointer will be when the frame lands rather than
-    /// where it was when the frame was built.
-    vx: AtomicI32,
-    vy: AtomicI32,
-    following: AtomicBool,
-}
-
-impl CursorFollow {
-    fn new(origin: (i32, i32)) -> Self {
-        Self {
-            x: AtomicI32::new(origin.0),
-            y: AtomicI32::new(origin.1),
-            vx: AtomicI32::new(0),
-            vy: AtomicI32::new(0),
-            following: AtomicBool::new(true),
-        }
-    }
-
-    /// Where the pointer will be `LEAD` from now, at its current
-    /// speed.
-    ///
-    /// Measured end to end, a pin lands about 12ms after the pointer
-    /// it is following: the compositor has to accept a new margin,
-    /// lay the surface out and present it, and that is a frame's work
-    /// however the margin got there. Leading by that much cancels it,
-    /// which is what turns "close behind" into "attached".
-    ///
-    /// Capped, because a lead is a guess: at a direction change the
-    /// guess is wrong, and a small wrong guess reads as softness while
-    /// a large one reads as the pin overshooting and snapping back.
-    fn predicted(&self) -> (i32, i32) {
-        let lead = LEAD.as_secs_f32();
-        let step = |v: &AtomicI32| {
-            ((v.load(Ordering::Relaxed) as f32 * lead).round() as i32).clamp(-LEAD_CAP, LEAD_CAP)
-        };
-        (
-            self.x.load(Ordering::Relaxed) + step(&self.vx),
-            self.y.load(Ordering::Relaxed) + step(&self.vy),
-        )
-    }
-
-    /// Record a reading and fold it into the smoothed speed.
-    fn sample(&self, x: i32, y: i32, dt: f32) {
-        if dt > 0.0 {
-            let blend = |old: &AtomicI32, delta: i32| {
-                let instant = delta as f32 / dt;
-                let previous = old.load(Ordering::Relaxed) as f32;
-                // A plain difference of two readings is mostly noise
-                // at this rate; the average of the recent past is what
-                // a hand is actually doing.
-                old.store(
-                    (previous * (1.0 - VELOCITY_BLEND) + instant * VELOCITY_BLEND).round() as i32,
-                    Ordering::Relaxed,
-                );
-            };
-            blend(&self.vx, x - self.x.load(Ordering::Relaxed));
-            blend(&self.vy, y - self.y.load(Ordering::Relaxed));
-        }
-        self.x.store(x, Ordering::Relaxed);
-        self.y.store(y, Ordering::Relaxed);
-    }
-}
-
-thread_local! {
-    /// The drag in progress, so a release or a stray leave can end it.
-    /// One pin per process, and one drag at a time within it.
-    static RELEASE: RefCell<Option<Arc<CursorFollow>>> = const { RefCell::new(None) };
-}
-
-fn stop_following() {
-    RELEASE.with(|slot| {
-        if let Some(cursor) = slot.borrow_mut().take() {
-            cursor.following.store(false, Ordering::Relaxed);
-        }
-    });
+/// Where the gesture's widget sits inside the window, so a press on it
+/// can be reported in the window's own coordinates.
+fn target_origin(gesture: &gtk::GestureClick) -> Option<(f64, f64)> {
+    let widget = gesture.widget()?;
+    let root = widget.root()?;
+    widget.translate_coordinates(&root, 0.0, 0.0)
 }
 
 #[cfg(test)]
