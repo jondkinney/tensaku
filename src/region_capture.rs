@@ -48,7 +48,6 @@ const PUCK_GAP: f64 = 10.0;
 /// and capturing a 3×2 region helps nobody.
 const MIN_DRAG: f64 = 8.0;
 
-
 /// What the user chose.
 ///
 /// Rectangles are in the captured image's own pixels, not the
@@ -166,11 +165,7 @@ pub fn run(frozen: Pixbuf) -> Result<RegionOutcome> {
     Ok(shared.borrow().clone())
 }
 
-fn build_overlay(
-    app: &gtk::Application,
-    shared: &Rc<RefCell<RegionOutcome>>,
-    frozen: Pixbuf,
-) {
+fn build_overlay(app: &gtk::Application, shared: &Rc<RefCell<RegionOutcome>>, frozen: Pixbuf) {
     // Windows are read once, at the moment the overlay goes up. The
     // screen is frozen behind it from the user's point of view, so a
     // list that shifted underneath would snap to something that is no
@@ -540,7 +535,6 @@ fn hide_grips(state: &State) {
     state.puck.set_visible(false);
 }
 
-
 /// Show the selection's size beside the corner being dragged.
 ///
 /// In the overlay's own logical pixels, not the capture's device ones.
@@ -559,9 +553,7 @@ fn layout_readout(state: &State, rect: Rect) {
     state.readout.set_visible(true);
 
     let (_, width, _, _) = state.readout.measure(gtk::Orientation::Horizontal, -1);
-    let (_, height, _, _) = state
-        .readout
-        .measure(gtk::Orientation::Vertical, width);
+    let (_, height, _, _) = state.readout.measure(gtk::Orientation::Vertical, width);
     let corner = state.pointer;
     let origin = state.origin;
     let (x, y) = readout_position(
@@ -689,7 +681,9 @@ fn install_pointer(
                 .map(selection_of)
                 .and_then(|sel| hit_test_handle(sel, x, y));
             match state.resize_handle {
-                Some(_) => state.resize_anchor = state.selection.map(selection_of).unwrap_or_default(),
+                Some(_) => {
+                    state.resize_anchor = state.selection.map(selection_of).unwrap_or_default()
+                }
                 None => state.selection = None,
             }
         });
@@ -704,12 +698,9 @@ fn install_pointer(
             let origin = state.origin;
             state.pointer = (origin.0 + dx, origin.1 + dy);
             state.selection = Some(match state.resize_handle {
-                Some(handle) => rect_of(handle.apply(
-                    state.resize_anchor,
-                    origin,
-                    origin.0 + dx,
-                    origin.1 + dy,
-                )),
+                Some(handle) => {
+                    rect_of(handle.apply(state.resize_anchor, origin, origin.0 + dx, origin.1 + dy))
+                }
                 None => rect_between(origin, (origin.0 + dx, origin.1 + dy)),
             });
             layout_shade(&state);
