@@ -28,7 +28,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::capture::Rect;
-use crate::scroll_capture::{ResizeHandle, Selection, hit_test_handle};
+use crate::scroll_capture::{ResizeHandle, Selection, handle_cursor_name, hit_test_handle};
 use crate::windows::{WindowTarget, visible_windows, window_at};
 
 /// Gap between the hint pill and the bottom of the screen. Matches the
@@ -571,6 +571,7 @@ fn install_pointer(
     let motion = gtk::EventControllerMotion::new();
     {
         let state = Rc::clone(state);
+        let surface_w = surface.clone();
         motion.connect_motion(move |_, x, y| {
             let mut state = state.borrow_mut();
             state.pointer = (x, y);
@@ -579,6 +580,17 @@ fn install_pointer(
                 if hit != state.hovered {
                     state.hovered = hit;
                 }
+            }
+            // Over a settled selection, the cursor says what a drag
+            // would do to it — resize from an edge, move from the
+            // middle — rather than offering a crosshair that would
+            // start a new rectangle.
+            if state.mode == Mode::Area
+                && !state.dragging
+                && let Some(rect) = state.selection
+            {
+                let handle = hit_test_handle(selection_of(rect), x, y);
+                surface_w.set_cursor_from_name(Some(handle_cursor_name(handle, "crosshair")));
             }
             layout_shade(&state);
         });

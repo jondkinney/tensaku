@@ -195,6 +195,23 @@ fn pointer_over_selected_page(sel: Selection, x: f64, y: f64) -> bool {
     inside && hit_test_handle(sel, x, y).is_none()
 }
 
+/// The pointer shape for a grab on `handle`, or `fallback` where
+/// there is nothing to grab. Shared with the area capture: a
+/// selection that can be resized should say so the same way in both.
+pub(crate) fn handle_cursor_name(
+    handle: Option<ResizeHandle>,
+    fallback: &'static str,
+) -> &'static str {
+    match handle {
+        Some(ResizeHandle::TopLeft) | Some(ResizeHandle::BottomRight) => "nwse-resize",
+        Some(ResizeHandle::TopRight) | Some(ResizeHandle::BottomLeft) => "nesw-resize",
+        Some(ResizeHandle::Top) | Some(ResizeHandle::Bottom) => "ns-resize",
+        Some(ResizeHandle::Left) | Some(ResizeHandle::Right) => "ew-resize",
+        Some(ResizeHandle::Move) => "move",
+        None => fallback,
+    }
+}
+
 pub(crate) fn hit_test_handle(sel: Selection, x: f64, y: f64) -> Option<ResizeHandle> {
     // 1) Corners win if you're near one (so you get diagonal resize even
     // though the edge bands overlap there).
@@ -1206,14 +1223,7 @@ fn build_overlay(
             }
             update_selected_keyboard_zone(&state, &window_w, x, y);
             let sel = state.borrow().selection;
-            let name = match hit_test_handle(sel, x, y) {
-                Some(ResizeHandle::TopLeft) | Some(ResizeHandle::BottomRight) => "nwse-resize",
-                Some(ResizeHandle::TopRight) | Some(ResizeHandle::BottomLeft) => "nesw-resize",
-                Some(ResizeHandle::Top) | Some(ResizeHandle::Bottom) => "ns-resize",
-                Some(ResizeHandle::Left) | Some(ResizeHandle::Right) => "ew-resize",
-                Some(ResizeHandle::Move) => "move",
-                None => "default",
-            };
+            let name = handle_cursor_name(hit_test_handle(sel, x, y), "default");
             drawing_w.set_cursor_from_name(Some(name));
         });
     }
