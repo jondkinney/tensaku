@@ -80,6 +80,9 @@ pub enum SketchBoardInput {
     ExitCropToPreviousTool,
     /// Mirror the current `style.fill` out to the StyleToolbar after
     /// a programmatic toggle (the `F` keyboard shortcut routes
+    /// The pinned window's Copy-path button.
+    PinCopyPath,
+
     /// The pointer left the canvas widget — drop any hover-only
     /// preview so it doesn't sit frozen on screen.
     PointerLeftCanvas,
@@ -1466,6 +1469,7 @@ impl SketchBoard {
     fn handle_pin(&self, image: &Pixbuf, sender: &ComponentSender<Self>) {
         let copy_image = image.clone();
         let copy_sender = sender.input_sender().clone();
+        let path_sender = sender.input_sender().clone();
         let edit_sender = sender.output_sender().clone();
         let window = crate::pin::open(
             image,
@@ -1480,7 +1484,10 @@ impl SketchBoard {
                     let _ = copy_image;
                     copy_sender.emit(SketchBoardInput::ToolbarEvent(ToolbarEvent::CopyClipboard));
                 }),
-                saved_path: self.last_saved_filepath.borrow().clone(),
+                on_copy_path: Box::new(move || {
+                    path_sender.emit(SketchBoardInput::PinCopyPath);
+                }),
+                path_known: self.last_saved_filepath.borrow().is_some(),
             },
         );
         *self.pinned_window.borrow_mut() = Some(window);
@@ -5804,6 +5811,28 @@ impl Component for SketchBoard {
                 relm4::gtk::glib::idle_add_local_once(move || {
                     renderer.grab_focus();
                 });
+                ToolUpdateResult::Unmodified
+            }
+            SketchBoardInput::PinCopyPath => {
+                // A pinned shot has often never been saved, so the
+                // path it would be copied from doesn't exist yet.
+                // Saving first is the whole of what "copy path" can
+                // honestly mean there, and `handle_save` records the
+                // path synchronously, so the copy that follows in the
+                // same action list sees it.
+                if self.last_saved_filepath.borrow().is_some() {
+                    self.handle_copy_filepath();
+                } else if APP_CONFIG.read().output_filename().is_some() {
+                    self.renderer
+                        .request_render(&[Action::SaveToFile, Action::CopyFilepathToClipboard]);
+                } else {
+                    // Nowhere to save to means no path to copy. Say so
+                    // rather than appearing to work.
+                    log_result(
+                        "No output filename configured, so there is no path to copy.",
+                        !APP_CONFIG.read().disable_notifications(),
+                    );
+                }
                 ToolUpdateResult::Unmodified
             }
             SketchBoardInput::PointerLeftCanvas => {

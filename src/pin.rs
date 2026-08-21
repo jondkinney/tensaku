@@ -38,9 +38,14 @@ pub struct PinActions {
     pub on_edit: Box<dyn Fn()>,
     /// Put the image on the clipboard.
     pub on_copy: Box<dyn Fn()>,
-    /// The saved file, when there is one — Copy path is offered only
-    /// if the shot has actually been written somewhere.
-    pub saved_path: Option<String>,
+    /// Put the file's path on the clipboard, saving the shot first if
+    /// it isn't on disk yet.
+    pub on_copy_path: Box<dyn Fn()>,
+    /// Whether the shot has already been written somewhere. Only
+    /// changes the wording: the button is offered either way, because
+    /// "where is this file" is a question you ask of a pinned shot
+    /// whether or not you remembered to save it first.
+    pub path_known: bool,
 }
 
 /// Build and show the pin window for `image`.
@@ -137,7 +142,8 @@ fn build_controls(window: &gtk::Window, actions: PinActions) -> gtk::Box {
     let PinActions {
         on_edit,
         on_copy,
-        saved_path,
+        on_copy_path,
+        path_known,
     } = actions;
 
     let edit = button("pen-regular", "Edit again");
@@ -148,18 +154,19 @@ fn build_controls(window: &gtk::Window, actions: PinActions) -> gtk::Box {
     copy.connect_clicked(move |_| on_copy());
     controls.append(&copy);
 
-    // Only when the shot exists on disk — a path button that copies
-    // nothing would be worse than no button.
-    if let Some(path) = saved_path {
-        let copy_path = button("link-regular", "Copy file path");
-        copy_path.connect_clicked(move |btn| {
-            if let Some(display) = gtk::gdk::Display::default() {
-                display.clipboard().set_text(&path);
-            }
-            btn.set_tooltip_text(Some("Path copied"));
-        });
-        controls.append(&copy_path);
-    }
+    let copy_path = button(
+        "link-regular",
+        if path_known {
+            "Copy file path"
+        } else {
+            "Save and copy file path"
+        },
+    );
+    copy_path.connect_clicked(move |btn| {
+        on_copy_path();
+        btn.set_tooltip_text(Some("Path copied"));
+    });
+    controls.append(&copy_path);
 
     let close = button("dismiss-regular", "Close");
     let window_for_close = window.clone();
