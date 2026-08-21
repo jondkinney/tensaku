@@ -92,6 +92,13 @@ struct State {
     fixed: gtk::Fixed,
     shade: [gtk::Box; 4],
     outline: gtk::Box,
+    /// Full-width and full-height guides through the pointer, shown
+    /// before a drag starts. They line the pointer up with what is on
+    /// screen, which is how you find the edge of a window or a text
+    /// column without dragging first to see where you landed.
+    crosshair: [gtk::Box; 2],
+    /// Where the pointer is, in logical pixels.
+    pointer: (f64, f64),
     /// The overlay's size in logical pixels, learned once it maps.
     size: (i32, i32),
     /// Image pixels per logical pixel, learned at draw time — the
@@ -149,12 +156,21 @@ fn build_overlay(
     outline.add_css_class("region-capture-outline");
     outline.set_visible(false);
 
+    let crosshair: [gtk::Box; 2] = std::array::from_fn(|_| {
+        let guide = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        guide.add_css_class("region-capture-crosshair");
+        guide.set_visible(false);
+        guide
+    });
+
     let fixed = gtk::Fixed::new();
     let state = Rc::new(RefCell::new(State {
         frozen: frozen.clone(),
         fixed: fixed.clone(),
         shade: shade.clone(),
         outline: outline.clone(),
+        crosshair: crosshair.clone(),
+        pointer: (0.0, 0.0),
         size: (0, 0),
         image_scale: 1.0,
         mode: Mode::Area,
@@ -198,6 +214,9 @@ fn build_overlay(
         fixed.put(strip, 0.0, 0.0);
     }
     fixed.put(&outline, 0.0, 0.0);
+    for guide in &crosshair {
+        fixed.put(guide, 0.0, 0.0);
+    }
     overlay.add_overlay(&fixed);
 
     let hint = gtk::Label::new(Some(Mode::Area.hint()));
@@ -266,6 +285,7 @@ fn layout_shade(state: &State) {
             place(index, 0.0, 0.0, 0.0, 0.0);
         }
         state.outline.set_visible(false);
+        layout_crosshair(state, true);
         return;
     };
 
@@ -283,6 +303,28 @@ fn layout_shade(state: &State) {
     state.outline.set_size_request(w as i32, h as i32);
     state.fixed.move_(&state.outline, x, y);
     state.outline.set_visible(w >= 1.0 && h >= 1.0);
+    // Once there is a rectangle, it is the thing being aimed — the
+    // guides would just be two more lines over it.
+    layout_crosshair(state, false);
+}
+
+/// Put the guides through the pointer, or hide them.
+fn layout_crosshair(state: &State, visible: bool) {
+    let (width, height) = state.size;
+    // Window mode picks whole windows, so there is no edge to line up
+    // against and the guides are noise.
+    let visible = visible && state.mode == Mode::Area;
+    let (x, y) = state.pointer;
+
+    let vertical = &state.crosshair[0];
+    vertical.set_size_request(1, height);
+    state.fixed.move_(vertical, x.round(), 0.0);
+    vertical.set_visible(visible);
+
+    let horizontal = &state.crosshair[1];
+    horizontal.set_size_request(width, 1);
+    state.fixed.move_(horizontal, 0.0, y.round());
+    horizontal.set_visible(visible);
 }
 
 /// The rectangle the overlay would capture if the user committed now.
@@ -331,14 +373,14 @@ fn install_pointer(
         let state = Rc::clone(state);
         motion.connect_motion(move |_, x, y| {
             let mut state = state.borrow_mut();
-            if state.mode != Mode::Window {
-                return;
+            state.pointer = (x, y);
+            if state.mode == Mode::Window {
+                let hit = window_at(&state.windows, x, y).cloned();
+                if hit != state.hovered {
+                    state.hovered = hit;
+                }
             }
-            let hit = window_at(&state.windows, x, y).cloned();
-            if hit != state.hovered {
-                state.hovered = hit;
-                layout_shade(&state);
-            }
+            layout_shade(&state);
         });
     }
     surface.add_controller(motion);
@@ -486,6 +528,9 @@ fn install_css(app: &gtk::Application) {
          .region-capture-outline {
              border: 1px solid rgba(255, 255, 255, 0.9);
          }
+         /* Faint enough to read the screen through, which is the point
+            of lining up against it. */
+         .region-capture-crosshair { background: rgba(255, 255, 255, 0.22); }
          .region-capture-hint {
              background: rgba(0, 0, 0, 0.75);
              border-radius: 8px;
