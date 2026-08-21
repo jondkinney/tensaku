@@ -370,6 +370,7 @@ pub enum SketchBoardOutput {
     /// its slider so the on-screen value matches the now-active
     /// style state instead of the previous session's drag.
     SpotlightDarknessReset(f32),
+    SpotlightMagnificationReset(f32),
     HighlighterOpacityReset(f32),
     /// Tool switch into Brush snapped the post-stroke smoothing slider
     /// back to the saved default; toolbar updates the slider position
@@ -3220,6 +3221,33 @@ impl SketchBoard {
         steps
     }
 
+    /// Step the global loupe factor by `dy`-derived notches, and tell
+    /// the toolbar so its slider follows the wheel.
+    fn scroll_spotlight_magnification(&mut self, dy: f32, outer_sender: &ComponentSender<Self>) {
+        let steps = self.drain_scroll_resize_steps(dy);
+        if steps == 0 {
+            return;
+        }
+        // A quarter per notch: twelve notches covers 1x to 4x, so a
+        // wrist-flick moves the loupe visibly without overshooting the
+        // whole range.
+        const MAGNIFICATION_STEP: f32 = 0.25;
+        let current = self.style.spotlight_magnification;
+        let next = (current + steps as f32 * MAGNIFICATION_STEP).clamp(
+            crate::tools::MIN_SPOTLIGHT_MAGNIFICATION,
+            crate::tools::MAX_SPOTLIGHT_MAGNIFICATION,
+        );
+        if (next - current).abs() < f32::EPSILON {
+            return;
+        }
+        self.style.spotlight_magnification = next;
+        self.renderer.set_spotlight_magnification(next);
+        outer_sender
+            .output_sender()
+            .emit(SketchBoardOutput::SpotlightMagnificationReset(next));
+        self.refresh_screen();
+    }
+
     /// Resize all currently-selected drawables by `dy`-derived steps.
     /// Falls through cleanly when the accumulated dy hasn't reached a
     /// full step yet — typical for trackpad scrolling.
@@ -5361,6 +5389,15 @@ impl Component for SketchBoard {
                             // is a near-one-time setting, not a
                             // per-stroke knob.
                             self.scroll_annotation_multiplier(me.pos.y, &outer_sender);
+                            true
+                        } else if alt_held && self.active_tool_type() == Tools::Spotlight {
+                            // Alt+wheel → the spotlight's loupe factor.
+                            // Its plain wheel is already darkness, and
+                            // "size" for a spotlight only means the
+                            // freehand stroke's width, so the second
+                            // control the shape actually has belongs on
+                            // the second chord.
+                            self.scroll_spotlight_magnification(me.pos.y, &outer_sender);
                             true
                         } else if alt_held {
                             // Alt+wheel → the active tool's size for the

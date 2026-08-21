@@ -5592,6 +5592,7 @@ impl Component for StyleToolbar {
                     #[block_signal(spotlight_magnify_changed)]
                     set_value: model.spotlight_magnification as f64,
                     add_mark: (1.0, gtk::PositionType::Bottom, Some("Magnify")),
+                    install_tooltip_above_markup: "Spotlight magnification (<span face=\"Adwaita Sans\">⌥</span> scroll to adjust)",
                     #[watch]
                     set_visible: model.current_tool == Tools::Spotlight,
                     connect_value_changed[sender] => move |scale| {

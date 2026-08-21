@@ -336,6 +336,7 @@ enum AppInput {
     /// the previous session's in-flight slider value and read the
     /// saved default off `state.toml`.
     SpotlightDarknessReset(f32),
+    SpotlightMagnificationReset(f32),
     HighlighterOpacityReset(f32),
     BrushPostSmoothReset(usize),
 }
@@ -1389,6 +1390,11 @@ impl Component for App {
                     .sender()
                     .emit(StyleToolbarInput::SetSpotlightDarkness(value));
             }
+            AppInput::SpotlightMagnificationReset(value) => {
+                self.style_toolbar
+                    .sender()
+                    .emit(StyleToolbarInput::SetSpotlightMagnification(value));
+            }
             AppInput::HighlighterOpacityReset(value) => {
                 self.style_toolbar
                     .sender()
@@ -1510,6 +1516,9 @@ impl Component for App {
                     }
                     SketchBoardOutput::SelectionBrushPostSmoothChanged(v) => {
                         AppInput::SelectionBrushPostSmoothChanged(v)
+                    }
+                    SketchBoardOutput::SpotlightMagnificationReset(v) => {
+                        AppInput::SpotlightMagnificationReset(v)
                     }
                     SketchBoardOutput::SpotlightDarknessReset(v) => {
                         AppInput::SpotlightDarknessReset(v)
