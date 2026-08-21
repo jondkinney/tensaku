@@ -268,74 +268,72 @@ fn extend_edges(dst: &Pixbuf, src: &Pixbuf, layout: ResizeLayout) {
     let rows = |c: &[Rgba]| slice(c, src_y, copy_h);
     let cols = |c: &[Rgba]| slice(c, src_x, copy_w);
 
+    let left = rows(&left_colors);
+    let right = rows(&right_colors);
+    let top = cols(&top_colors);
+    let bottom = cols(&bottom_colors);
+    // ONE settled colour for the whole frame, not one per side.
+    // Per-side values differ by a level or two — they sample different
+    // edges of the same background — and that difference lands as a
+    // step wherever two sides' far fields meet, which is every corner.
+    // A single value makes the far field of the entire extension
+    // exactly uniform; each side still matches the capture at its own
+    // boundary, so this costs nothing where the match matters.
+    let settled = settled_color(
+        &[left.as_slice(), right.as_slice(), top.as_slice(), bottom.as_slice()].concat(),
+    );
+
     if grow_left > 0 {
-        fill_rows(dst, 0, dst_y, grow_left, &rows(&left_colors));
+        fill_side_strip(dst, 0, dst_y, grow_left, &left, settled, Anchor::End);
     }
     if grow_right > 0 {
-        fill_rows(
+        fill_side_strip(
             dst,
             new_w - grow_right,
             dst_y,
             grow_right,
-            &rows(&right_colors),
+            &right,
+            settled,
+            Anchor::Start,
         );
     }
     if grow_top > 0 {
-        fill_band(dst, dst_x, 0, grow_top, &cols(&top_colors));
+        fill_side_band(dst, dst_x, 0, grow_top, &top, settled, Anchor::End);
     }
     if grow_bottom > 0 {
-        fill_band(
+        fill_side_band(
             dst,
             dst_x,
             new_h - grow_bottom,
             grow_bottom,
-            &cols(&bottom_colors),
+            &bottom,
+            settled,
+            Anchor::Start,
         );
     }
 
     // Corners (where both axes grew). Continue whichever adjacent band
     // is longer, taking that band's END colour so the corner joins it
     // without a step.
-    let at = |c: &[Rgba], i: i32| c.get(i.max(0) as usize).copied().unwrap_or((0, 0, 0, 255));
-    let last_row = src_y + copy_h - 1;
-    let last_col = src_x + copy_w - 1;
+    // Corners sit diagonally away from the capture, so they are pure
+    // far field — the same settled colour both adjacent bands reach.
     if grow_top > 0 && grow_left > 0 {
-        let c = if grow_top >= grow_left {
-            at(&top_colors, src_x)
-        } else {
-            at(&left_colors, src_y)
-        };
-        fill_rect(dst, 0, 0, grow_left, grow_top, c);
+        fill_rect(dst, 0, 0, grow_left, grow_top, settled);
     }
     if grow_top > 0 && grow_right > 0 {
-        let c = if grow_top >= grow_right {
-            at(&top_colors, last_col)
-        } else {
-            at(&right_colors, src_y)
-        };
-        fill_rect(dst, new_w - grow_right, 0, grow_right, grow_top, c);
+        fill_rect(dst, new_w - grow_right, 0, grow_right, grow_top, settled);
     }
     if grow_bottom > 0 && grow_left > 0 {
-        let c = if grow_bottom >= grow_left {
-            at(&bottom_colors, src_x)
-        } else {
-            at(&left_colors, last_row)
-        };
-        fill_rect(dst, 0, new_h - grow_bottom, grow_left, grow_bottom, c);
+        fill_rect(dst, 0, new_h - grow_bottom, grow_left, grow_bottom, settled);
     }
     if grow_bottom > 0 && grow_right > 0 {
-        let c = if grow_bottom >= grow_right {
-            at(&bottom_colors, last_col)
-        } else {
-            at(&right_colors, last_row)
-        };
         fill_rect(
             dst,
             new_w - grow_right,
             new_h - grow_bottom,
             grow_right,
             grow_bottom,
-            c,
+            settled,
         );
     }
 }
@@ -520,38 +518,162 @@ fn fill_rect(p: &Pixbuf, x: i32, y: i32, w: i32, h: i32, color: Rgba) {
     blit_row(p, x, y, h, &pixel_bytes(p, color).repeat(w as usize));
 }
 
-/// Fill `w`-wide rows at `(x, y)` downward, one colour per row.
+/// How far the per-line edge colour is carried into the extension
+/// before it settles to a single colour for that side.
 ///
-/// For the left/right extension strips, whose colour follows the
-/// capture's content down the edge.
-fn fill_rows(p: &Pixbuf, x: i32, y: i32, w: i32, colors: &[Rgba]) {
-    if w <= 0 {
-        return;
+/// Per-line colours exist so the extension MATCHES the capture where
+/// the two meet. Carried indefinitely they cause a different problem:
+/// a capture's flat region is not bit-flat — a desktop background
+/// wanders by a level or two down its edge, invisibly — and smearing
+/// that wander across a thousand pixels of fill turns an 8-row wobble
+/// into an 8-row stripe, which the eye picks up immediately against
+/// the surrounding flat. Fading to one colour keeps the match at the
+/// boundary, where it matters, and a single flat colour further out,
+/// where banding would show.
+const EDGE_FADE_PX: i32 = 96;
+
+/// Blend `from` toward `to`, `num`/`den` of the way.
+fn blend(from: Rgba, to: Rgba, num: i32, den: i32) -> Rgba {
+    let mix = |a: u8, b: u8| -> u8 {
+        let a = a as i32;
+        let b = b as i32;
+        (a + (b - a) * num / den.max(1)) as u8
+    };
+    (
+        mix(from.0, to.0),
+        mix(from.1, to.1),
+        mix(from.2, to.2),
+        mix(from.3, to.3),
+    )
+}
+
+/// The colour a side settles to away from the capture: the per-channel
+/// median of its lines, so one bright line can't set it.
+fn settled_color(colors: &[Rgba]) -> Rgba {
+    if colors.is_empty() {
+        return (0, 0, 0, 255);
     }
-    for (i, color) in colors.iter().enumerate() {
-        blit_row(
-            p,
-            x,
-            y + i as i32,
-            1,
-            &pixel_bytes(p, *color).repeat(w as usize),
-        );
+    let mut out = [0u8; 4];
+    let mut scratch: Vec<u8> = Vec::with_capacity(colors.len());
+    for (channel, slot) in out.iter_mut().enumerate() {
+        scratch.clear();
+        scratch.extend(colors.iter().map(|c| match channel {
+            0 => c.0,
+            1 => c.1,
+            2 => c.2,
+            _ => c.3,
+        }));
+        scratch.sort_unstable();
+        *slot = scratch[scratch.len() / 2];
+    }
+    (out[0], out[1], out[2], out[3])
+}
+
+/// Which end of a strip or band touches the capture. The per-line
+/// colour sits there and fades away from it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Anchor {
+    /// Low coordinate — a right-hand strip or a bottom band.
+    Start,
+    /// High coordinate — a left-hand strip or a top band.
+    End,
+}
+
+fn push_pixel(row: &mut Vec<u8>, has_alpha: bool, c: Rgba) {
+    row.push(c.0);
+    row.push(c.1);
+    row.push(c.2);
+    if has_alpha {
+        row.push(c.3);
     }
 }
 
-/// Fill an `h`-tall band at `(x, y)` whose colour varies per column.
-///
-/// For the top/bottom extension bands. Every row of the band is
-/// identical, so the per-column colours are assembled once and memcpyd
-/// down — writing it column-major instead would stride across the
-/// whole raster per column.
-fn fill_band(p: &Pixbuf, x: i32, y: i32, h: i32, colors: &[Rgba]) {
-    let bpp = if p.has_alpha() { 4 } else { 3 };
-    let mut row = Vec::with_capacity(colors.len() * bpp);
-    for color in colors {
-        row.extend_from_slice(&pixel_bytes(p, *color));
+/// Fill a `w`-wide vertical strip at `(x, y)`, one colour per row at
+/// the capture-facing edge, fading across to `settled`.
+fn fill_side_strip(
+    p: &Pixbuf,
+    x: i32,
+    y: i32,
+    w: i32,
+    colors: &[Rgba],
+    settled: Rgba,
+    anchor: Anchor,
+) {
+    if w <= 0 || colors.is_empty() {
+        return;
     }
-    blit_row(p, x, y, h, &row);
+    let has_alpha = p.has_alpha();
+    let bpp = if has_alpha { 4 } else { 3 };
+    let fade = EDGE_FADE_PX.min(w);
+    // Columns at least `fade` from the capture are all `settled`, so
+    // that stretch is built once and reused for every row.
+    let flat = pixel_bytes(p, settled).repeat((w - fade).max(0) as usize);
+
+    let mut row = Vec::with_capacity(w as usize * bpp);
+    for (i, &line) in colors.iter().enumerate() {
+        row.clear();
+        match anchor {
+            Anchor::Start => {
+                for d in 0..fade {
+                    push_pixel(&mut row, has_alpha, blend(line, settled, d, fade));
+                }
+                row.extend_from_slice(&flat);
+            }
+            Anchor::End => {
+                row.extend_from_slice(&flat);
+                for d in (0..fade).rev() {
+                    push_pixel(&mut row, has_alpha, blend(line, settled, d, fade));
+                }
+            }
+        }
+        blit_row(p, x, y + i as i32, 1, &row);
+    }
+}
+
+/// Fill an `h`-tall horizontal band at `(x, y)`, one colour per column
+/// at the capture-facing edge, fading across to `settled`.
+///
+/// Rows are written whole: assembling this column-major would stride
+/// across the entire raster once per column.
+fn fill_side_band(
+    p: &Pixbuf,
+    x: i32,
+    y: i32,
+    h: i32,
+    colors: &[Rgba],
+    settled: Rgba,
+    anchor: Anchor,
+) {
+    if h <= 0 || colors.is_empty() {
+        return;
+    }
+    let has_alpha = p.has_alpha();
+    let bpp = if has_alpha { 4 } else { 3 };
+    let fade = EDGE_FADE_PX.min(h);
+
+    // Rows at least `fade` from the capture are uniformly `settled`.
+    let flat_rows = (h - fade).max(0);
+    if flat_rows > 0 {
+        let flat = pixel_bytes(p, settled).repeat(colors.len());
+        let flat_y = match anchor {
+            Anchor::Start => y + fade,
+            Anchor::End => y,
+        };
+        blit_row(p, x, flat_y, flat_rows, &flat);
+    }
+
+    let mut row = Vec::with_capacity(colors.len() * bpp);
+    for d in 0..fade {
+        row.clear();
+        for &line in colors {
+            push_pixel(&mut row, has_alpha, blend(line, settled, d, fade));
+        }
+        let row_y = match anchor {
+            Anchor::Start => y + d,
+            Anchor::End => y + h - 1 - d,
+        };
+        blit_row(p, x, row_y, 1, &row);
+    }
 }
 
 /// Which side of the raster an extension strip is being sampled from.
@@ -4244,35 +4366,30 @@ mod tests {
         assert!(hits.iter().all(|h| *h == 0));
     }
 
-    /// The edge extension must FOLLOW the capture's edge rather than
-    /// paint one flat colour per side — that mismatch is what made a
-    /// grown canvas show a visible seam wherever the edge content
-    /// varied along it. Build a raster of coloured bands so every row's
-    /// edge colour differs, grow it on all four sides, and check the
-    /// extension carries each band outward.
+    /// Two properties, in tension, that together define a good
+    /// extension.
+    ///
+    /// At the boundary it must MATCH the capture per line — a single
+    /// flat colour per side steps away from the capture wherever its
+    /// edge content varies, which is a visible seam.
+    ///
+    /// Far from the boundary it must be CONSTANT down the side — a
+    /// capture's flat region is not bit-flat, and carrying that wander
+    /// across a large fill turns an invisible wobble into a visible
+    /// stripe.
     #[test]
-    fn edge_extension_follows_per_line_colour() {
+    fn edge_extension_matches_at_the_boundary_and_settles_beyond_it() {
         const BAND: i32 = 20;
-        const PAD: i32 = 12;
+        // Wider than EDGE_FADE_PX so both regimes are present.
+        const PAD: i32 = 200;
         let (w, h) = (120, 120);
-        let src = Pixbuf::new(
-            relm4::gtk::gdk_pixbuf::Colorspace::Rgb,
-            false,
-            8,
-            w,
-            h,
-        )
-        .unwrap();
-        // Horizontal bands drive the left/right edges; a vertical tint
-        // gradient across each band drives top/bottom.
+        let src = Pixbuf::new(relm4::gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, w, h).unwrap();
         let band_color = |y: i32| -> (u8, u8, u8) { (((y / BAND) * 40) as u8, 60, 200) };
         let col_color = |x: i32| -> (u8, u8, u8) { (10, ((x / BAND) * 40) as u8, 90) };
+        const EDGE: i32 = 12;
         for y in 0..h {
             for x in 0..w {
-                // Top and bottom strips carry the column pattern, the
-                // middle carries the row pattern, so each side has its
-                // own varying signal.
-                let (r, g, b) = if y < PAD || y >= h - PAD {
+                let (r, g, b) = if y < EDGE || y >= h - EDGE {
                     col_color(x)
                 } else {
                     band_color(y)
@@ -4283,29 +4400,45 @@ mod tests {
 
         let out = super::resize_pixbuf_to_rect(&src, -PAD, -PAD, w + 2 * PAD, h + 2 * PAD).unwrap();
 
-        // Left and right extensions: sample the middle of each band,
-        // clear of the median filter's reach at the band edges.
-        for y in (PAD + BAND / 2..h - PAD).step_by(BAND as usize) {
+        // Boundary columns carry each row's own colour.
+        for y in (EDGE + BAND / 2..h - EDGE).step_by(BAND as usize) {
             let want = band_color(y);
-            for probe_x in [0, PAD - 1, w + PAD, w + 2 * PAD - 1] {
-                let got = super::read_pixel(&out, probe_x, y + PAD, false);
-                assert_eq!(
-                    (got.0, got.1, got.2),
-                    want,
-                    "row {y} extension at x={probe_x}"
-                );
+            for boundary_x in [PAD - 1, w + PAD] {
+                let got = super::read_pixel(&out, boundary_x, y + PAD, false);
+                assert_eq!((got.0, got.1, got.2), want, "row {y} at x={boundary_x}");
+            }
+        }
+        // Boundary rows carry each column's own colour.
+        for x in (BAND / 2..w).step_by(BAND as usize) {
+            let want = col_color(x);
+            for boundary_y in [PAD - 1, h + PAD] {
+                let got = super::read_pixel(&out, x + PAD, boundary_y, false);
+                assert_eq!((got.0, got.1, got.2), want, "column {x} at y={boundary_y}");
             }
         }
 
-        // Top and bottom extensions carry the column pattern.
-        for x in (BAND / 2..w).step_by(BAND as usize) {
-            let want = col_color(x);
-            for probe_y in [0, PAD - 1, h + PAD, h + 2 * PAD - 1] {
-                let got = super::read_pixel(&out, x + PAD, probe_y, false);
+        // Far field: constant along the WHOLE of each side, however
+        // much the capture's edge varied. Spanning the corners matters
+        // — they abut two sides at once, so a per-side settled colour
+        // would step there even with each side internally uniform.
+        // This is the anti-banding property.
+        for probe_x in [0, out.width() - 1] {
+            let first = super::read_pixel(&out, probe_x, 0, false);
+            for y in 0..out.height() {
                 assert_eq!(
-                    (got.0, got.1, got.2),
-                    want,
-                    "column {x} extension at y={probe_y}"
+                    super::read_pixel(&out, probe_x, y, false),
+                    first,
+                    "banding down x={probe_x} at y={y}"
+                );
+            }
+        }
+        for probe_y in [0, out.height() - 1] {
+            let first = super::read_pixel(&out, 0, probe_y, false);
+            for x in 0..out.width() {
+                assert_eq!(
+                    super::read_pixel(&out, x, probe_y, false),
+                    first,
+                    "banding across y={probe_y} at x={x}"
                 );
             }
         }
@@ -4454,7 +4587,12 @@ mod tests {
         let (w, h) = (src.width(), src.height());
         // Grow on all four sides so every fill_rect branch runs,
         // corners included.
-        let out = resize_pixbuf_to_rect(&src, -200, -150, w + 400, h + 300).unwrap();
+        let pad: i32 = std::env::var("TENSAKU_BENCH_PAD")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(200);
+        let out = resize_pixbuf_to_rect(&src, -pad, -pad * 3 / 4, w + 2 * pad, h + pad * 3 / 2)
+            .unwrap();
         let digest = unsafe {
             out.pixels()
                 .iter()
@@ -4568,8 +4706,24 @@ mod tests {
         );
 
         t("fill right+bottom strips", &|| {
-            super::fill_rows(&dst, w, 0, 40, &vec![(1, 2, 3, 255); (h + 40) as usize]);
-            super::fill_band(&dst, 0, h, 40, &vec![(1, 2, 3, 255); w as usize]);
+            super::fill_side_strip(
+                &dst,
+                w,
+                0,
+                40,
+                &vec![(1, 2, 3, 255); (h + 40) as usize],
+                (1, 2, 3, 255),
+                super::Anchor::Start,
+            );
+            super::fill_side_band(
+                &dst,
+                0,
+                h,
+                40,
+                &vec![(1, 2, 3, 255); w as usize],
+                (1, 2, 3, 255),
+                super::Anchor::Start,
+            );
         });
     }
 }
