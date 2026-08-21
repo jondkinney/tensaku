@@ -49,6 +49,11 @@ const MOVE_TOOLTIP: &str = "Move this pin";
 /// same reason.
 const PICTURE_TOOLTIP: &str = "Click to open in the editor · Drag into another app to paste it";
 
+/// How often a dragged pin asks where the pointer is. 16ms is a frame
+/// at 60Hz: often enough to look attached, rare enough that the socket
+/// round-trip costs nothing.
+const FOLLOW_INTERVAL: Duration = Duration::from_millis(16);
+
 /// Gap between stacked pins.
 const PIN_GAP: i32 = 12;
 
@@ -482,49 +487,77 @@ fn fit_within(width: i32, height: i32, max: i32) -> (i32, i32) {
 fn install_move(window: &gtk::Window, target: &gtk::Button, bottom_margin: i32) {
     let right = Rc::new(Cell::new(EDGE_MARGIN));
     let bottom = Rc::new(Cell::new(bottom_margin));
+    let dragging = Rc::new(Cell::new(false));
 
-    let drag = gtk::GestureDrag::new();
+    let press = gtk::GestureClick::new();
     {
-        // A moving window can't be dragged from a fixed reference.
-        // The gesture measures its delta inside this window's own
-        // coordinates, so every step the window takes is subtracted
-        // from the next reading: applied against the position the drag
-        // started from, the window catches up, the delta falls back to
-        // zero, and it springs to where it began — which is the lag,
-        // and the shake.
-        //
-        // Applying each reading to the CURRENT position instead is
-        // self-correcting: moving the window zeroes the delta, so the
-        // next reading is exactly the new pointer motion and nothing
-        // else.
         let window = window.clone();
+        let target_press = target.clone();
         let right = right.clone();
         let bottom = bottom.clone();
-        drag.connect_drag_update(move |_, dx, dy| {
-            // Clamped at zero so a drag can't push the pin off the
-            // edge it is anchored to and out of reach.
-            let new_right = (right.get() - dx.round() as i32).max(0);
-            let new_bottom = (bottom.get() - dy.round() as i32).max(0);
-            right.set(new_right);
-            bottom.set(new_bottom);
-            window.set_margin(Edge::Right, new_right);
-            window.set_margin(Edge::Bottom, new_bottom);
+        let dragging = dragging.clone();
+        press.connect_pressed(move |_, _, _, _| {
+            // Where the pointer is and where the pin is, both in the
+            // compositor's own coordinates. Everything after this is
+            // arithmetic on those two.
+            let Some(origin) = crate::hypr::cursor_position() else {
+                return;
+            };
+            if dragging.replace(true) {
+                return;
+            }
+            // The tooltip would otherwise reappear on every step: the
+            // window slides out from under the pointer, which GTK
+            // reads as a fresh hover.
+            target_press.set_has_tooltip(false);
+
+            let start = (right.get(), bottom.get());
+            let window = window.clone();
+            let target_tick = target_press.clone();
+            let right = right.clone();
+            let bottom = bottom.clone();
+            let dragging = dragging.clone();
+            // A timer, not motion events: the pointer leaves the
+            // handle the moment the window lags behind it, and a drag
+            // that stops when it falls behind is exactly the drag that
+            // was falling behind.
+            gtk::glib::timeout_add_local(FOLLOW_INTERVAL, move || {
+                if !dragging.get() {
+                    target_tick.set_tooltip_text(Some(MOVE_TOOLTIP));
+                    return gtk::glib::ControlFlow::Break;
+                }
+                let Some((x, y)) = crate::hypr::cursor_position() else {
+                    return gtk::glib::ControlFlow::Continue;
+                };
+                // Anchored bottom-right, so a rightward move shrinks
+                // the right margin. Clamped so a pin can't be pushed
+                // off the edge it hangs from and out of reach.
+                let new_right = (start.0 - (x - origin.0)).max(0);
+                let new_bottom = (start.1 - (y - origin.1)).max(0);
+                if (new_right, new_bottom) != (right.get(), bottom.get()) {
+                    right.set(new_right);
+                    bottom.set(new_bottom);
+                    window.set_margin(Edge::Right, new_right);
+                    window.set_margin(Edge::Bottom, new_bottom);
+                }
+                gtk::glib::ControlFlow::Continue
+            });
         });
     }
     {
-        // The window slides out from under the pointer while dragging,
-        // which GTK reads as a fresh hover on every step: the tooltip
-        // pops back and jitters along beside the pin.
-        let target_begin = target.clone();
-        drag.connect_drag_begin(move |_, _, _| target_begin.set_has_tooltip(false));
+        let dragging = dragging.clone();
+        press.connect_released(move |_, _, _, _| dragging.set(false));
     }
+    // A pointer that leaves without a release — the window outrunning
+    // it, a compositor grab ending — must still finish the drag, or
+    // the pin follows the cursor forever.
     {
-        let target_end = target.clone();
-        drag.connect_drag_end(move |_, _, _| {
-            target_end.set_tooltip_text(Some(MOVE_TOOLTIP));
-        });
+        let dragging = dragging.clone();
+        let cancel = gtk::EventControllerMotion::new();
+        cancel.connect_leave(move |_| dragging.set(false));
+        target.add_controller(cancel);
     }
-    target.add_controller(drag);
+    target.add_controller(press);
 }
 
 #[cfg(test)]

@@ -68,6 +68,41 @@ pub fn resize_self(w: i32, h: i32) -> bool {
         .any(|cmd| paths.iter().any(|path| dispatch_ok(path, cmd)))
 }
 
+/// Where the pointer is, in logical screen coordinates.
+///
+/// Over the IPC socket rather than by spawning `hyprctl`: this is
+/// asked on a timer while a pin is being dragged, and a fork per frame
+/// is what made an earlier drag unusable. A socket round-trip is
+/// sub-millisecond and bounded by [`IPC_TIMEOUT`].
+///
+/// The pointer is the one thing a moving window cannot disturb, which
+/// is why a drag follows it rather than a gesture's own deltas: those
+/// are measured inside the window being moved.
+pub fn cursor_position() -> Option<(i32, i32)> {
+    let sig = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")?;
+    let sig = sig.to_string_lossy();
+    socket_paths(&sig)
+        .iter()
+        .find_map(|path| parse_cursor_position(&request(path, "cursorpos")?))
+}
+
+/// `cursorpos` answers `x, y`.
+fn parse_cursor_position(reply: &str) -> Option<(i32, i32)> {
+    let (x, y) = reply.trim().split_once(',')?;
+    Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+}
+
+/// Send one IPC command and return its reply.
+fn request(path: &str, cmd: &str) -> Option<String> {
+    let mut stream = UnixStream::connect(path).ok()?;
+    let _ = stream.set_write_timeout(Some(IPC_TIMEOUT));
+    let _ = stream.set_read_timeout(Some(IPC_TIMEOUT));
+    stream.write_all(cmd.as_bytes()).ok()?;
+    let mut reply = String::new();
+    stream.read_to_string(&mut reply).ok()?;
+    Some(reply)
+}
+
 /// Candidate IPC socket paths, newest layout first. Hyprland ≥ 0.40 keeps the
 /// socket under `$XDG_RUNTIME_DIR/hypr/<sig>/`; older builds used `/tmp/hypr/`.
 fn socket_paths(sig: &str) -> Vec<String> {
@@ -94,4 +129,23 @@ fn dispatch_ok(path: &str, cmd: &str) -> bool {
     let mut resp = String::new();
     let _ = stream.read_to_string(&mut resp);
     resp.trim() == "ok"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_cursor_position;
+
+    #[test]
+    fn a_cursor_reply_parses() {
+        assert_eq!(parse_cursor_position("640, 480"), Some((640, 480)));
+        assert_eq!(parse_cursor_position("0,0\n"), Some((0, 0)));
+    }
+
+    /// A compositor that answers something else leaves the pin where
+    /// it is rather than throwing it to the corner.
+    #[test]
+    fn a_strange_reply_is_no_position() {
+        assert_eq!(parse_cursor_position("unknown request"), None);
+        assert_eq!(parse_cursor_position(""), None);
+    }
 }
