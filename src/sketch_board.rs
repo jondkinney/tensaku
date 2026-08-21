@@ -3834,6 +3834,19 @@ impl SketchBoard {
             .set_hover_preview(pos)
     }
 
+    /// Zoom the canvas by one wheel delta, anchored on the cursor.
+    /// The delta is a continuous exponent, so a notched wheel
+    /// (|dy| = 1 per click) and a trackpad swipe (many |dy| ≪ 1
+    /// events) settle on the same zoom per gesture.
+    fn wheel_zoom(&mut self, dy: f32) {
+        if dy == 0.0 {
+            return;
+        }
+        let factor = APP_CONFIG.read().zoom_factor();
+        self.renderer.set_zoom_scale_at_cursor(factor.powf(dy));
+        self.renderer.request_render(&[]);
+    }
+
     /// Tools whose next annotation has a size the plain wheel sets.
     /// Pointer keeps the wheel for panning; Crop and Spotlight claim
     /// it earlier in the chain for their own primary adjustment.
@@ -5214,17 +5227,17 @@ impl Component for SketchBoard {
                         } else if no_mods && self.active_tool_type() == Tools::Crop {
                             // Plain wheel in Crop edit → shrink / grow the crop
                             // rect from all four sides, anchored on its center
-                            // and clamped to the image bounds (scroll up grows
-                            // toward the canvas edges, down shrinks toward the
-                            // middle). Adjusting the crop is the primary gesture
-                            // while cropping, so it gets the unmodified wheel;
-                            // Ctrl+wheel falls through to the canvas zoom below.
+                            // and clamped to the image bounds. Toward you grows
+                            // it toward the canvas edges, away shrinks it toward
+                            // the middle — the same polarity as every other
+                            // wheel adjustment. Adjusting the crop is the
+                            // primary gesture while cropping, so it gets the
+                            // unmodified wheel; Ctrl+wheel falls through to the
+                            // canvas zoom below.
                             let crop_tool = self.tools.get_crop_tool();
                             let in_edit = crop_tool.borrow().is_active_edit();
                             if in_edit {
                                 let factor = APP_CONFIG.read().zoom_factor();
-                                // Same polarity as every other wheel
-                                // adjustment: toward you grows the rect.
                                 let multiplier = factor.powf(me.pos.y);
                                 if crop_tool.borrow_mut().resize_proportional(multiplier) {
                                     self.renderer.request_render(&[]);
@@ -5242,12 +5255,7 @@ impl Component for SketchBoard {
                             // gesture. Same direction as the size wheel:
                             // toward you brings the canvas closer, the
                             // way it makes an annotation bigger.
-                            if me.pos.y != 0.0 {
-                                let factor = APP_CONFIG.read().zoom_factor();
-                                self.renderer
-                                    .set_zoom_scale_at_cursor(factor.powf(me.pos.y));
-                                self.renderer.request_render(&[]);
-                            }
+                            self.wheel_zoom(me.pos.y);
                             true
                         } else if !selected.is_empty() {
                             // Plain wheel with a selection → resize the
@@ -5256,6 +5264,18 @@ impl Component for SketchBoard {
                             // you just placed is the same gesture as
                             // adjusting what you're about to.
                             self.scroll_resize_selection(&selected, me.pos.y, &outer_sender);
+                            true
+                        } else if no_mods && self.active_tool_type() == Tools::Pointer {
+                            // Plain wheel with the Pointer armed and
+                            // nothing selected → zoom, in the same
+                            // direction the wheel sizes an annotation:
+                            // toward you brings it closer. The Pointer
+                            // has no next annotation to size, so the
+                            // wheel's "more" is the view itself.
+                            //
+                            // Panning keeps Shift+wheel, the scrollbars,
+                            // and the arrow keys.
+                            self.wheel_zoom(me.pos.y);
                             true
                         } else if no_mods && Self::wheel_sizes_next_annotation(self.active_tool_type())
                         {
