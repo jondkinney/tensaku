@@ -36,6 +36,134 @@
        Version history section on the listing page; the latest
        release is the only one strictly required. -->
   <releases>
+    <release version="0.27.0" date="2026-08-21">
+      <description>
+        <p>Added:</p>
+        <ul>
+          <li>place and stack pins on sway too</li>
+          <li>degrade gracefully off Hyprland</li>
+          <li>shape the pin like the display</li>
+          <li>square stacked pins, click-to-edit, untitled names</li>
+          <li>the size pill takes the shot, and the puck matches</li>
+          <li>a shutter button beside the restored region&#x27;s puck</li>
+          <li>the cursor says what a restored region will do</li>
+          <li>grips and a move puck on a restored region</li>
+          <li>adjust a restored region, and hide its measurement</li>
+          <li>R restores the last region</li>
+          <li>show the selection&#x27;s pixel size while dragging</li>
+          <li>the same pointer guides as the area capture</li>
+          <li>A switches scrolling capture back to a normal one</li>
+          <li>crosshair guides before the drag starts</li>
+          <li>own the region selection, with window and mode switching</li>
+          <li>tooltips, copy confirmations, and drag-out</li>
+          <li>copy path saves the shot when it has none</li>
+          <li>the plain wheel walks whichever axis overflows</li>
+          <li>pin the finished shot to the desktop</li>
+          <li>Alt+wheel adjusts the loupe</li>
+          <li>a magnification slider turns a spotlight into a loupe</li>
+          <li>an outlined style that reads over anything</li>
+          <li>a Secure checkbox states what each mode can undo</li>
+          <li>f toggles fill on any fillable selection</li>
+          <li>a single r / e toggles a selected shape&#x27;s fill</li>
+          <li>right-click an annotation to restack it</li>
+          <li>text lands above artwork, counters above text</li>
+          <li>plain wheel zooms when the Pointer is armed</li>
+          <li>remove the invert-scrolling preference</li>
+          <li>plain wheel sizes the next annotation</li>
+          <li>preview the badge on the canvas, not in the cursor</li>
+          <li>the cursor previews the badge it will stamp</li>
+          <li>stamp the counter over text instead of grabbing it</li>
+          <li>shape tool buttons show their own fill, and widen the double-tap</li>
+          <li>double-tap a shape&#x27;s key to toggle its fill, replacing F</li>
+          <li>grab large annotations by their border, draw in their interior</li>
+        </ul>
+        <p>Fixed:</p>
+        <ul>
+          <li>crop the preview to the capture&#x27;s top, not its middle</li>
+          <li>drop the mat and the rounded corner</li>
+          <li>float, pin and place through the Lua dispatch API</li>
+          <li>tooltips use the app&#x27;s own, and the drag polls twice a frame</li>
+          <li>the drag follows the pointer itself</li>
+          <li>drag follows the pointer, and tooltips get out of the way</li>
+          <li>slots follow where pins are, and moving one keeps up</li>
+          <li>the shutter pill and puck carry their own cursors</li>
+          <li>copy works, preview shows the shot, pins stack</li>
+          <li>puck back to centre, size and shutter parked beneath it</li>
+          <li>size readouts agree with the editor</li>
+          <li>stop spawning hyprctl on every drag event</li>
+          <li>hints along the bottom, not across the middle</li>
+          <li>don&#x27;t capture the overlay you just switched away from</li>
+          <li>dim to the same weight as the area capture</li>
+          <li>the area overlay wears the scroll capture&#x27;s pill</li>
+          <li>centre the area overlay&#x27;s hint like the scroll one</li>
+          <li>the outline is always white</li>
+          <li>crosshair pointer while aiming a region</li>
+          <li>cache the backdrop; stop toasting the saved text style</li>
+          <li>take the picture before the overlay exists</li>
+          <li>let the overlay leave the screen before capturing it</li>
+          <li>merge the --capture flag into the configuration</li>
+          <li>back every pin with a file so the drag carries a path</li>
+          <li>drag a thumbnail, not the whole capture</li>
+          <li>ask where to save when nothing is configured</li>
+          <li>render the pixels the pin needs</li>
+          <li>Ctrl+Shift+wheel reaches the outlined style</li>
+          <li>make magnification global, like darkness</li>
+          <li>render the loupe in the pass that renders spotlights</li>
+          <li>stop the secure blur seeding itself from its own glow</li>
+          <li>put Secure beside the picker, not inside it</li>
+          <li>grab the curve, not the box around it</li>
+          <li>size the border-grab band in screen pixels</li>
+          <li>apply the r / e fill toggle instead of dropping it</li>
+          <li>stop inverting the compositor&#x27;s scroll delta</li>
+          <li>tighten the badge&#x27;s lead on the pointer</li>
+          <li>system cursor, offset badge</li>
+          <li>move the pointer off the number it previews</li>
+          <li>the cursor over text matches what the click does</li>
+          <li>keep each shape&#x27;s fill toggle to that shape</li>
+          <li>bundle the shape buttons&#x27; filled glyphs</li>
+          <li>dismiss a selection before drawing inside a large annotation</li>
+          <li>clicking away from an in-progress text only ends it</li>
+          <li>grab an existing text box rather than stacking a new one on it</li>
+          <li>ignore modifiers left over from the launch chord</li>
+          <li>thicken only the tail when zoomed out</li>
+          <li>stop the expanded background showing a line per expansion</li>
+          <li>opt out of default window opacity, wiring through Lua</li>
+          <li>shrink the selection halo with the artwork when zoomed out</li>
+          <li>settle the edge extension away from the boundary</li>
+          <li>extend the image edge per line instead of one flat colour</li>
+          <li>wrap auto-fit text at the image edge while typing</li>
+          <li>keep a fixed edge&#x27;s drop shadow out of every seam</li>
+          <li>crop viewport-fixed bands out of the motion search</li>
+          <li>let the page inside a selected region take wheel and keys</li>
+          <li>target the overlay&#x27;s monitor for capture and pointer warps</li>
+          <li>tile the spotlight overlay past GL texture limits</li>
+        </ul>
+        <p>Other:</p>
+        <ul>
+          <li>run cargo fmt</li>
+          <li>let the compositor move the pin</li>
+          <li>lead the pointer by the latency instead of chasing it</li>
+          <li>read the pointer off-thread, move on the frame clock</li>
+          <li>composite the selection instead of painting it</li>
+          <li>Revert &quot;feat(pointer): plain wheel zooms when the Pointer is armed&quot;</li>
+          <li>drop the two removed preferences from the README</li>
+          <li>add probes for tile seams and flat-render uniformity</li>
+          <li>grow the raster by re-viewing it, not by copying it</li>
+          <li>add a grow-raster digest harness</li>
+          <li>reuse background textures across an auto-grow</li>
+          <li>read back only the blurred region, and stop leaking textures</li>
+          <li>stop copying the raster twice on every re-upload</li>
+          <li>add an env-gated frame profiler</li>
+          <li>update star history chart</li>
+          <li>update star history chart</li>
+          <li>update star history chart</li>
+          <li>update star history chart</li>
+          <li>use is_multiple_of in the sparse-doc fixture</li>
+          <li>replay harness takes TENSAKU_STITCH_REPLAY_AXIS</li>
+          <li>update star history chart</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.26.7" date="2026-08-15">
       <description>
         <p>Added:</p>
