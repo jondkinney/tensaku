@@ -97,7 +97,7 @@ const MOVE_HANDLE_RADIUS: f64 = 18.0;
 const MIN_SELECTION_SIZE: f64 = 32.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ResizeHandle {
+pub(crate) enum ResizeHandle {
     TopLeft,
     Top,
     TopRight,
@@ -133,7 +133,7 @@ impl ResizeHandle {
     /// resize handles, `mouse_x/y` is the new position of the dragged edge
     /// or corner. For Move, the entire rect is translated by the delta
     /// between `drag_origin` and `(mouse_x, mouse_y)`.
-    fn apply(
+    pub(crate) fn apply(
         self,
         anchor: Selection,
         drag_origin: (f64, f64),
@@ -195,7 +195,7 @@ fn pointer_over_selected_page(sel: Selection, x: f64, y: f64) -> bool {
     inside && hit_test_handle(sel, x, y).is_none()
 }
 
-fn hit_test_handle(sel: Selection, x: f64, y: f64) -> Option<ResizeHandle> {
+pub(crate) fn hit_test_handle(sel: Selection, x: f64, y: f64) -> Option<ResizeHandle> {
     // 1) Corners win if you're near one (so you get diagonal resize even
     // though the edge bands overlap there).
     for h in [
@@ -239,11 +239,11 @@ fn hit_test_handle(sel: Selection, x: f64, y: f64) -> Option<ResizeHandle> {
 }
 
 #[derive(Default, Clone, Copy, Debug, PartialEq)]
-struct Selection {
-    x: f64,
-    y: f64,
-    w: f64,
-    h: f64,
+pub(crate) struct Selection {
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) w: f64,
+    pub(crate) h: f64,
 }
 
 impl Selection {
