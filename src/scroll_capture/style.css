@@ -176,3 +176,9 @@
 .capture-crosshair {
   background: rgba(255, 255, 255, 0.22);
 }
+
+/* The drag size readout: the prompt pill, tightened up — it sits next
+   to the pointer rather than centred on screen. */
+.capture-readout {
+  padding: 4px 10px;
+}
