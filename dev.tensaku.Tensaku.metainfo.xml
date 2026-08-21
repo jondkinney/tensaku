@@ -36,6 +36,24 @@
        Version history section on the listing page; the latest
        release is the only one strictly required. -->
   <releases>
+    <release version="0.28.0" date="2026-08-21">
+      <description>
+        <p>Added:</p>
+        <ul>
+          <li>hands-off pointer — park once, pause on leave</li>
+          <li>close the column gap behind a dragged-away pin</li>
+          <li>right-click names a pin</li>
+          <li>survivors close the gap when a pin closes</li>
+          <li>--wire-capture-key binds a key to Tensaku&#x27;s own capture</li>
+        </ul>
+        <p>Fixed:</p>
+        <ul>
+          <li>park the pointer using the output&#x27;s fractional scale</li>
+          <li>delete the drag snapshot when the pin closes, not on destroy</li>
+          <li>keep overlay chrome from taking the pointer&#x27;s picks</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.27.0" date="2026-08-21">
       <description>
         <p>Added:</p>
