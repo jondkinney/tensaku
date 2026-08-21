@@ -2284,34 +2284,57 @@ fn start_gui(image: Pixbuf) -> Result<()> {
 /// capture free: at the moment of the switch, nothing has been
 /// captured yet.
 fn run_region_capture() -> Result<()> {
-    let output = crate::display::hyprland_focused_monitor().map(|m| m.name);
-    // Take the picture BEFORE the overlay exists. Capturing afterwards
-    // means racing the compositor to unmap a layer surface, and losing
-    // that race puts the selection UI in the screenshot.
-    let frozen = capture::capture_output(output.as_deref())?;
-    let image = match region_capture::run(frozen.clone())? {
-        region_capture::RegionOutcome::Cancelled => return Ok(()),
-        region_capture::RegionOutcome::Fullscreen => frozen,
-        region_capture::RegionOutcome::Region(rect) => {
-            // Already in the capture's own pixels, so this is a crop
-            // rather than a second trip to the compositor.
-            frozen.new_subpixbuf(rect.x, rect.y, rect.width, rect.height)
-        }
-        region_capture::RegionOutcome::Scroll => {
+    run_capture_flow(false)
+}
+
+/// Choose what to capture, take it, and open the editor on it.
+///
+/// A loop rather than two functions calling each other, because each
+/// overlay can hand over to the other -- S from the area overlay, A
+/// from the scrolling one -- and neither has captured anything at the
+/// moment it does. Recursion would work until someone changed their
+/// mind twice.
+fn run_capture_flow(mut scrolling: bool) -> Result<()> {
+    loop {
+        if scrolling {
             let park_pointer = APP_CONFIG
                 .read()
                 .park_pointer_during_manual_scroll_capture();
-            return match scroll_capture::run(park_pointer)? {
-                None => Ok(()),
-                Some(outcome) => {
-                    load_gl()?;
-                    start_gui_with_toast(outcome.image, outcome.warning)
+            match scroll_capture::run(park_pointer)? {
+                scroll_capture::ScrollRun::Cancelled => return Ok(()),
+                scroll_capture::ScrollRun::SwitchToArea => {
+                    scrolling = false;
+                    continue;
                 }
-            };
+                scroll_capture::ScrollRun::Captured(outcome) => {
+                    load_gl()?;
+                    return start_gui_with_toast(outcome.image, outcome.warning);
+                }
+            }
         }
-    };
-    load_gl()?;
-    start_gui_with_toast(image, None)
+
+        let output = crate::display::hyprland_focused_monitor().map(|m| m.name);
+        // Take the picture BEFORE the overlay exists. Capturing
+        // afterwards means racing the compositor to unmap a layer
+        // surface, and losing that race puts the selection UI in the
+        // screenshot.
+        let frozen = capture::capture_output(output.as_deref())?;
+        let image = match region_capture::run(frozen.clone())? {
+            region_capture::RegionOutcome::Cancelled => return Ok(()),
+            region_capture::RegionOutcome::Fullscreen => frozen,
+            region_capture::RegionOutcome::Region(rect) => {
+                // Already in the capture's own pixels, so this is a
+                // crop rather than a second trip to the compositor.
+                frozen.new_subpixbuf(rect.x, rect.y, rect.width, rect.height)
+            }
+            region_capture::RegionOutcome::Scroll => {
+                scrolling = true;
+                continue;
+            }
+        };
+        load_gl()?;
+        return start_gui_with_toast(image, None);
+    }
 }
 
 fn start_gui_with_toast(image: Pixbuf, initial_toast: Option<String>) -> Result<()> {
@@ -2431,19 +2454,12 @@ fn main() -> Result<()> {
     }
 
     if APP_CONFIG.read().scroll_capture() {
-        let park_pointer = APP_CONFIG
-            .read()
-            .park_pointer_during_manual_scroll_capture();
-        return match scroll_capture::run(park_pointer) {
+        return match run_capture_flow(true) {
             Err(e) => {
                 eprintln!("Error: {e}");
                 Err(e)
             }
-            Ok(None) => Ok(()),
-            Ok(Some(outcome)) => {
-                load_gl()?;
-                start_gui_with_toast(outcome.image, outcome.warning)
-            }
+            ok => ok,
         };
     }
 

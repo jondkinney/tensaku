@@ -711,6 +711,17 @@ pub struct ScrollCaptureOutcome {
     pub warning: Option<String>,
 }
 
+/// How the scroll overlay ended.
+pub enum ScrollRun {
+    /// A stitched capture came back.
+    Captured(ScrollCaptureOutcome),
+    /// The user asked for an ordinary capture instead. Nothing has
+    /// been captured, so handing over costs nothing.
+    SwitchToArea,
+    /// Escape, or the overlay closed without capturing.
+    Cancelled,
+}
+
 /// Selected phase only: hand the pointer and keyboard to the page inside the
 /// region while the cursor is over it, and take them back everywhere else.
 /// Hyprland pins pointer focus to any layer surface holding an exclusive
@@ -767,8 +778,9 @@ fn gdk_monitor_named(name: &str) -> Option<gtk::gdk::Monitor> {
         })
 }
 
-pub fn run(park_manual_pointer: bool) -> Result<Option<ScrollCaptureOutcome>> {
+pub fn run(park_manual_pointer: bool) -> Result<ScrollRun> {
     let result: Rc<RefCell<Option<ScrollCaptureOutcome>>> = Rc::new(RefCell::new(None));
+    let switch_to_area = Rc::new(std::cell::Cell::new(false));
 
     let app = gtk::Application::builder()
         .application_id("dev.tensaku.Tensaku.scroll-capture")
@@ -777,7 +789,10 @@ pub fn run(park_manual_pointer: bool) -> Result<Option<ScrollCaptureOutcome>> {
 
     {
         let result = Rc::clone(&result);
-        app.connect_activate(move |app| build_overlay(app, &result, park_manual_pointer));
+        let switch_to_area = Rc::clone(&switch_to_area);
+        app.connect_activate(move |app| {
+            build_overlay(app, &result, park_manual_pointer, &switch_to_area)
+        });
     }
 
     let exit_code = app.run_with_args::<&str>(&[]);
@@ -787,13 +802,21 @@ pub fn run(park_manual_pointer: bool) -> Result<Option<ScrollCaptureOutcome>> {
             exit_code
         ));
     }
-    Ok(result.borrow_mut().take())
+    // A capture wins over the switch: the flag can only be set while
+    // nothing has been captured, but reading it in this order means a
+    // race could never discard a finished stitch.
+    Ok(match result.borrow_mut().take() {
+        Some(outcome) => ScrollRun::Captured(outcome),
+        None if switch_to_area.get() => ScrollRun::SwitchToArea,
+        None => ScrollRun::Cancelled,
+    })
 }
 
 fn build_overlay(
     app: &gtk::Application,
     result: &Rc<RefCell<Option<ScrollCaptureOutcome>>>,
     park_manual_pointer: bool,
+    switch_to_area: &Rc<std::cell::Cell<bool>>,
 ) {
     let state = Rc::new(RefCell::new(OverlayState {
         phase: Phase::AwaitingDrag,
@@ -1150,6 +1173,8 @@ fn build_overlay(
     {
         let window_w = window.clone();
         let state_w = Rc::clone(&state);
+        let state_keys = Rc::clone(&state);
+        let switch_to_area = Rc::clone(switch_to_area);
         let drawing_w = drawing.clone();
         let prompt_w = prompt.clone();
         let action_pill_w = action_pill.clone();
@@ -1162,6 +1187,18 @@ fn build_overlay(
         );
         keys.connect_key_pressed(move |_, key, _, modifier| {
             if key == gtk::gdk::Key::Escape {
+                window_w.close();
+                return gtk::glib::Propagation::Stop;
+            }
+            // Before a region exists there is nothing to scroll, so A
+            // means the other kind of capture entirely — the mirror of
+            // the area overlay's S. Handing back beats making someone
+            // close this and press a different keybind.
+            if matches!(key, gtk::gdk::Key::a | gtk::gdk::Key::A)
+                && modifier.is_empty()
+                && matches!(state_keys.borrow().phase, Phase::AwaitingDrag)
+            {
+                switch_to_area.set(true);
                 window_w.close();
                 return gtk::glib::Propagation::Stop;
             }
@@ -3283,7 +3320,12 @@ fn build_prompt_pill() -> gtk::Box {
     let pill = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     pill.add_css_class("scroll-capture-pill");
     pill.add_css_class("scroll-capture-prompt");
-    let label = gtk::Label::new(Some("Drag to capture the scrolling part of the screen."));
+    // Names the way out as well as the way in: this overlay is modal
+    // and full-screen, and A is how you get to an ordinary capture
+    // without closing it and pressing a different keybind.
+    let label = gtk::Label::new(Some(
+        "Drag to capture the scrolling part of the screen  ·  A: normal capture",
+    ));
     label.add_css_class("scroll-capture-prompt-label");
     pill.append(&label);
     pill
