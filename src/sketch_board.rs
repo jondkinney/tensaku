@@ -1808,14 +1808,15 @@ impl SketchBoard {
     /// fold to `ModifyDrawable`, multi-element to `ModifyDrawables`,
     /// empty to `Unmodified` so callers can fall through to a
     /// "treat as default" branch when nothing relevant was selected.
-    /// Flip the fill of every selected annotation that `tool` drew.
-    /// `None` when the selection holds none of them, which is the
-    /// caller's signal to treat the key as a plain tool switch.
+    /// Flip the fill of every selected annotation drawn by one of
+    /// `kinds`. `None` when the selection holds none of them, which is
+    /// the caller's signal that the key means something else.
     ///
     /// The first match decides the new state, so a group of mixed
     /// rectangles converges on one fill instead of each flipping to
     /// its own opposite and leaving the group as mixed as it started.
-    fn toggle_fill_on_selection(&mut self, tool: Tools) -> Option<ToolUpdateResult> {
+    fn toggle_fill_on_selection(&mut self, kinds: &[Tools]) -> Option<ToolUpdateResult> {
+        let matches_kind = |tool: Option<Tools>| tool.is_some_and(|t| kinds.contains(&t));
         let selected = self
             .tools
             .get(&Tools::Pointer)
@@ -1823,13 +1824,13 @@ impl SketchBoard {
             .selected_drawables();
         let new_fill = selected.iter().find_map(|id| {
             let drawable = self.renderer.clone_drawable(*id)?;
-            if drawable.tool_type() != Some(tool) {
+            if !matches_kind(drawable.tool_type()) {
                 return None;
             }
             drawable.style().map(|style| !style.fill)
         })?;
         Some(self.apply_to_selection(|d| {
-            if d.tool_type() != Some(tool) {
+            if !matches_kind(d.tool_type()) {
                 return false;
             }
             let Some(mut style) = d.style() else {
@@ -2910,7 +2911,7 @@ impl SketchBoard {
                     // effect. With nothing of that shape selected the
                     // key still switches tools.
                     if matches!(tool, Tools::Rectangle | Tools::Ellipse)
-                        && let Some(result) = self.toggle_fill_on_selection(tool)
+                        && let Some(result) = self.toggle_fill_on_selection(&[tool])
                     {
                         // Forget the press so the NEXT one is read
                         // fresh: two taps here are two toggles, not a
@@ -2949,6 +2950,25 @@ impl SketchBoard {
                             .output_sender()
                             .emit(SketchBoardOutput::ToolSwitchShortcut(tool));
                     }
+                } else if txt == "f" {
+                    // `f` is the shape-agnostic fill toggle, and sits
+                    // after the tool lookup above so a config that
+                    // binds `f` to a tool still wins.
+                    //
+                    // Where `r` / `e` each act on their own kind, `f`
+                    // flips every fillable shape in the selection —
+                    // the one that does the obvious thing to a mixed
+                    // selection without asking which key to press. On
+                    // an empty selection it falls through to the
+                    // toolbar's toggle, which sets what the next shape
+                    // gets and no-ops for tools that have no fill.
+                    self.last_tool_press = None;
+                    if let Some(result) =
+                        self.toggle_fill_on_selection(&[Tools::Rectangle, Tools::Ellipse])
+                    {
+                        return result;
+                    }
+                    sender.input(SketchBoardInput::ToolbarEvent(ToolbarEvent::ToggleFill));
                 } else if let Some(hotkey_digit) =
                     txt.chars().next().and_then(|char| char.to_digit(10))
                 {
