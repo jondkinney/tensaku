@@ -26,6 +26,55 @@ pub struct Ellipse {
     finishing: bool,
 }
 
+impl Ellipse {
+    /// Half the stroke plus the caller's slack: how far either side of
+    /// the mathematical curve still counts as "on the line".
+    fn outline_pad(&self, tolerance: f32) -> f32 {
+        let stroke = self
+            .style
+            .size
+            .to_line_width(self.style.annotation_size_factor);
+        stroke / 2.0 + tolerance
+    }
+
+    /// Inside the curve, padded outward — the silhouette plus slack.
+    fn inside_outer_edge(&self, point: Vec2D, tolerance: f32) -> bool {
+        let Some(r) = self.radii else {
+            return false;
+        };
+        let (rx, ry) = (r.x.abs(), r.y.abs());
+        if rx < f32::EPSILON || ry < f32::EPSILON {
+            return false;
+        }
+        let pad = self.outline_pad(tolerance);
+        let dx = (point.x - self.middle.x) / (rx + pad);
+        let dy = (point.y - self.middle.y) / (ry + pad);
+        dx * dx + dy * dy <= 1.0
+    }
+
+    /// On the ring straddling the curve: inside the outward-padded
+    /// ellipse but outside the inward-padded one. When the padding
+    /// swallows a radius there is no hollow middle left, so the whole
+    /// silhouette is outline.
+    fn on_outline(&self, point: Vec2D, tolerance: f32) -> bool {
+        if !self.inside_outer_edge(point, tolerance) {
+            return false;
+        }
+        let Some(r) = self.radii else {
+            return false;
+        };
+        let pad = self.outline_pad(tolerance);
+        let inner_rx = r.x.abs() - pad;
+        let inner_ry = r.y.abs() - pad;
+        if inner_rx <= 0.0 || inner_ry <= 0.0 {
+            return true;
+        }
+        let dx = (point.x - self.middle.x) / inner_rx;
+        let dy = (point.y - self.middle.y) / inner_ry;
+        dx * dx + dy * dy > 1.0
+    }
+}
+
 impl Drawable for Ellipse {
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -80,55 +129,34 @@ impl Drawable for Ellipse {
     /// Border-only picking: a filled ellipse covers real canvas, so its interior must stay
     /// available to whichever drawing tool is armed. See
     /// `Drawable::edge_hit_test`.
+    ///
+    /// The band hugs the ellipse's own curve rather than its bounding
+    /// box. A box-shaped band is nowhere near the outline along the
+    /// diagonals — at 45° the curve sits roughly 30% of the radius
+    /// inside the corner — so grabbing an ellipse anywhere but its
+    /// four extremes meant aiming at a band that wasn't under the
+    /// line being aimed at.
     fn edge_hit_test(&self, point: Vec2D, tolerance: f32) -> bool {
-        self.bounds()
-            .map(|b| super::bbox_edge_hit(b, point, tolerance))
-            .unwrap_or(false)
+        self.on_outline(point, tolerance)
     }
 
     fn hit_test(&self, point: Vec2D, tolerance: f32) -> bool {
-        let Some(r) = self.radii else {
-            return false;
-        };
-        let rx = r.x.abs();
-        let ry = r.y.abs();
-        if rx < f32::EPSILON || ry < f32::EPSILON {
-            return false;
-        }
-        let stroke = self
-            .style
-            .size
-            .to_line_width(self.style.annotation_size_factor);
-        let pad = stroke / 2.0 + tolerance;
-        // Outside the outer ellipse — definite miss.
-        let dx_outer = (point.x - self.middle.x) / (rx + pad);
-        let dy_outer = (point.y - self.middle.y) / (ry + pad);
-        if dx_outer * dx_outer + dy_outer * dy_outer > 1.0 {
-            return false;
-        }
-        // Filled: anywhere inside the silhouette is a hit.
+        // Filled: anywhere inside the silhouette is a hit. Unfilled:
+        // only the stroke band, which is the same ring the border grab
+        // uses — one implementation, so picking and grabbing can't
+        // disagree about where the outline is.
         if self.style.fill {
-            return true;
+            self.inside_outer_edge(point, tolerance)
+        } else {
+            self.on_outline(point, tolerance)
         }
-        // Unfilled: hits only land on the stroke band. The inner
-        // edge is `pad` inside each radius; if either becomes
-        // non-positive the stroke fills the entire interior and
-        // every outer-hit is a real hit.
-        let inner_rx = rx - pad;
-        let inner_ry = ry - pad;
-        if inner_rx <= 0.0 || inner_ry <= 0.0 {
-            return true;
-        }
-        let dx_inner = (point.x - self.middle.x) / inner_rx;
-        let dy_inner = (point.y - self.middle.y) / inner_ry;
-        // Miss if we're INSIDE the inner ellipse (hollow middle).
-        dx_inner * dx_inner + dy_inner * dy_inner > 1.0
     }
 
     fn translate(&mut self, delta: Vec2D) {
         self.middle += delta;
         self.origin += delta;
     }
+
 
     fn apply_canvas_transform(&mut self, t: CanvasTransform, w: f32, h: f32) {
         match self.radii {
@@ -352,5 +380,72 @@ impl Tool for EllipseTool {
 
     fn set_sender(&mut self, sender: Sender<SketchBoardInput>) {
         self.sender = Some(sender);
+    }
+}
+
+#[cfg(test)]
+mod outline_tests {
+    use super::Ellipse;
+    use crate::math::Vec2D;
+    use crate::style::{Size, Style};
+    use crate::tools::Drawable;
+
+    /// A 400x200 ellipse centered at (300, 200), thin stroke.
+    fn ellipse(fill: bool) -> Ellipse {
+        Ellipse {
+            origin: Vec2D::new(100.0, 100.0),
+            middle: Vec2D::new(300.0, 200.0),
+            radii: Some(Vec2D::new(200.0, 100.0)),
+            style: Style {
+                size: Size::XSmall,
+                fill,
+                ..Default::default()
+            },
+            centered: false,
+            finishing: false,
+        }
+    }
+
+    /// The point that motivated this: 45° along the curve, far from
+    /// the bounding box the band used to follow.
+    #[test]
+    fn the_diagonal_of_the_curve_is_grabbable() {
+        let e = ellipse(false);
+        let d = std::f32::consts::FRAC_1_SQRT_2;
+        let on_curve = Vec2D::new(300.0 + 200.0 * d, 200.0 + 100.0 * d);
+        assert!(e.edge_hit_test(on_curve, 8.0));
+        // The bounding box corner, meanwhile, is nowhere near the
+        // line — grabbing there would be grabbing empty canvas.
+        assert!(!e.edge_hit_test(Vec2D::new(500.0, 300.0), 8.0));
+    }
+
+    /// The interior stays clear so an armed drawing tool can use it,
+    /// filled or not.
+    #[test]
+    fn the_middle_is_not_the_outline() {
+        for fill in [false, true] {
+            let e = ellipse(fill);
+            assert!(!e.edge_hit_test(Vec2D::new(300.0, 200.0), 8.0), "fill={fill}");
+        }
+    }
+
+    /// Slack applies on both sides of the curve, so a near miss from
+    /// either direction still grabs.
+    #[test]
+    fn the_band_straddles_the_curve() {
+        let e = ellipse(false);
+        assert!(e.edge_hit_test(Vec2D::new(496.0, 200.0), 8.0), "just inside");
+        assert!(e.edge_hit_test(Vec2D::new(504.0, 200.0), 8.0), "just outside");
+        assert!(!e.edge_hit_test(Vec2D::new(560.0, 200.0), 8.0), "well outside");
+    }
+
+    /// A filled ellipse is hit anywhere inside; an unfilled one only
+    /// on its stroke. That distinction predates the shared ring and
+    /// has to survive it.
+    #[test]
+    fn filling_changes_hit_test_but_not_the_outline() {
+        let middle = Vec2D::new(300.0, 200.0);
+        assert!(ellipse(true).hit_test(middle, 8.0));
+        assert!(!ellipse(false).hit_test(middle, 8.0));
     }
 }
