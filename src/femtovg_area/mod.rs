@@ -628,6 +628,14 @@ impl FemtoVGArea {
             .set_spotlight_darkness(value);
     }
 
+    pub fn set_spotlight_magnification(&self, value: f32) {
+        self.imp()
+            .inner()
+            .as_mut()
+            .expect("Did you call init before using FemtoVgArea?")
+            .set_spotlight_magnification(value);
+    }
+
     pub fn spotlight_darkness(&self) -> f32 {
         self.imp()
             .inner()

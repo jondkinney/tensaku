@@ -2586,10 +2586,12 @@ impl SketchBoard {
                 self.dispatch_style_change()
             }
             ToolbarEvent::SpotlightMagnificationChanged(value) => {
-                // Per-drawable, so this both sets what the next
-                // spotlight gets and applies to any selected one --
-                // the same path every other style field takes.
                 self.style.spotlight_magnification = value;
+                // Global, like darkness: push it to the renderer so
+                // every opening picks it up on the next frame. The
+                // dispatch below redraws via the spotlight tool's
+                // handle_style_event.
+                self.renderer.set_spotlight_magnification(value);
                 self.dispatch_style_change()
             }
             ToolbarEvent::SaveSpotlightMagnificationAsDefault => {
@@ -6319,6 +6321,7 @@ impl Component for SketchBoard {
         // touched the slider would use the renderer's hard-coded
         // default rather than the persisted slider value).
         area.set_spotlight_darkness(model.style.spotlight_darkness);
+        area.set_spotlight_magnification(model.style.spotlight_magnification);
 
         // Shared state for the trackpad-pinch gesture. `begin` resets
         // it to 1.0 (the gesture-start scale); `scale-changed` reads

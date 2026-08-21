@@ -1061,6 +1061,7 @@ pub struct FemtoVgAreaMut {
     /// at render time so the overlay updates live without redrawing
     /// each spotlight Drawable.
     spotlight_darkness: f32,
+    spotlight_magnification: f32,
     /// Scale + offset actually used by the most recent on-screen
     /// render. Equal to `scale_factor` / `offset` in the normal case,
     /// but switches to a "fit the committed crop into the canvas"
@@ -1416,6 +1417,7 @@ impl FemtoVGArea {
             zoom_anchor_pending: false,
             device_pixel_ratio: 1.0,
             spotlight_darkness: 0.50,
+            spotlight_magnification: 1.0,
             effective_scale: 1.0,
             effective_offset: Vec2D::zero(),
             display_rect_origin: Vec2D::zero(),
@@ -1613,17 +1615,20 @@ fn auto_fit_scale(
 fn collect_spotlight(
     drawable: &dyn Drawable,
     paths: &mut Vec<Path>,
-    magnifiers: &mut Vec<(Path, crate::math::Rect, f32)>,
+    magnifiers: &mut Vec<(Path, crate::math::Rect)>,
+    magnifying: bool,
 ) {
     let mut punch = Path::new();
     drawable.append_spotlight_path(&mut punch);
-    let magnification = drawable.spotlight_magnification();
-    if magnification > 1.0
+    if magnifying
         && let Some(rect) = drawable.bounds()
+        // A shape still being dragged out has no area to sample yet.
+        && rect.size.x >= 1.0
+        && rect.size.y >= 1.0
     {
         let mut lens = Path::new();
         drawable.append_spotlight_path(&mut lens);
-        magnifiers.push((lens, rect, magnification));
+        magnifiers.push((lens, rect));
     }
     paths.push(punch);
 }
@@ -3031,9 +3036,12 @@ impl FemtoVgAreaMut {
         // also be spotlights when a user grabs an existing spotlight
         // to move it — surface those too so the live drag follows.
         let mut paths: Vec<Path> = Vec::new();
-        // Openings that magnify, kept beside the punch-out paths: same
-        // shape, plus the rect to sample and how far to enlarge it.
-        let mut magnifiers: Vec<(Path, crate::math::Rect, f32)> = Vec::new();
+        // Openings to magnify, kept beside the punch-out paths: same
+        // shape, plus the rect to sample. Collected only when the
+        // factor asks for it, and empty otherwise so an ordinary
+        // spotlight costs nothing extra.
+        let magnifying = self.spotlight_magnification > 1.0;
+        let mut magnifiers: Vec<(Path, crate::math::Rect)> = Vec::new();
         let dragging_active = self.active_tool.borrow().dragging_drawable_id();
         let dragging_pointer = self.pointer_tool.borrow().dragging_drawable_id();
         let extra_dragging = self.pointer_tool.borrow().extra_dragging_ids();
@@ -3048,13 +3056,13 @@ impl FemtoVgAreaMut {
                 continue;
             }
             if s.drawable.is_spotlight() {
-                collect_spotlight(s.drawable.as_ref(), &mut paths, &mut magnifiers);
+                collect_spotlight(s.drawable.as_ref(), &mut paths, &mut magnifiers, magnifying);
             }
         }
         // In-flight spotlight copies from a group/move drag.
         for d in self.pointer_tool.borrow().extra_dragging_drawables() {
             if d.is_spotlight() {
-                collect_spotlight(d, &mut paths, &mut magnifiers);
+                collect_spotlight(d, &mut paths, &mut magnifiers, magnifying);
             }
         }
         {
@@ -3062,14 +3070,14 @@ impl FemtoVgAreaMut {
             if let Some(d) = at.get_drawable()
                 && d.is_spotlight()
             {
-                collect_spotlight(d, &mut paths, &mut magnifiers);
+                collect_spotlight(d, &mut paths, &mut magnifiers, magnifying);
             }
         }
         if !Rc::ptr_eq(&self.active_tool, &self.pointer_tool)
             && let Some(d) = self.pointer_tool.borrow().get_drawable()
             && d.is_spotlight()
         {
-            collect_spotlight(d, &mut paths, &mut magnifiers);
+            collect_spotlight(d, &mut paths, &mut magnifiers, magnifying);
         }
         if paths.is_empty() {
             return Ok(());
@@ -3189,16 +3197,23 @@ impl FemtoVgAreaMut {
         // the opening shows undimmed content, and a rounded corner or a
         // freehand edge would otherwise pull dimmed pixels in from the
         // parts of the bounding box the shape doesn't cover.
-        let lenses: Vec<(&Path, femtovg::ImageId, crate::math::Rect, f32)> = magnifiers
+        //
+        // The flush is what makes the readback read the right surface.
+        // `set_render_target` above only records the intent — femtovg
+        // binds it at flush time — and `read_framebuffer_region` is a
+        // raw `glReadPixels` on whatever is bound. Without this it
+        // samples the last overlay tile instead of the canvas.
+        if !magnifiers.is_empty() {
+            canvas.flush();
+        }
+        let magnification = self.spotlight_magnification;
+        let lenses: Vec<(&Path, femtovg::ImageId, crate::math::Rect)> = magnifiers
             .iter()
-            .filter_map(|(path, rect, magnification)| {
+            .filter_map(|(path, rect)| {
                 let (x, y, w, h) = crate::tools::canvas_region(canvas, rect.pos, rect.size)?;
-                let sub =
-                    super::read_framebuffer_region(canvas.height() as usize, x, y, w, h)?;
-                let id = canvas
-                    .create_image(sub.as_ref(), ImageFlags::empty())
-                    .ok()?;
-                Some((path, id, *rect, *magnification))
+                let sub = super::read_framebuffer_region(canvas.height() as usize, x, y, w, h)?;
+                let id = canvas.create_image(sub.as_ref(), ImageFlags::empty()).ok()?;
+                Some((path, id, *rect))
             })
             .collect();
 
@@ -3213,8 +3228,8 @@ impl FemtoVgAreaMut {
             // openings: each region painted into a rect that many times
             // its size about the same centre, so the fill clips away
             // everything but the enlarged middle.
-            for (path, id, rect, magnification) in &lenses {
-                let grown = rect.size * *magnification;
+            for (path, id, rect) in &lenses {
+                let grown = rect.size * magnification;
                 let centre = rect.pos + rect.size * 0.5;
                 canvas.fill_path(
                     path,
@@ -3231,7 +3246,7 @@ impl FemtoVgAreaMut {
             }
             canvas.flush();
         }
-        for (_, id, _, _) in &lenses {
+        for (_, id, _) in &lenses {
             canvas.delete_image(*id);
         }
         for tile in &tiles {
@@ -3245,6 +3260,17 @@ impl FemtoVgAreaMut {
     /// becomes visible after the next `request_render`.
     pub fn set_spotlight_darkness(&mut self, value: f32) {
         self.spotlight_darkness = value.clamp(0.0, 1.0);
+    }
+
+    /// Update the loupe factor used by the next render. Global, like
+    /// darkness: one overlay, one opening treatment. Sliding it moves
+    /// every spotlight at once, which is what makes it usable without
+    /// first hunting for the shape and selecting it.
+    pub fn set_spotlight_magnification(&mut self, value: f32) {
+        self.spotlight_magnification = value.clamp(
+            crate::tools::MIN_SPOTLIGHT_MAGNIFICATION,
+            crate::tools::MAX_SPOTLIGHT_MAGNIFICATION,
+        );
     }
 
     /// Current global spotlight darkness (0.0–1.0). Read by the
