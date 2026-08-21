@@ -2295,6 +2295,24 @@ fn run_region_capture() -> Result<()> {
 /// moment it does. Recursion would work until someone changed their
 /// mind twice.
 fn run_capture_flow(mut scrolling: bool) -> Result<()> {
+    /// After one overlay hands over to the other, wait this long
+    /// before capturing.
+    ///
+    /// The area overlay freezes the screen at startup, and the
+    /// compositor doesn't remove a layer surface the moment its
+    /// application exits — so a capture taken immediately after a
+    /// handover contains the previous overlay's dim, and the screen
+    /// ends up shaded twice. Measured: a single shade leaves 55% of
+    /// the original brightness, a doubled one 39%.
+    ///
+    /// A settle rather than a guarantee: the two overlays are separate
+    /// applications, so there is no frame callback spanning both to
+    /// wait on. It only costs anything on an explicit mode switch,
+    /// where a tenth of a second is invisible next to the keypress
+    /// that asked for it.
+    const HANDOVER_SETTLE: std::time::Duration = std::time::Duration::from_millis(150);
+    let mut handed_over = false;
+
     loop {
         if scrolling {
             let park_pointer = APP_CONFIG
@@ -2304,6 +2322,7 @@ fn run_capture_flow(mut scrolling: bool) -> Result<()> {
                 scroll_capture::ScrollRun::Cancelled => return Ok(()),
                 scroll_capture::ScrollRun::SwitchToArea => {
                     scrolling = false;
+                    handed_over = true;
                     continue;
                 }
                 scroll_capture::ScrollRun::Captured(outcome) => {
@@ -2313,6 +2332,9 @@ fn run_capture_flow(mut scrolling: bool) -> Result<()> {
             }
         }
 
+        if std::mem::take(&mut handed_over) {
+            std::thread::sleep(HANDOVER_SETTLE);
+        }
         let output = crate::display::hyprland_focused_monitor().map(|m| m.name);
         // Take the picture BEFORE the overlay exists. Capturing
         // afterwards means racing the compositor to unmap a layer
@@ -2329,6 +2351,7 @@ fn run_capture_flow(mut scrolling: bool) -> Result<()> {
             }
             region_capture::RegionOutcome::Scroll => {
                 scrolling = true;
+                handed_over = true;
                 continue;
             }
         };
