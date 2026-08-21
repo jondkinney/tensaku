@@ -425,13 +425,12 @@ fn layout_shade(state: &State) {
     state.outline.set_size_request(w as i32, h as i32);
     state.fixed.move_(&state.outline, x, y);
     state.outline.set_visible(w >= 1.0 && h >= 1.0);
-    // Only while a drag is in flight: a restored region is a framing,
-    // not a measurement, and the pill would sit over the picture
-    // announcing a number nobody asked for.
-    if state.dragging {
+    // A fresh drag has no controls to anchor to, so the size follows
+    // the corner being pulled. Everything else — a restored region,
+    // one being moved or resized — has the control cluster, and the
+    // size belongs in it, holding still.
+    if fresh_drag(state) {
         layout_readout(state, rect);
-    } else {
-        state.readout.set_visible(false);
     }
     layout_grips(state, rect);
     // Once there is a rectangle, it is the thing being aimed — the
@@ -449,6 +448,12 @@ fn apply_cursor(widget: &gtk::Fixed, mode: Mode) {
     }));
 }
 
+/// Whether this drag is drawing a new rectangle rather than adjusting
+/// one that already exists.
+fn fresh_drag(state: &State) -> bool {
+    state.dragging && state.resize_handle.is_none()
+}
+
 /// Put the eight grips on the selection's edges and the puck at its
 /// middle, or hide them.
 ///
@@ -457,7 +462,7 @@ fn apply_cursor(widget: &gtk::Fixed, mode: Mode) {
 /// noise. Their positions are the same ones `hit_test_handle` answers
 /// for, so a grip is exactly where the grab is.
 fn layout_grips(state: &State, rect: Rect) {
-    if state.dragging || rect.width < 1 || rect.height < 1 {
+    if fresh_drag(state) || rect.width < 1 || rect.height < 1 {
         hide_grips(state);
         return;
     }
@@ -485,20 +490,35 @@ fn layout_grips(state: &State, rect: Rect) {
 
     // The puck needs room of its own — on a small region it would
     // cover the thing being framed.
-    //
-    // The pair is centred together rather than the puck alone, so
-    // "move it" and "take it" read as one control rather than one
-    // control and an afterthought.
-    let pair = PUCK as f64 * 2.0 + PUCK_GAP;
-    let fits = w > pair + PUCK as f64 && h > PUCK as f64 * 2.0;
-    let top = y + h / 2.0 - PUCK as f64 / 2.0;
-    let left = x + w / 2.0 - pair / 2.0;
-    state.fixed.move_(&state.puck, left, top);
-    state.puck.set_visible(fits);
+    let centre_x = x + w / 2.0;
+    let puck_top = y + h / 2.0 - PUCK as f64 / 2.0;
+    let fits = w > PUCK as f64 * 2.0 && h > PUCK as f64 * 2.0;
     state
         .fixed
-        .move_(&state.shutter, left + PUCK as f64 + PUCK_GAP, top);
-    state.shutter.set_visible(fits);
+        .move_(&state.puck, centre_x - PUCK as f64 / 2.0, puck_top);
+    state.puck.set_visible(fits);
+
+    // Size and shutter ride together under the puck, anchored to the
+    // region rather than to the pointer. They move when the region
+    // does and not otherwise: a number that jumps around while you are
+    // nudging a rectangle into place is harder to read than one that
+    // sits still.
+    state
+        .readout_label
+        .set_text(&format!("{} × {}", rect.width, rect.height));
+    let (_, pill_w, _, _) = state.readout.measure(gtk::Orientation::Horizontal, -1);
+    let (_, pill_h, _, _) = state.readout.measure(gtk::Orientation::Vertical, pill_w);
+    let row_w = pill_w as f64 + PUCK_GAP + PUCK as f64;
+    let row_x = centre_x - row_w / 2.0;
+    let row_y = puck_top + PUCK as f64 + PUCK_GAP;
+    let row_fits = fits && h > PUCK as f64 * 2.0 + pill_h as f64 + PUCK_GAP;
+
+    state.fixed.move_(&state.readout, row_x, row_y);
+    state.readout.set_visible(row_fits);
+    state
+        .fixed
+        .move_(&state.shutter, row_x + pill_w as f64 + PUCK_GAP, row_y);
+    state.shutter.set_visible(row_fits);
 }
 
 fn hide_grips(state: &State) {
@@ -508,6 +528,7 @@ fn hide_grips(state: &State) {
     state.puck.set_visible(false);
     state.shutter.set_visible(false);
 }
+
 
 /// Show the selection's size beside the corner being dragged.
 ///
