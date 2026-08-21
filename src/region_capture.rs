@@ -81,16 +81,19 @@ impl Mode {
 struct State {
     /// The screen as it was when the overlay went up.
     frozen: Pixbuf,
-    /// The capture pre-scaled to the overlay's size, and a second copy
-    /// with the dim sheet already burnt in.
+    /// The dim sheet, as four strips around the selection, plus the
+    /// outline drawn over it, and the surface holding them.
     ///
-    /// Without these, every motion event rescales a 21-megapixel
-    /// capture through cairo twice — once for the backdrop and once
-    /// inside the selection — and the rectangle lags the pointer.
-    /// Scaling once at the size it will actually be drawn turns each
-    /// frame into two blits.
-    backdrop: Option<gtk::cairo::ImageSurface>,
-    dimmed: Option<gtk::cairo::ImageSurface>,
+    /// Widgets rather than painting: a `DrawingArea` renders through
+    /// cairo on the CPU, so every motion event composited a 6K-wide
+    /// surface by hand and the rectangle trailed the pointer. Moving
+    /// five widgets hands that work to GTK, which composites the
+    /// capture as an already-uploaded texture.
+    fixed: gtk::Fixed,
+    shade: [gtk::Box; 4],
+    outline: gtk::Box,
+    /// The overlay's size in logical pixels, learned once it maps.
+    size: (i32, i32),
     /// Image pixels per logical pixel, learned at draw time — the
     /// overlay is laid out in logical units and the capture is in
     /// device ones, and on a 2x display those differ by exactly the
@@ -137,10 +140,22 @@ fn build_overlay(
     // screen is frozen behind it from the user's point of view, so a
     // list that shifted underneath would snap to something that is no
     // longer where it was drawn.
+    let shade = std::array::from_fn(|_| {
+        let strip = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        strip.add_css_class("region-capture-shade");
+        strip
+    });
+    let outline = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    outline.add_css_class("region-capture-outline");
+    outline.set_visible(false);
+
+    let fixed = gtk::Fixed::new();
     let state = Rc::new(RefCell::new(State {
-        frozen,
-        backdrop: None,
-        dimmed: None,
+        frozen: frozen.clone(),
+        fixed: fixed.clone(),
+        shade: shade.clone(),
+        outline: outline.clone(),
+        size: (0, 0),
         image_scale: 1.0,
         mode: Mode::Area,
         origin: (0.0, 0.0),
@@ -171,10 +186,19 @@ fn build_overlay(
     window.set_cursor_from_name(Some("crosshair"));
 
     let overlay = gtk::Overlay::new();
-    let drawing = gtk::DrawingArea::new();
-    drawing.set_hexpand(true);
-    drawing.set_vexpand(true);
-    overlay.set_child(Some(&drawing));
+    // The capture as a widget: GTK uploads it once and composites it,
+    // instead of cairo rescaling it on every frame.
+    let picture = gtk::Picture::for_pixbuf(&frozen);
+    picture.set_can_shrink(true);
+    picture.set_hexpand(true);
+    picture.set_vexpand(true);
+    overlay.set_child(Some(&picture));
+
+    for strip in &shade {
+        fixed.put(strip, 0.0, 0.0);
+    }
+    fixed.put(&outline, 0.0, 0.0);
+    overlay.add_overlay(&fixed);
 
     let hint = gtk::Label::new(Some(Mode::Area.hint()));
     hint.add_css_class("region-capture-hint");
@@ -185,100 +209,80 @@ fn build_overlay(
     window.set_child(Some(&overlay));
 
     install_css(app);
-    install_draw(&drawing, &state);
-    install_pointer(&drawing, &state, &window, shared);
-    install_keys(&window, &state, &drawing, &hint, shared);
+    install_pointer(&fixed, &state, &window, shared);
+    install_keys(&window, &state, &hint, shared);
+
+    // The overlay's size is only known once it maps, and every strip
+    // is positioned in it — so learn it there and lay out the idle
+    // dimmed state immediately.
+    {
+        let state_for_map = Rc::clone(&state);
+        let picture_for_map = picture.clone();
+        window.connect_map(move |_| {
+            let state_for_idle = Rc::clone(&state_for_map);
+            let picture = picture_for_map.clone();
+            gtk::glib::idle_add_local_once(move || {
+                let (w, h) = (picture.width(), picture.height());
+                if w < 1 || h < 1 {
+                    return;
+                }
+                let mut state = state_for_idle.borrow_mut();
+                state.size = (w, h);
+                // Image pixels per logical pixel: the capture is in
+                // device pixels and the strips are placed in logical
+                // ones, and on a 2x display ignoring that would halve
+                // every selection.
+                state.image_scale = state.frozen.width() as f64 / w as f64;
+                layout_shade(&state);
+            });
+        });
+    }
 
     window.present();
 }
 
-/// Paint the dim sheet and cut the pending selection out of it.
-fn install_draw(drawing: &gtk::DrawingArea, state: &Rc<RefCell<State>>) {
-    let state = Rc::clone(state);
-    drawing.set_draw_func(move |_, ctx, width, height| {
-        let mut state = state.borrow_mut();
-        if width < 1 || height < 1 {
-            return;
-        }
-        // The capture is in device pixels and the overlay is laid out
-        // in logical ones. Learn the ratio here, where both are known,
-        // and record it for the selection to convert with.
-        let scale = state.frozen.width() as f64 / width as f64;
-        state.image_scale = scale;
-        ensure_backdrops(&mut state, width, height);
-
-        // The frozen screen with the dim sheet already in it. Painting
-        // the capture rather than leaving the surface transparent is
-        // what makes the selection show what was there when the key
-        // was pressed, rather than whatever moved since.
-        if let Some(dimmed) = &state.dimmed {
-            let _ = ctx.set_source_surface(dimmed, 0.0, 0.0);
-            let _ = ctx.paint();
-        }
-
-        let Some(rect) = pending_rect(&state) else {
-            return;
-        };
-        let (x, y, w, h) = (
-            rect.x as f64,
-            rect.y as f64,
-            rect.width as f64,
-            rect.height as f64,
-        );
-        if w < 1.0 || h < 1.0 {
-            return;
-        }
-        // Repaint the capture inside the selection, undimmed, so the
-        // rectangle previews exactly the pixels it will keep.
-        if let Some(backdrop) = &state.backdrop {
-            ctx.save().ok();
-            ctx.rectangle(x, y, w, h);
-            ctx.clip();
-            let _ = ctx.set_source_surface(backdrop, 0.0, 0.0);
-            let _ = ctx.paint();
-            ctx.restore().ok();
-        }
-
-        ctx.set_source_rgba(1.0, 1.0, 1.0, 0.9);
-        ctx.set_line_width(1.0);
-        ctx.rectangle(x + 0.5, y + 0.5, w - 1.0, h - 1.0);
-        let _ = ctx.stroke();
-    });
-}
-
-/// Scale the capture to the overlay's size once, and burn a second
-/// copy with the dim sheet already applied. Rebuilt only when the
-/// overlay's size changes, which in practice means once.
-fn ensure_backdrops(state: &mut State, width: i32, height: i32) {
-    let sized = |surface: &Option<gtk::cairo::ImageSurface>| {
-        surface
-            .as_ref()
-            .is_some_and(|s| s.width() == width && s.height() == height)
-    };
-    if sized(&state.backdrop) && sized(&state.dimmed) {
+/// Move the four dim strips so they surround the pending selection,
+/// and put the outline on its edge.
+///
+/// The strips are a frame with a hole in it: top and bottom span the
+/// full width, left and right fill the gap between them. With no
+/// selection the top strip covers everything and the rest collapse,
+/// which is the dimmed-idle state.
+fn layout_shade(state: &State) {
+    let (width, height) = state.size;
+    if width < 1 || height < 1 {
         return;
     }
-
-    let render = |dim: bool| -> Option<gtk::cairo::ImageSurface> {
-        let surface =
-            gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, width, height).ok()?;
-        let ctx = gtk::cairo::Context::new(&surface).ok()?;
-        ctx.scale(
-            width as f64 / state.frozen.width() as f64,
-            height as f64 / state.frozen.height() as f64,
-        );
-        ctx.set_source_pixbuf(&state.frozen, 0.0, 0.0);
-        let _ = ctx.paint();
-        if dim {
-            ctx.identity_matrix();
-            ctx.set_source_rgba(0.0, 0.0, 0.0, 0.45);
-            let _ = ctx.paint();
-        }
-        drop(ctx);
-        Some(surface)
+    let place = |index: usize, x: f64, y: f64, w: f64, h: f64| {
+        let strip = &state.shade[index];
+        strip.set_size_request(w.max(0.0) as i32, h.max(0.0) as i32);
+        state.fixed.move_(strip, x, y);
+        strip.set_visible(w >= 1.0 && h >= 1.0);
     };
-    state.backdrop = render(false);
-    state.dimmed = render(true);
+
+    let Some(rect) = pending_rect(state) else {
+        place(0, 0.0, 0.0, width as f64, height as f64);
+        for index in 1..4 {
+            place(index, 0.0, 0.0, 0.0, 0.0);
+        }
+        state.outline.set_visible(false);
+        return;
+    };
+
+    let (x, y, w, h) = (
+        rect.x as f64,
+        rect.y as f64,
+        rect.width as f64,
+        rect.height as f64,
+    );
+    place(0, 0.0, 0.0, width as f64, y);
+    place(1, 0.0, y + h, width as f64, height as f64 - (y + h));
+    place(2, 0.0, y, x, h);
+    place(3, x + w, y, width as f64 - (x + w), h);
+
+    state.outline.set_size_request(w as i32, h as i32);
+    state.fixed.move_(&state.outline, x, y);
+    state.outline.set_visible(w >= 1.0 && h >= 1.0);
 }
 
 /// The rectangle the overlay would capture if the user committed now.
@@ -317,7 +321,7 @@ fn committed_region(state: &State) -> Option<RegionOutcome> {
 }
 
 fn install_pointer(
-    drawing: &gtk::DrawingArea,
+    surface: &gtk::Fixed,
     state: &Rc<RefCell<State>>,
     window: &gtk::ApplicationWindow,
     shared: &Rc<RefCell<RegionOutcome>>,
@@ -325,7 +329,6 @@ fn install_pointer(
     let motion = gtk::EventControllerMotion::new();
     {
         let state = Rc::clone(state);
-        let drawing = drawing.clone();
         motion.connect_motion(move |_, x, y| {
             let mut state = state.borrow_mut();
             if state.mode != Mode::Window {
@@ -334,12 +337,11 @@ fn install_pointer(
             let hit = window_at(&state.windows, x, y).cloned();
             if hit != state.hovered {
                 state.hovered = hit;
-                drop(state);
-                drawing.queue_draw();
+                layout_shade(&state);
             }
         });
     }
-    drawing.add_controller(motion);
+    surface.add_controller(motion);
 
     let drag = gtk::GestureDrag::new();
     {
@@ -353,17 +355,14 @@ fn install_pointer(
     }
     {
         let state = Rc::clone(state);
-        let drawing = drawing.clone();
         drag.connect_drag_update(move |_, dx, dy| {
-            {
-                let mut state = state.borrow_mut();
-                if state.mode != Mode::Area {
-                    return;
-                }
-                let origin = state.origin;
-                state.selection = Some(rect_between(origin, (origin.0 + dx, origin.1 + dy)));
+            let mut state = state.borrow_mut();
+            if state.mode != Mode::Area {
+                return;
             }
-            drawing.queue_draw();
+            let origin = state.origin;
+            state.selection = Some(rect_between(origin, (origin.0 + dx, origin.1 + dy)));
+            layout_shade(&state);
         });
     }
     {
@@ -391,19 +390,17 @@ fn install_pointer(
             }
         });
     }
-    drawing.add_controller(drag);
+    surface.add_controller(drag);
 }
 
 fn install_keys(
     window: &gtk::ApplicationWindow,
     state: &Rc<RefCell<State>>,
-    drawing: &gtk::DrawingArea,
     hint: &gtk::Label,
     shared: &Rc<RefCell<RegionOutcome>>,
 ) {
     let keys = gtk::EventControllerKey::new();
     let state = Rc::clone(state);
-    let drawing = drawing.clone();
     let hint = hint.clone();
     let window_for_keys = window.clone();
     let shared = Rc::clone(shared);
@@ -446,7 +443,7 @@ fn install_keys(
                         Mode::Window => "pointer",
                     },
                 ));
-                drawing.queue_draw();
+                layout_shade(&state.borrow());
                 gtk::glib::Propagation::Stop
             }
             _ => gtk::glib::Propagation::Proceed,
@@ -483,6 +480,12 @@ fn install_css(app: &gtk::Application) {
     let provider = gtk::CssProvider::new();
     provider.load_from_data(
         ".region-capture-overlay { background: transparent; }
+         /* The dim sheet, as strips GTK composites rather than pixels
+            cairo blends on every motion event. */
+         .region-capture-shade { background: rgba(0, 0, 0, 0.45); }
+         .region-capture-outline {
+             border: 1px solid rgba(255, 255, 255, 0.9);
+         }
          .region-capture-hint {
              background: rgba(0, 0, 0, 0.75);
              border-radius: 8px;
