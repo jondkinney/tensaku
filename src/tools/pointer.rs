@@ -712,12 +712,14 @@ impl Tool for PointerTool {
                     return ToolUpdateResult::RedrawAndStopPropagation;
                 }
                 let hit = store.hit_test(event.pos, HIT_TOLERANCE);
-                // Implicit mode + tool-type mismatch: don't select or
-                // consume — let the click propagate to the active
-                // drawing tool so e.g. a Marker count gets dropped where
-                // the user clicked, even if it lands over an existing
-                // shape of another type. Skip this gate for double-clicks
-                // on Text (the edit-text affordance below stays useful).
+                // Interior of a large annotation with a drawing tool
+                // armed: don't select or consume — let the click reach
+                // the tool so it draws there instead of grabbing what
+                // is underneath. A border hit still grabs.
+                //
+                // Never for a double-click: that is the edit-text
+                // affordance below, which has to reach an existing text
+                // box wherever on it you land.
                 if event.n_pressed != 2
                     && let Some(id) = hit
                     && let Some(drawable) = store.clone_drawable(id)

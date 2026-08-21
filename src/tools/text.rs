@@ -1015,14 +1015,18 @@ impl Drawable for Text {
         })
     }
 
-    /// Border-only picking: a text pill is a solid block of canvas, so its interior must stay
-    /// available to whichever drawing tool is armed. See
-    /// `Drawable::edge_hit_test`.
-    fn edge_hit_test(&self, point: Vec2D, tolerance: f32) -> bool {
-        self.bounds()
-            .map(|b| super::bbox_edge_hit(b, point, tolerance))
-            .unwrap_or(false)
-    }
+    // NOTE: deliberately no `edge_hit_test` override, unlike the other
+    // large-bodied drawables.
+    //
+    // Text is the one annotation whose interior must NOT pass through
+    // to the armed tool, because the armed tool is usually Text itself
+    // and the result would be a second text box stacked on the first —
+    // never what is wanted, and hard to unpick once it happens. So the
+    // default (whole body) applies: an existing text is grabbable and
+    // movable anywhere on it even with the Text tool in hand, and a
+    // double-click edits that box's text rather than starting a new
+    // one. Starting a new text still works anywhere the click doesn't
+    // land on an existing one.
 
     fn hit_test(&self, point: Vec2D, tolerance: f32) -> bool {
         // Use bounds() inflated by AT LEAST the pointer's full
