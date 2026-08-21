@@ -516,6 +516,17 @@ impl Tool for PointerTool {
                     // so the tool draws there instead of grabbing what
                     // is underneath.
                     if self.should_pass_through_body_hit(drawable.as_ref(), event.pos) {
+                        // ...but a live selection is dismissed first,
+                        // exactly as it is on empty canvas. Otherwise
+                        // clicking away from a selected annotation onto
+                        // a filled shape both leaves it selected AND
+                        // drops a new annotation, because this path
+                        // never reaches the empty-space branch below.
+                        if !self.selected.is_empty() {
+                            self.selected.clear();
+                            self.consume_next_click = true;
+                            return ToolUpdateResult::RedrawAndStopPropagation;
+                        }
                         return ToolUpdateResult::Unmodified;
                     }
 
