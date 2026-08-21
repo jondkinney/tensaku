@@ -7,6 +7,131 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0](https://github.com/jondkinney/tensaku/compare/v0.26.7...v0.27.0) - 2026-08-21
+
+### Added
+
+- *(pin)* place and stack pins on sway too
+- *(pin)* degrade gracefully off Hyprland
+- *(pin)* shape the pin like the display
+- *(pin,capture)* square stacked pins, click-to-edit, untitled names
+- *(capture)* the size pill takes the shot, and the puck matches
+- *(capture)* a shutter button beside the restored region's puck
+- *(capture)* the cursor says what a restored region will do
+- *(capture)* grips and a move puck on a restored region
+- *(capture)* adjust a restored region, and hide its measurement
+- *(capture)* R restores the last region
+- *(capture)* show the selection's pixel size while dragging
+- *(scroll-capture)* the same pointer guides as the area capture
+- *(capture)* A switches scrolling capture back to a normal one
+- *(capture)* crosshair guides before the drag starts
+- *(capture)* own the region selection, with window and mode switching
+- *(pin)* tooltips, copy confirmations, and drag-out
+- *(pin)* copy path saves the shot when it has none
+- *(canvas)* the plain wheel walks whichever axis overflows
+- *(pin)* pin the finished shot to the desktop
+- *(spotlight)* Alt+wheel adjusts the loupe
+- *(spotlight)* a magnification slider turns a spotlight into a loupe
+- *(text)* an outlined style that reads over anything
+- *(blur)* a Secure checkbox states what each mode can undo
+- *(shapes)* f toggles fill on any fillable selection
+- *(shapes)* a single r / e toggles a selected shape's fill
+- *(canvas)* right-click an annotation to restack it
+- *(stacking)* text lands above artwork, counters above text
+- *(pointer)* plain wheel zooms when the Pointer is armed
+- *(prefs)* remove the invert-scrolling preference
+- *(canvas)* plain wheel sizes the next annotation
+- *(counter)* preview the badge on the canvas, not in the cursor
+- *(counter)* the cursor previews the badge it will stamp
+- *(counter)* stamp the counter over text instead of grabbing it
+- *(shapes)* shape tool buttons show their own fill, and widen the double-tap
+- *(shapes)* double-tap a shape's key to toggle its fill, replacing F
+- *(selection)* grab large annotations by their border, draw in their interior
+
+### Fixed
+
+- *(pin)* crop the preview to the capture's top, not its middle
+- *(pin)* drop the mat and the rounded corner
+- *(pin)* float, pin and place through the Lua dispatch API
+- *(pin)* tooltips use the app's own, and the drag polls twice a frame
+- *(pin)* the drag follows the pointer itself
+- *(pin)* drag follows the pointer, and tooltips get out of the way
+- *(pin)* slots follow where pins are, and moving one keeps up
+- *(capture)* the shutter pill and puck carry their own cursors
+- *(pin)* copy works, preview shows the shot, pins stack
+- *(capture)* puck back to centre, size and shutter parked beneath it
+- *(capture)* size readouts agree with the editor
+- *(scroll-capture)* stop spawning hyprctl on every drag event
+- *(capture)* hints along the bottom, not across the middle
+- *(capture)* don't capture the overlay you just switched away from
+- *(scroll-capture)* dim to the same weight as the area capture
+- *(capture)* the area overlay wears the scroll capture's pill
+- *(capture)* centre the area overlay's hint like the scroll one
+- *(text)* the outline is white, like CleanShot X
+- *(capture)* crosshair pointer while aiming a region
+- *(capture)* cache the backdrop; stop toasting the saved text style
+- *(capture)* take the picture before the overlay exists
+- *(capture)* let the overlay leave the screen before capturing it
+- *(capture)* merge the --capture flag into the configuration
+- *(pin)* back every pin with a file so the drag carries a path
+- *(pin)* drag a thumbnail, not the whole capture
+- *(pin)* ask where to save when nothing is configured
+- *(pin)* render the pixels the pin needs
+- *(text)* Ctrl+Shift+wheel reaches the outlined style
+- *(spotlight)* make magnification global, like darkness
+- *(spotlight)* render the loupe in the pass that renders spotlights
+- *(blur)* stop the secure blur seeding itself from its own glow
+- *(blur)* put Secure beside the picker, not inside it
+- *(ellipse)* grab the curve, not the box around it
+- *(picking)* size the border-grab band in screen pixels
+- *(shapes)* apply the r / e fill toggle instead of dropping it
+- *(canvas)* stop inverting the compositor's scroll delta
+- *(counter)* tighten the badge's lead on the pointer
+- *(counter)* system cursor, offset badge
+- *(counter)* move the pointer off the number it previews
+- *(counter)* the cursor over text matches what the click does
+- *(shapes)* keep each shape's fill toggle to that shape
+- *(toolbar)* bundle the shape buttons' filled glyphs
+- *(selection)* dismiss a selection before drawing inside a large annotation
+- *(text)* clicking away from an in-progress text only ends it
+- *(text)* grab an existing text box rather than stacking a new one on it
+- *(input)* ignore modifiers left over from the launch chord
+- *(arrow)* thicken only the tail when zoomed out
+- *(canvas)* stop the expanded background showing a line per expansion
+- *(omarchy)* opt out of default window opacity, wiring through Lua
+- *(selection)* shrink the selection halo with the artwork when zoomed out
+- *(canvas)* settle the edge extension away from the boundary
+- *(canvas)* extend the image edge per line instead of one flat colour
+- *(text)* wrap auto-fit text at the image edge while typing
+- *(stitch)* keep a fixed edge's drop shadow out of every seam
+- *(stitch)* crop viewport-fixed bands out of the motion search
+- *(scroll-capture)* let the page inside a selected region take wheel and keys
+- *(scroll-capture)* target the overlay's monitor for capture and pointer warps
+- *(render)* tile the spotlight overlay past GL texture limits
+
+### Other
+
+- *(pin)* let the compositor move the pin
+- *(pin)* lead the pointer by the latency instead of chasing it
+- *(pin)* read the pointer off-thread, move on the frame clock
+- *(capture)* composite the selection instead of painting it
+- Revert "feat(pointer): plain wheel zooms when the Pointer is armed"
+- drop the two removed preferences from the README
+- *(canvas)* add probes for tile seams and flat-render uniformity
+- *(canvas)* grow the raster by re-viewing it, not by copying it
+- *(canvas)* add a grow-raster digest harness
+- *(canvas)* reuse background textures across an auto-grow
+- *(blur)* read back only the blurred region, and stop leaking textures
+- *(canvas)* stop copying the raster twice on every re-upload
+- *(canvas)* add an env-gated frame profiler
+- update star history chart
+- update star history chart
+- update star history chart
+- update star history chart
+- *(stitch)* use is_multiple_of in the sparse-doc fixture
+- *(stitch)* replay harness takes TENSAKU_STITCH_REPLAY_AXIS
+- update star history chart
+
 ## [0.26.7](https://github.com/jondkinney/tensaku/compare/v0.26.6...v0.26.7) - 2026-08-15
 
 ### Added
