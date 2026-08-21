@@ -465,11 +465,15 @@ fn cover_thumbnail(image: &Pixbuf, frame: (i32, i32)) -> Pixbuf {
     let Some(scaled) = image.scale_simple(scaled_w, scaled_h, InterpType::Bilinear) else {
         return image.clone();
     };
-    // Take the middle: a capture's edges are where its chrome is, and
-    // its middle is what it was taken of. A capture shaped like the
-    // screen crops nothing, which is the point of the frame's shape.
+    // Centred horizontally, but anchored to the top rather than the
+    // middle: a capture's top is its title bar, its tab strip, its
+    // heading — what tells you which shot this is. A tall page cropped
+    // to its middle is a slab of body text that could be any of them.
+    //
+    // A capture shaped like the screen crops nothing either way, which
+    // is the point of the frame's shape.
     let x = ((scaled_w - frame_w) / 2).max(0);
-    let y = ((scaled_h - frame_h) / 2).max(0);
+    let y = 0;
     scaled.new_subpixbuf(x, y, frame_w.min(scaled_w), frame_h.min(scaled_h))
 }
 
@@ -695,13 +699,36 @@ mod tests {
         assert_eq!((thumb.width(), thumb.height()), frame);
     }
 
-    /// A tall stitch is cropped to its middle for the same reason.
+    /// A tall stitch is cropped to its top for the same reason.
     #[test]
     fn a_tall_capture_fills_the_frame() {
         let frame = (224, 126);
         let tall = Pixbuf::new(Colorspace::Rgb, true, 8, 600, 9000).unwrap();
         let thumb = cover_thumbnail(&tall, frame);
         assert_eq!((thumb.width(), thumb.height()), frame);
+    }
+
+    /// A tall capture keeps its top, where the heading and the tabs
+    /// are — the part that says which shot this is. Its middle is
+    /// body text that could belong to any of them.
+    #[test]
+    fn a_tall_capture_keeps_its_top() {
+        let frame = (224, 126);
+        // A page with a red band across its first rows and black
+        // below. Cover-scaling a 448-wide capture into a 224-wide
+        // frame halves it, so the frame shows the capture's top 252
+        // rows: the band has to be shallower than that to leave any
+        // black in the picture at all.
+        let tall = Pixbuf::new(Colorspace::Rgb, true, 8, 448, 4000).unwrap();
+        tall.fill(0x000000ff);
+        tall.new_subpixbuf(0, 0, 448, 100).fill(0xff0000ff);
+        let thumb = cover_thumbnail(&tall, frame);
+        let pixels = unsafe { thumb.pixels() };
+        let stride = thumb.rowstride() as usize;
+        let top_row_is_red = pixels[..3] == [0xff, 0x00, 0x00];
+        let bottom_row = &pixels[stride * (frame.1 as usize - 1)..];
+        assert!(top_row_is_red, "expected the capture's top to survive");
+        assert_eq!(&bottom_row[..3], &[0x00, 0x00, 0x00]);
     }
 
     /// A capture shaped like the screen loses nothing: the frame is
