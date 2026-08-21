@@ -158,7 +158,7 @@ fn build_overlay(
 
     let crosshair: [gtk::Box; 2] = std::array::from_fn(|_| {
         let guide = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        guide.add_css_class("region-capture-crosshair");
+        guide.add_css_class("capture-crosshair");
         guide.set_visible(false);
         guide
     });
@@ -548,8 +548,9 @@ fn install_css(app: &gtk::Application) {
              border: 1px solid rgba(255, 255, 255, 0.9);
          }
          /* Faint enough to read the screen through, which is the point
-            of lining up against it. */
-         .region-capture-crosshair { background: rgba(255, 255, 255, 0.22); }
+            of lining up against it. Same class and colour in the
+            scrolling capture's stylesheet. */
+         .capture-crosshair { background: rgba(255, 255, 255, 0.22); }
          /* Lifted from the scrolling capture's stylesheet: this
             overlay is a separate GTK application with its own CSS, so
             the rules have to exist in both places to look like one

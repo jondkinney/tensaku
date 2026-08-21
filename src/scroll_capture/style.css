@@ -167,3 +167,12 @@
 .scroll-capture-inside-auto:hover {
   background-color: rgba(40, 50, 70, 0.95);
 }
+
+/* Pointer guides before a region is dragged — the same faint white
+   lines the area capture shows, under the same class name. Widgets
+   rather than painted lines: they follow the pointer on every motion
+   event, and compositing two strips is free where redrawing a 6K
+   backdrop is not. */
+.capture-crosshair {
+  background: rgba(255, 255, 255, 0.22);
+}
