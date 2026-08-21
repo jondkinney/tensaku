@@ -923,6 +923,24 @@ fn build_overlay(
     // and pointer wheel pass-through is governed by the surface input
     // region, not the keyboard mode.
 
+    // Pointer guides, shown until a region exists. Widgets rather than
+    // cairo lines in `draw_backdrop`: they move with every motion
+    // event, and moving two strips lets GTK composite them instead of
+    // repainting the whole backdrop to shift a line by a pixel.
+    let crosshair: [gtk::Box; 2] = std::array::from_fn(|_| {
+        let guide = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        guide.add_css_class("capture-crosshair");
+        guide.set_visible(false);
+        overlay.add_overlay(&guide);
+        guide
+    });
+    crosshair[0].set_halign(gtk::Align::Start);
+    crosshair[0].set_valign(gtk::Align::Fill);
+    crosshair[0].set_size_request(1, -1);
+    crosshair[1].set_halign(gtk::Align::Fill);
+    crosshair[1].set_valign(gtk::Align::Start);
+    crosshair[1].set_size_request(-1, 1);
+
     action_pill.set_visible(false);
     capturing_pill.set_visible(false);
 
@@ -984,6 +1002,7 @@ fn build_overlay(
         let prompt_w = prompt.clone();
         let action_pill_w = action_pill.clone();
         let capturing_pill_w = capturing_pill.clone();
+        let crosshair_drag = crosshair.clone();
         drag.connect_drag_update(move |_, dx, dy| {
             let mut s = state.borrow_mut();
             if !s.drag_active {
@@ -995,6 +1014,9 @@ fn build_overlay(
                 if s.resize_handle.is_none() {
                     s.phase = Phase::Dragging;
                     drop(s);
+                    for guide in &crosshair_drag {
+                        guide.set_visible(false);
+                    }
                     prompt_w.set_visible(false);
                     action_pill_w.set_visible(false);
                     capturing_pill_w.set_visible(false);
@@ -1121,10 +1143,20 @@ fn build_overlay(
         let state = Rc::clone(&state);
         let drawing_w = drawing.clone();
         let window_w = window.clone();
+        let crosshair_w = crosshair.clone();
         motion.connect_motion(move |_, x, y| {
             let phase = state.borrow().phase;
+            // Guides while a region is still being chosen; once one
+            // exists it is the thing being aimed, and they would be two
+            // more lines over it.
+            let aiming = matches!(phase, Phase::AwaitingDrag);
+            crosshair_w[0].set_margin_start(x.round().max(0.0) as i32);
+            crosshair_w[1].set_margin_top(y.round().max(0.0) as i32);
+            for guide in &crosshair_w {
+                guide.set_visible(aiming);
+            }
             if !matches!(phase, Phase::Selected) {
-                drawing_w.set_cursor_from_name(Some("default"));
+                drawing_w.set_cursor_from_name(Some(if aiming { "crosshair" } else { "default" }));
                 return;
             }
             update_selected_keyboard_zone(&state, &window_w, x, y);
