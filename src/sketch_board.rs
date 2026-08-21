@@ -1473,6 +1473,32 @@ impl SketchBoard {
         }
     }
 
+    /// Write the pinned image somewhere a drop target can fetch it,
+    /// returning the path.
+    ///
+    /// A pin needs a file even when the shot has never been saved:
+    /// dropping into a file manager wants a file, and dropping into a
+    /// terminal or a text field wants its path as text. With nothing
+    /// on disk there is neither, and the drag carries only pixels —
+    /// which is why an unsaved pin could be dropped into an image
+    /// editor but not into anything else.
+    ///
+    /// It goes in the cache directory, not the user's pictures: this
+    /// is a file the pin needs, not one the user asked for, and it is
+    /// removed when the pin closes.
+    fn write_pin_snapshot(image: &Pixbuf) -> Option<String> {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_millis();
+        let path = xdg::BaseDirectories::with_prefix(env!("CARGO_PKG_NAME"))
+            .place_cache_file(format!("pinned-{stamp}.png"))
+            .ok()?;
+        let data = image.save_to_bufferv("png", &Vec::new()).ok()?;
+        fs::write(&path, data).ok()?;
+        Some(path.to_string_lossy().into_owned())
+    }
+
     /// Put `image` in a pinned window and tell App to step aside.
     ///
     /// The pin is built here rather than in App because this is where
@@ -1481,6 +1507,14 @@ impl SketchBoard {
     /// signal handlers. What crosses to App is two unit messages:
     /// hide, and later show again.
     fn handle_pin(&self, image: &Pixbuf, sender: &ComponentSender<Self>) {
+        let saved = self.last_saved_filepath.borrow().clone();
+        // Fall back to a snapshot so the drag always has a file and a
+        // path to offer, and remember to clean it up if we wrote one.
+        let snapshot = match &saved {
+            Some(_) => None,
+            None => Self::write_pin_snapshot(image),
+        };
+        let drag_path = saved.clone().or_else(|| snapshot.clone());
         let copy_image = image.clone();
         let copy_sender = sender.input_sender().clone();
         let path_sender = sender.input_sender().clone();
@@ -1501,10 +1535,22 @@ impl SketchBoard {
                 on_copy_path: Box::new(move || {
                     path_sender.emit(SketchBoardInput::PinCopyPath);
                 }),
-                path_known: self.last_saved_filepath.borrow().is_some(),
-                saved_path: self.last_saved_filepath.borrow().clone(),
+                // `path_known` is about the user's own file, which is
+                // what Copy path deals in — the snapshot below is the
+                // pin's business and copying its path would hand out
+                // something due to be deleted.
+                path_known: saved.is_some(),
+                saved_path: drag_path,
             },
         );
+        // The snapshot exists for the pin's sake, so it goes when the
+        // pin does. A drop target that copies on drop — which is what
+        // they do — has long since taken its copy.
+        if let Some(snapshot) = snapshot {
+            pin.window.connect_destroy(move |_| {
+                let _ = fs::remove_file(&snapshot);
+            });
+        }
         *self.pinned.borrow_mut() = Some(pin);
         sender.output_sender().emit(SketchBoardOutput::PinOpened);
     }

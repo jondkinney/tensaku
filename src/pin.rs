@@ -218,14 +218,7 @@ fn build_controls(window: &gtk::Window, image: &Pixbuf, actions: PinActions) -> 
     // itself already drags — that moves the pin — and one gesture
     // can't mean both "take this file somewhere" and "put this window
     // somewhere".
-    let drag_out = button(
-        "re-order-dots-horizontal-regular",
-        if saved_path.is_some() {
-            "Drag the file out"
-        } else {
-            "Drag the image out"
-        },
-    );
+    let drag_out = button("re-order-dots-horizontal-regular", "Drag out to another app");
     drag_out.add_css_class("pin-drag-handle");
     install_drag_out(&drag_out, image, saved_path);
     controls.append(&drag_out);
