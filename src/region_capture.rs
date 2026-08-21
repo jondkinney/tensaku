@@ -27,6 +27,12 @@ use crate::windows::{WindowTarget, visible_windows, window_at};
 /// and capturing a 3×2 region helps nobody.
 const MIN_DRAG: f64 = 8.0;
 
+/// Settle time after the overlay's surface goes away, before the
+/// caller takes the picture. Matches the scroll-capture overlay's
+/// figure — about two frames at 60 Hz, which is what it takes for the
+/// compositor to have composited a screen without us in it.
+const OVERLAY_GONE_SETTLE_MS: u64 = 34;
+
 /// What the user chose.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RegionOutcome {
@@ -76,6 +82,41 @@ struct State {
     windows: Vec<WindowTarget>,
     /// The window under the pointer while in window mode.
     hovered: Option<WindowTarget>,
+}
+
+/// Take the overlay down and let the screen settle without it.
+///
+/// A layer surface doesn't vanish the instant the window closes: the
+/// compositor has to process the unmap and composite a frame without
+/// it. Capturing before that bakes this overlay's own hint line into
+/// the screenshot — which is exactly what a capture tool must never
+/// do.
+///
+/// Two frame ticks then a short settle, the same barrier the
+/// scroll-capture overlay uses before it arms screencopy. The ticks
+/// prove a frame was submitted and completed; the settle covers the
+/// compositor's own repaint.
+fn dismiss(window: &gtk::ApplicationWindow) {
+    window.set_visible(false);
+    let saw_first_tick = Rc::new(std::cell::Cell::new(false));
+    let window_for_close = window.clone();
+    window.add_tick_callback(move |_, _| {
+        if !saw_first_tick.replace(true) {
+            return gtk::glib::ControlFlow::Continue;
+        }
+        let window_for_close = window_for_close.clone();
+        gtk::glib::timeout_add_local_once(
+            std::time::Duration::from_millis(OVERLAY_GONE_SETTLE_MS),
+            move || {
+                // Round-trip the Wayland connection so the unmap is
+                // processed before the caller's screencopy asks for a
+                // frame over its own connection.
+                gtk::prelude::WidgetExt::display(&window_for_close).sync();
+                window_for_close.close();
+            },
+        );
+        gtk::glib::ControlFlow::Break
+    });
 }
 
 /// Show the overlay and wait for a choice.
@@ -282,7 +323,7 @@ fn install_pointer(
             };
             if let Some(choice) = choice {
                 *shared.borrow_mut() = choice;
-                window.close();
+                dismiss(&window);
             }
         });
     }
@@ -305,7 +346,7 @@ fn install_keys(
     keys.connect_key_pressed(move |_, key, _, _| {
         let finish = |outcome: RegionOutcome| {
             *shared.borrow_mut() = outcome;
-            window_for_keys.close();
+            dismiss(&window_for_keys);
             gtk::glib::Propagation::Stop
         };
         match key {
