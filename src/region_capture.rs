@@ -463,18 +463,21 @@ fn hide_grips(state: &State) {
     state.puck.set_visible(false);
 }
 
-/// Show the selection's pixel size beside the corner being dragged.
+/// Show the selection's size beside the corner being dragged.
+///
+/// In the overlay's own logical pixels, not the capture's device ones.
+/// The editor reports the same way — it divides the image by the
+/// capture scale so a region framed on a 2x display reads at the size
+/// it looked, not double — and a capture tool whose two halves
+/// disagree about how big the shot is teaches nobody anything.
 fn layout_readout(state: &State, rect: Rect) {
-    // The capture's pixels, not the overlay's: the number should match
-    // the file, and on a 2x display those differ by half.
-    let scaled = to_image_rect(rect, state.image_scale, &state.frozen);
-    if scaled.width < 1 || scaled.height < 1 {
+    if rect.width < 1 || rect.height < 1 {
         state.readout.set_visible(false);
         return;
     }
     state
         .readout_label
-        .set_text(&format!("{} × {}", scaled.width, scaled.height));
+        .set_text(&format!("{} × {}", rect.width, rect.height));
     state.readout.set_visible(true);
 
     let (_, width, _, _) = state.readout.measure(gtk::Orientation::Horizontal, -1);
