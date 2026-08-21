@@ -172,8 +172,6 @@ auto-copy = false
 # settings below take precedence when present. Does not apply to Save As.
 early-exit = false
 # Preferences-backed behavior settings (shown here with their defaults)
-invert-scrolling = true
-select-any-annotation = true
 close-on-esc = false
 close-on-copy = false
 close-on-save = false
@@ -317,7 +315,7 @@ Open the Preferences dialog with <kbd>Ctrl+,</kbd> or the gear button in the top
 
 - **Keyboard Shortcuts** — a recorder row for every tool, Spotlight included. Click a row, press a key, then <kbd>Save</kbd> to update `[keybinds]` (or <kbd>Cancel</kbd> to discard).
 - **Scroll Capture** — record the global scroll-capture shortcut and choose whether Manual Scroll parks the pointer near the selection's lower-right edge when capture starts. Parking is on by default to reduce page-hover artifacts.
-- **Behavior** — settings that apply immediately: the annotation size factor, invert scrolling direction, click-any-annotation selection, close window on Esc/copy/save, whether the editor window resizes to cropped content, hide the default palette colors, and keep in-session tool adjustments across tool switches.
+- **Behavior** — settings that apply immediately: the annotation size factor, close window on Esc/copy/save, whether the editor window resizes to cropped content, hide the default palette colors, and keep in-session tool adjustments across tool switches.
 
 Every tool shortcut and Behavior/Scroll Capture checkbox shown here reads from and writes to the active configuration file: the path passed to `--config`, or `~/.config/tensaku/config.toml`. The writer changes only the relevant keys, preserving comments, formatting, and unrelated tables. The sole exception is the global scroll-capture shortcut, which stays in `state.toml` because Tensaku also mirrors it into Hyprland's live and persisted binding state.
 
