@@ -567,7 +567,7 @@ pub trait Drawable: DrawableClone + Debug {
     }
 
     /// Icon resource name for the layer panel row. Should match an entry in
-    /// `icons.toml`. Defaults to the pen icon so any new Drawable type still
+    /// bundled by `build.rs`. Defaults to the pen icon so any new Drawable still
     /// shows *something* before its override lands.
     fn icon_name(&self) -> &'static str {
         "pen-regular"

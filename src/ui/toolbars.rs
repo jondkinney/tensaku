@@ -1699,7 +1699,7 @@ fn blur_style_label(s: BlurStyle) -> &'static str {
 
 /// Icon name shown on the highlighter-style MenuButton chip and the
 /// popover rows. Both icons live in the bundled set (see
-/// `icons.toml`).
+/// bundled by `build.rs`).
 fn highlighter_style_icon(s: crate::tools::HighlighterStyle) -> &'static str {
     use crate::tools::HighlighterStyle::*;
     match s {
@@ -3389,7 +3389,7 @@ impl Component for ToolsToolbar {
                     // rectangle without touching the ellipse.
                     #[watch]
                     set_icon_name: if model.fill_rect {
-                        "square-filled"
+                        "stop-filled"
                     } else {
                         "checkbox-unchecked-regular"
                     },

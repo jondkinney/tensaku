@@ -67,6 +67,12 @@ fn main() -> Result<(), io::Error> {
             "minus-large",
             "checkbox-unchecked-regular",
             "circle-regular",
+            // Filled counterparts for the shape buttons, whose glyph
+            // follows that shape's own fill. Fluent has no `square-*`
+            // family; `stop-filled` is the solid rounded box matching
+            // `checkbox-unchecked-regular`'s outline exactly.
+            "stop-filled",
+            "circle-filled",
             "crop-filled",
             "arrow-up-right-filled",
             "rectangle-landscape-regular",
