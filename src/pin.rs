@@ -922,6 +922,123 @@ fn fit_within(width: i32, height: i32, max: i32) -> (i32, i32) {
     )
 }
 
+/// How often the after-drag watcher asks the compositor where this pin
+/// is, while working out whether a handle press became a drag and where
+/// it ended.
+const DRAG_WATCH_INTERVAL: Duration = Duration::from_millis(300);
+
+/// One position sighting fed to [`DragWatch::observe`].
+type PinRect = (i32, i32, i32, i32);
+
+/// Infers the end of a compositor-side move from position polls.
+///
+/// `begin_move` hands the drag to the compositor and the client never
+/// hears when it ends, so the end has to be read off the effect: the
+/// window left its starting position and then held one spot for a few
+/// consecutive polls. A press that never moves the window was a click,
+/// not a drag, and times out instead.
+struct DragWatch {
+    start: PinRect,
+    prev: Option<PinRect>,
+    stable_polls: u32,
+    moved: bool,
+    polls: u32,
+}
+
+#[derive(Debug, PartialEq)]
+enum DragOutcome {
+    StillWatching,
+    /// The window moved and has now held still: the drag is over.
+    Settled,
+    /// A click, a timeout, or the window is gone.
+    GiveUp,
+}
+
+impl DragWatch {
+    /// Give a click this long to turn into a drag before concluding it
+    /// was just a click.
+    const CLICK_POLLS: u32 = 10;
+    /// A hard stop so a stuck drag can't poll the compositor forever.
+    const MAX_POLLS: u32 = 200;
+    /// Consecutive unchanged polls that count as "held still". Long
+    /// enough (~1s) that pausing the mouse mid-drag rarely counts.
+    const STABLE_POLLS: u32 = 3;
+
+    fn new(start: PinRect) -> Self {
+        Self {
+            start,
+            prev: None,
+            stable_polls: 0,
+            moved: false,
+            polls: 0,
+        }
+    }
+
+    fn observe(&mut self, rect: Option<PinRect>) -> DragOutcome {
+        self.polls += 1;
+        let Some(rect) = rect else {
+            // The window vanished mid-watch — it closed, and the
+            // close path does its own re-stacking.
+            return DragOutcome::GiveUp;
+        };
+        if rect != self.start {
+            self.moved = true;
+        }
+        if self.prev == Some(rect) {
+            self.stable_polls += 1;
+        } else {
+            self.stable_polls = 0;
+        }
+        self.prev = Some(rect);
+        if self.moved && self.stable_polls >= Self::STABLE_POLLS {
+            return DragOutcome::Settled;
+        }
+        if (!self.moved && self.polls >= Self::CLICK_POLLS) || self.polls >= Self::MAX_POLLS {
+            return DragOutcome::GiveUp;
+        }
+        DragOutcome::StillWatching
+    }
+}
+
+/// Where this process's own pin currently sits, by asking the
+/// compositor — during a compositor-side drag the client has no more
+/// direct way to know.
+fn own_pin_rect(desktop: Desktop) -> Option<PinRect> {
+    let own_title = pin_title();
+    desktop
+        .pin_rects()
+        .into_iter()
+        .find(|(title, _)| *title == own_title)
+        .map(|(_, rect)| rect)
+}
+
+/// A press on the move handle may drag this pin out of the column,
+/// leaving the same hole a closed pin does. Watch for where the drag
+/// ends, then close the gaps. The dragged pin itself is not excluded:
+/// out of the column it has no slot and is left alone, and dropped
+/// back into the column it takes part in the compaction like any
+/// other pin.
+fn watch_drag_then_close_gaps(desktop: Desktop, watching: &Rc<Cell<bool>>) {
+    if !desktop.places_windows() || watching.get() {
+        return;
+    }
+    let Some(start) = own_pin_rect(desktop) else {
+        return;
+    };
+    watching.set(true);
+    let mut watch = DragWatch::new(start);
+    let watching = Rc::clone(watching);
+    gtk::glib::timeout_add_local(DRAG_WATCH_INTERVAL, move || {
+        match watch.observe(own_pin_rect(desktop)) {
+            DragOutcome::StillWatching => return gtk::glib::ControlFlow::Continue,
+            DragOutcome::Settled => compact_column(desktop, None),
+            DragOutcome::GiveUp => {}
+        }
+        watching.set(false);
+        gtk::glib::ControlFlow::Break
+    });
+}
+
 /// Drag the pin around by its handle.
 ///
 /// A layer surface is positioned by its anchor margins, not by the
@@ -932,6 +1049,8 @@ fn fit_within(width: i32, height: i32, max: i32) -> (i32, i32) {
 fn install_move(window: &gtk::Window, target: &gtk::Button) {
     let press = gtk::GestureClick::new();
     let window = window.clone();
+    let desktop = Desktop::detect();
+    let watching = Rc::new(Cell::new(false));
     press.connect_pressed(move |gesture, _, x, y| {
         // Hand the drag to the compositor. It moves the window during
         // its own frame with the client out of the loop, which is why
@@ -961,6 +1080,9 @@ fn install_move(window: &gtk::Window, target: &gtk::Button) {
             sy + y,
             gesture.current_event_time(),
         );
+        // The drag may pull this pin out of the column; the survivors
+        // close the gap once it lands.
+        watch_drag_then_close_gaps(desktop, &watching);
     });
     target.add_controller(press);
 }
@@ -1222,6 +1344,141 @@ mod tests {
             after,
             vec![Some(0), Some(1)],
             "survivors did not close the gap"
+        );
+    }
+
+    /// A press that never moves the window is a click, and the watcher
+    /// walks away instead of re-stacking anything.
+    #[test]
+    fn a_click_on_the_move_handle_is_not_a_drag() {
+        use super::{DragOutcome, DragWatch};
+        let start = (100, 100, 224, 149);
+        let mut watch = DragWatch::new(start);
+        for _ in 0..DragWatch::CLICK_POLLS - 1 {
+            assert_eq!(watch.observe(Some(start)), DragOutcome::StillWatching);
+        }
+        assert_eq!(watch.observe(Some(start)), DragOutcome::GiveUp);
+    }
+
+    /// A drag settles only after the window has both moved and held
+    /// one position for a few polls — not while it is still moving,
+    /// and not merely because time passed.
+    #[test]
+    fn a_drag_settles_once_the_window_holds_still() {
+        use super::{DragOutcome, DragWatch};
+        let start = (100, 100, 224, 149);
+        let mut watch = DragWatch::new(start);
+        assert_eq!(watch.observe(Some(start)), DragOutcome::StillWatching);
+        // Moving: every poll sees a new spot.
+        for step in 1..=4 {
+            let rect = (100 + step * 40, 100, 224, 149);
+            assert_eq!(watch.observe(Some(rect)), DragOutcome::StillWatching);
+        }
+        // Dropped: the same spot repeats until the watcher believes it.
+        let dropped = (600, 400, 224, 149);
+        for _ in 0..DragWatch::STABLE_POLLS {
+            assert_eq!(watch.observe(Some(dropped)), DragOutcome::StillWatching);
+        }
+        assert_eq!(watch.observe(Some(dropped)), DragOutcome::Settled);
+    }
+
+    /// A window that vanishes mid-watch was closed, and the close path
+    /// owns the re-stack — the watcher must not run a second one.
+    #[test]
+    fn a_vanished_window_ends_the_watch() {
+        use super::{DragOutcome, DragWatch};
+        let start = (100, 100, 224, 149);
+        let mut watch = DragWatch::new(start);
+        assert_eq!(
+            watch.observe(Some((140, 100, 224, 149))),
+            DragOutcome::StillWatching
+        );
+        assert_eq!(watch.observe(None), DragOutcome::GiveUp);
+    }
+
+    /// End-to-end against the real compositor: three pins in slots, the
+    /// middle one is dragged off to the side (simulated with the same
+    /// compositor move a real drag produces), and the drag-settled
+    /// compaction drops the top pin down while leaving the dragged one
+    /// where the user put it. Run by hand inside a session:
+    /// `cargo test a_dragged_pins_survivors_restack -- --ignored --nocapture`
+    #[test]
+    #[ignore = "drives the live compositor"]
+    fn a_dragged_pins_survivors_restack() {
+        use super::{Desktop, compact_column};
+        use relm4::gtk::{self, prelude::*};
+
+        let desktop = Desktop::detect();
+        assert!(desktop.places_windows(), "needs a Hyprland or Sway session");
+        gtk::init().expect("gtk init");
+        let pump = |millis: u64| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(millis);
+            while std::time::Instant::now() < deadline {
+                while gtk::glib::MainContext::default().iteration(false) {}
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+
+        let titles: Vec<String> = (0..3).map(|n| format!("Tensaku Pin 91000{n}")).collect();
+        let (w, h) = pin_size();
+        let windows: Vec<gtk::Window> = titles
+            .iter()
+            .map(|title| {
+                let window = gtk::Window::builder()
+                    .resizable(false)
+                    .decorated(false)
+                    .title(title)
+                    .default_width(w)
+                    .default_height(h)
+                    .build();
+                window.present();
+                window
+            })
+            .collect();
+        pump(400);
+        for (slot, title) in titles.iter().enumerate() {
+            desktop.arrange(title, slot as i32);
+        }
+        pump(400);
+
+        let screen = desktop.screen_size().expect("screen size");
+        let rect_of = |title: &String| {
+            desktop
+                .pin_rects()
+                .into_iter()
+                .find(|(t, _)| t == title)
+                .map(|(_, rect)| rect)
+        };
+        let slot_of_title = |title: &String| rect_of(title).and_then(|rect| slot_of(rect, screen));
+        assert_eq!(
+            titles.iter().map(slot_of_title).collect::<Vec<_>>(),
+            vec![Some(0), Some(1), Some(2)],
+            "placement into slots failed"
+        );
+
+        // The user drags the middle pin well away from the column.
+        desktop.move_pin(&titles[1], 60, 60);
+        pump(400);
+        // What the drag watcher does once the window settles.
+        compact_column(desktop, None);
+        pump(400);
+
+        let after: Vec<Option<i32>> = titles.iter().map(slot_of_title).collect();
+        let dragged = rect_of(&titles[1]);
+        for window in &windows {
+            window.destroy();
+        }
+        pump(100);
+        assert_eq!(
+            after,
+            vec![Some(0), None, Some(1)],
+            "survivors did not close the gap around the dragged pin"
+        );
+        let dragged = dragged.expect("dragged pin still on screen");
+        assert_eq!(
+            (dragged.0, dragged.1),
+            (60, 60),
+            "the dragged pin must stay where the user put it"
         );
     }
 
