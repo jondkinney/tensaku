@@ -27,14 +27,32 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
-/// Side of a pinned capture, in CSS pixels.
+/// Width of a pinned capture, in CSS pixels. The height follows the
+/// display's aspect.
 ///
-/// Square whatever the shot's shape: pins stack, and a column of
-/// mismatched heights is one that has to be laid out rather than
-/// counted. The image fills the square and centre-crops, so a wide
-/// capture shows its middle instead of becoming a letterboxed sliver
-/// too small to recognise.
-const PIN_SIDE: i32 = 168;
+/// Shaped like the screen, so a full-screen capture — the most common
+/// kind — fits its pin exactly, with nothing cropped away. Everything
+/// else fills the same frame and centre-crops, which keeps pins a
+/// uniform size: they stack, and a column of mismatched heights is one
+/// that has to be laid out rather than counted.
+const PIN_WIDTH: i32 = 224;
+
+/// Fallback aspect when the display can't be asked. 16:9 is the shape
+/// of most screens and a reasonable guess for the rest.
+const FALLBACK_ASPECT: f64 = 9.0 / 16.0;
+
+/// The frame a pin's picture fills: the display's aspect at
+/// [`PIN_WIDTH`].
+fn pin_size() -> (i32, i32) {
+    let aspect = crate::display::hyprland_focused_monitor()
+        .filter(|m| m.width > 0 && m.height > 0)
+        .map(|m| m.height as f64 / m.width as f64)
+        .unwrap_or(FALLBACK_ASPECT);
+    // Clamped so an unusual display — a tall pivot, an ultrawide —
+    // still yields a pin rather than a line.
+    let height = ((PIN_WIDTH as f64 * aspect).round() as i32).clamp(PIN_WIDTH / 4, PIN_WIDTH * 2);
+    (PIN_WIDTH, height)
+}
 
 /// Frame around the preview: the pin needs an edge of its own or it
 /// reads as a picture lying loose on the desktop rather than a thing
@@ -115,7 +133,8 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
         .build();
     window.add_css_class("pin-window");
 
-    window.set_default_size(PIN_SIDE + PIN_PADDING * 2, PIN_SIDE + PIN_PADDING * 2);
+    let (frame_w, frame_h) = pin_size();
+    window.set_default_size(frame_w + PIN_PADDING * 2, frame_h + PIN_PADDING * 2);
 
     // Float it, show it on every workspace, and put it in its slot —
     // once it has a surface for the compositor to match on.
@@ -153,10 +172,10 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
     // them. A `Picture`'s natural size is its image's, so a 6K capture
     // asked for a 6K surface and the compositor clamped it — which is
     // why a pin showed a corner at full size instead of the shot.
-    let preview = cover_thumbnail(image, PIN_SIDE);
+    let preview = cover_thumbnail(image, (frame_w, frame_h));
     let picture = gtk::Picture::for_pixbuf(&preview);
     picture.set_can_shrink(true);
-    picture.set_size_request(PIN_SIDE, PIN_SIDE);
+    picture.set_size_request(frame_w, frame_h);
 
     // No border of our own: the compositor draws one around a
     // floating window, and two frames around one picture is one frame
@@ -312,9 +331,9 @@ fn place_in_slot(slot: i32) {
         (monitor.width as f64 / scale).round() as i32,
         (monitor.height as f64 / scale).round() as i32,
     );
-    let side = PIN_SIDE + PIN_PADDING * 2;
-    let x = screen_w - EDGE_MARGIN - side;
-    let y = screen_h - EDGE_MARGIN - side - slot * pin_step();
+    let (frame_w, frame_h) = pin_size();
+    let x = screen_w - EDGE_MARGIN - (frame_w + PIN_PADDING * 2);
+    let y = screen_h - EDGE_MARGIN - (frame_h + PIN_PADDING * 2) - slot * pin_step();
     hypr_dispatch(&format!(
         "hl.dsp.window.move({{ x = {x}, y = {y}, relative = false, {} }})",
         pin_selector()
@@ -323,7 +342,7 @@ fn place_in_slot(slot: i32) {
 
 /// How far apart stacked pins sit, centre to centre.
 fn pin_step() -> i32 {
-    PIN_SIDE + PIN_PADDING * 2 + PIN_GAP
+    pin_size().1 + PIN_PADDING * 2 + PIN_GAP
 }
 
 /// The slot a pin at `rect` is sitting in, or `None` if it isn't in
@@ -337,12 +356,12 @@ fn slot_of(rect: (i32, i32, i32, i32), screen: (i32, i32)) -> Option<i32> {
     /// A pin within a few pixels of a slot is in it: margins round to
     /// integers and compositors report what they rounded to.
     const TOLERANCE: i32 = 4;
-    let side = PIN_SIDE + PIN_PADDING * 2;
+    let (frame_w, frame_h) = pin_size();
     let (x, y, _, _) = rect;
-    if (x - (screen.0 - EDGE_MARGIN - side)).abs() > TOLERANCE {
+    if (x - (screen.0 - EDGE_MARGIN - (frame_w + PIN_PADDING * 2))).abs() > TOLERANCE {
         return None;
     }
-    let base = screen.1 - EDGE_MARGIN - side;
+    let base = screen.1 - EDGE_MARGIN - (frame_h + PIN_PADDING * 2);
     let step = pin_step();
     let index = ((base - y) as f64 / step as f64).round() as i32;
     let expected = base - index * step;
@@ -416,19 +435,21 @@ fn next_slot() -> i32 {
 /// Fitting inside the square would letterbox a wide capture down to a
 /// sliver, and a pin you can't recognise is one you have to open to
 /// identify.
-fn cover_thumbnail(image: &Pixbuf, side: i32) -> Pixbuf {
+fn cover_thumbnail(image: &Pixbuf, frame: (i32, i32)) -> Pixbuf {
+    let (frame_w, frame_h) = (frame.0.max(1), frame.1.max(1));
     let (w, h) = (image.width().max(1), image.height().max(1));
-    let scale = (side as f64 / w as f64).max(side as f64 / h as f64);
-    let scaled_w = ((w as f64 * scale).round() as i32).max(side);
-    let scaled_h = ((h as f64 * scale).round() as i32).max(side);
+    let scale = (frame_w as f64 / w as f64).max(frame_h as f64 / h as f64);
+    let scaled_w = ((w as f64 * scale).round() as i32).max(frame_w);
+    let scaled_h = ((h as f64 * scale).round() as i32).max(frame_h);
     let Some(scaled) = image.scale_simple(scaled_w, scaled_h, InterpType::Bilinear) else {
         return image.clone();
     };
     // Take the middle: a capture's edges are where its chrome is, and
-    // its middle is what it was taken of.
-    let x = ((scaled_w - side) / 2).max(0);
-    let y = ((scaled_h - side) / 2).max(0);
-    scaled.new_subpixbuf(x, y, side.min(scaled_w), side.min(scaled_h))
+    // its middle is what it was taken of. A capture shaped like the
+    // screen crops nothing, which is the point of the frame's shape.
+    let x = ((scaled_w - frame_w) / 2).max(0);
+    let y = ((scaled_h - frame_h) / 2).max(0);
+    scaled.new_subpixbuf(x, y, frame_w.min(scaled_w), frame_h.min(scaled_h))
 }
 
 /// The hover toolbar: edit, copy, copy path, close.
@@ -611,8 +632,8 @@ fn target_origin(gesture: &gtk::GestureClick) -> Option<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DRAG_ICON_MAX, EDGE_MARGIN, PIN_PADDING, PIN_SIDE, cover_thumbnail, first_free_slot,
-        fit_within, pin_step, slot_of,
+        DRAG_ICON_MAX, EDGE_MARGIN, PIN_PADDING, cover_thumbnail, first_free_slot, fit_within,
+        pin_size, pin_step, slot_of,
     };
     use relm4::gtk::gdk_pixbuf::{Colorspace, Pixbuf};
 
@@ -644,25 +665,43 @@ mod tests {
     /// inside it: a wide capture letterboxed into a sliver is
     /// unrecognisable, which defeats having a pin at all.
     #[test]
-    fn a_wide_capture_fills_the_square() {
-        let wide = Pixbuf::new(Colorspace::Rgb, true, 8, 1600, 400).unwrap();
-        let thumb = cover_thumbnail(&wide, PIN_SIDE);
-        assert_eq!((thumb.width(), thumb.height()), (PIN_SIDE, PIN_SIDE));
+    fn a_wide_capture_fills_the_frame() {
+        let frame = (224, 126);
+        let wide = Pixbuf::new(Colorspace::Rgb, true, 8, 4000, 400).unwrap();
+        let thumb = cover_thumbnail(&wide, frame);
+        assert_eq!((thumb.width(), thumb.height()), frame);
     }
 
     /// A tall stitch is cropped to its middle for the same reason.
     #[test]
-    fn a_tall_capture_fills_the_square() {
+    fn a_tall_capture_fills_the_frame() {
+        let frame = (224, 126);
         let tall = Pixbuf::new(Colorspace::Rgb, true, 8, 600, 9000).unwrap();
-        let thumb = cover_thumbnail(&tall, PIN_SIDE);
-        assert_eq!((thumb.width(), thumb.height()), (PIN_SIDE, PIN_SIDE));
+        let thumb = cover_thumbnail(&tall, frame);
+        assert_eq!((thumb.width(), thumb.height()), frame);
+    }
+
+    /// A capture shaped like the screen loses nothing: the frame is
+    /// that shape, which is the reason it is.
+    #[test]
+    fn a_full_screen_capture_is_not_cropped() {
+        let frame = (224, 126);
+        // Same 16:9 as the frame, at capture resolution.
+        let full = Pixbuf::new(Colorspace::Rgb, true, 8, 6144, 3456).unwrap();
+        let thumb = cover_thumbnail(&full, frame);
+        assert_eq!((thumb.width(), thumb.height()), frame);
+        // Cover-scaling a matching aspect needs no crop in either
+        // direction: the scale factors agree.
+        let sx = frame.0 as f64 / 6144.0;
+        let sy = frame.1 as f64 / 3456.0;
+        assert!((sx - sy).abs() < 0.001, "{sx} vs {sy}");
     }
 
     /// Pins stack clear of each other, so a second one doesn't bury
     /// the first — seeing both is the point of stacking them.
     #[test]
     fn stacked_pins_do_not_overlap() {
-        assert!(pin_step() > PIN_SIDE + PIN_PADDING * 2);
+        assert!(pin_step() > pin_size().1 + PIN_PADDING * 2);
     }
 
     /// A pin sitting in the column is recognised as being in its slot,
@@ -670,9 +709,10 @@ mod tests {
     #[test]
     fn a_pin_in_the_column_holds_its_slot() {
         let screen = (3072, 1728);
-        let side = PIN_SIDE + PIN_PADDING * 2;
+        let (frame_w, frame_h) = pin_size();
+        let side = frame_w + PIN_PADDING * 2;
         let x = screen.0 - EDGE_MARGIN - side;
-        let base = screen.1 - EDGE_MARGIN - side;
+        let base = screen.1 - EDGE_MARGIN - (frame_h + PIN_PADDING * 2);
         assert_eq!(slot_of((x, base, side, side), screen), Some(0));
         assert_eq!(slot_of((x, base - pin_step(), side, side), screen), Some(1));
     }
@@ -683,9 +723,10 @@ mod tests {
     #[test]
     fn a_moved_pin_frees_its_slot() {
         let screen = (3072, 1728);
-        let side = PIN_SIDE + PIN_PADDING * 2;
+        let (frame_w, frame_h) = pin_size();
+        let side = frame_w + PIN_PADDING * 2;
         let x = screen.0 - EDGE_MARGIN - side;
-        let base = screen.1 - EDGE_MARGIN - side;
+        let base = screen.1 - EDGE_MARGIN - (frame_h + PIN_PADDING * 2);
         // Dragged left, and dragged up between two slots.
         assert_eq!(slot_of((x - 300, base, side, side), screen), None);
         assert_eq!(slot_of((x, base - pin_step() / 2, side, side), screen), None);
