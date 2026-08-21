@@ -1027,6 +1027,12 @@ fn build_overlay(
         let crosshair_drag = crosshair.clone();
         let readout_a = readout.clone();
         let readout_label_a = readout_label.clone();
+        // Read once: the monitor's scale can't change under a drag,
+        // and finding it costs a subprocess.
+        let readout_scale = crate::display::hyprland_focused_monitor()
+            .map(|m| m.scale as f64)
+            .unwrap_or(1.0)
+            .max(0.0001);
         drag.connect_drag_update(move |_, dx, dy| {
             let mut s = state.borrow_mut();
             if !s.drag_active {
@@ -1057,7 +1063,14 @@ fn build_overlay(
                     let selection = s.selection;
                     let origin = s.drag_origin;
                     drop(s);
-                    show_readout(&readout_a, &readout_label_a, selection, origin, (ox + dx, oy + dy));
+                    show_readout(
+                        &readout_a,
+                        &readout_label_a,
+                        selection,
+                        origin,
+                        (ox + dx, oy + dy),
+                        readout_scale,
+                    );
                     drawing_w.queue_draw();
                     return;
                 }
@@ -1088,7 +1101,14 @@ fn build_overlay(
             };
             let selection = s.selection;
             drop(s);
-            show_readout(&readout_a, &readout_label_a, selection, (ox, oy), (ox + dx, oy + dy));
+            show_readout(
+                &readout_a,
+                &readout_label_a,
+                selection,
+                (ox, oy),
+                (ox + dx, oy + dy),
+                readout_scale,
+            );
             drawing_w.queue_draw();
         });
     }
@@ -4043,17 +4063,18 @@ fn measured_pill_size(pill: &gtk::Box) -> (f64, f64) {
 /// device ones, so the number is scaled to match the file rather than
 /// the screen — a 2x display would otherwise report half of what gets
 /// saved.
+///
+/// `scale` is passed in rather than looked up: asking the compositor
+/// for it means spawning `hyprctl`, and this runs on every drag-update
+/// event. Doing that per motion made dragging a region look broken.
 fn show_readout(
     readout: &gtk::Box,
     label: &gtk::Label,
     selection: Selection,
     origin: (f64, f64),
     corner: (f64, f64),
+    scale: f64,
 ) {
-    let scale = crate::display::hyprland_focused_monitor()
-        .map(|m| m.scale as f64)
-        .unwrap_or(1.0)
-        .max(0.0001);
     let (w, h) = (
         (selection.w * scale).round() as i64,
         (selection.h * scale).round() as i64,
