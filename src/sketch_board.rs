@@ -1575,10 +1575,13 @@ impl SketchBoard {
         );
         // The snapshot exists for the pin's sake, so it goes when the
         // pin does. A drop target that copies on drop — which is what
-        // they do — has long since taken its copy.
+        // they do — has long since taken its copy. On close-request,
+        // not destroy: closing the pin hides it while the process (and
+        // the hidden editor) live on, so destroy never comes.
         if let Some(snapshot) = snapshot {
-            pin.window.connect_destroy(move |_| {
+            pin.window.connect_close_request(move |_| {
                 let _ = fs::remove_file(&snapshot);
+                relm4::gtk::glib::Propagation::Proceed
             });
         }
         *self.pinned_image.borrow_mut() = Some(image.clone());
