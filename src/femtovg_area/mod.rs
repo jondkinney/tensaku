@@ -510,6 +510,15 @@ impl FemtoVGArea {
     /// `dx`, `dy` are already in canvas pixels (the scroll handler
     /// multiplies wheel ticks by a per-tick step). Triggers a resize
     /// so `update_transformation` clamps the accumulated offset.
+    /// Which axes have anything to scroll to: `(horizontal, vertical)`.
+    pub fn pan_slack(&self) -> (bool, bool) {
+        self.imp()
+            .inner()
+            .as_ref()
+            .map(|i| i.pan_slack())
+            .unwrap_or((false, false))
+    }
+
     pub fn pan_by(&self, dx: f32, dy: f32) {
         self.imp()
             .inner()

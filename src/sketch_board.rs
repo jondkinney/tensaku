@@ -609,7 +609,18 @@ impl InputEvent {
                     // that means swipe down moves the canvas down,
                     // matching how every other Wayland app behaves.
                     const SCROLL_PAN_PIXELS: f32 = 48.0;
-                    renderer.pan_by(me.pos.x * SCROLL_PAN_PIXELS, me.pos.y * SCROLL_PAN_PIXELS);
+                    // On a capture whose height already fits — a wide
+                    // stitch, say — send the vertical wheel to the axis
+                    // that actually overflows. Otherwise the plain
+                    // wheel does nothing at all while there is still
+                    // half an image off the side of the window.
+                    let (mut dx, mut dy) = (me.pos.x, me.pos.y);
+                    let (horizontal_slack, vertical_slack) = renderer.pan_slack();
+                    if !vertical_slack && horizontal_slack && dx == 0.0 {
+                        dx = dy;
+                        dy = 0.0;
+                    }
+                    renderer.pan_by(dx * SCROLL_PAN_PIXELS, dy * SCROLL_PAN_PIXELS);
                     // pan_by mutates drag_offset and emits the new
                     // PanInfo so the scrollbars track, but it doesn't
                     // queue a redraw on its own. Return Redraw so the

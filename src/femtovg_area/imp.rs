@@ -4180,6 +4180,18 @@ impl FemtoVgAreaMut {
             || self.drag_offset.y.abs() > limit_y + SPRING_BACK_SNAP_EPS
     }
 
+    /// Which axes have anything to scroll to: `(horizontal, vertical)`.
+    /// An axis has slack when the scaled image is wider (or taller)
+    /// than the canvas showing it.
+    pub fn pan_slack(&self) -> (bool, bool) {
+        let image_w = self.background_image.width() as f32 * self.scale_factor;
+        let image_h = self.background_image.height() as f32 * self.scale_factor;
+        (
+            image_w - self.last_canvas_size.x > 1.0,
+            image_h - self.last_canvas_size.y > 1.0,
+        )
+    }
+
     /// Apply a scrollbar value to one axis. Scrollbar values run
     /// 0..=excess (where excess = image*scale − canvas), counted
     /// from the top/left of the scaled image. Our `drag_offset` is
