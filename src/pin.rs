@@ -54,11 +54,6 @@ fn pin_size() -> (i32, i32) {
     (PIN_WIDTH, height)
 }
 
-/// Frame around the preview: the pin needs an edge of its own or it
-/// reads as a picture lying loose on the desktop rather than a thing
-/// sitting on it.
-const PIN_PADDING: i32 = 6;
-
 /// The move handle's tooltip, named because the drag hides it and has
 /// to put it back.
 const MOVE_TOOLTIP: &str = "Move this pin";
@@ -134,7 +129,7 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
     window.add_css_class("pin-window");
 
     let (frame_w, frame_h) = pin_size();
-    window.set_default_size(frame_w + PIN_PADDING * 2, frame_h + PIN_PADDING * 2);
+    window.set_default_size(frame_w, frame_h);
 
     // Float it, show it on every workspace, and put it in its slot —
     // once it has a surface for the compositor to match on.
@@ -177,15 +172,13 @@ pub fn open(image: &Pixbuf, actions: PinActions) -> Pin {
     picture.set_can_shrink(true);
     picture.set_size_request(frame_w, frame_h);
 
-    // No border of our own: the compositor draws one around a
-    // floating window, and two frames around one picture is one frame
-    // too many.
-    let frame = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    frame.add_css_class("pin-frame");
-    frame.append(&picture);
-
+    // The picture is the whole window. The compositor draws the border
+    // and the shadow around a floating window, so a mat and a rounded
+    // corner of our own are a second frame inside the first — and the
+    // dark edge they leave reads as part of the shot rather than as
+    // part of the desktop.
     let overlay = gtk::Overlay::new();
-    overlay.set_child(Some(&frame));
+    overlay.set_child(Some(&picture));
 
     // The picture and the Edit button do the same thing, so they share
     // one callback rather than each getting a copy of the intent.
@@ -332,8 +325,8 @@ fn place_in_slot(slot: i32) {
         (monitor.height as f64 / scale).round() as i32,
     );
     let (frame_w, frame_h) = pin_size();
-    let x = screen_w - EDGE_MARGIN - (frame_w + PIN_PADDING * 2);
-    let y = screen_h - EDGE_MARGIN - (frame_h + PIN_PADDING * 2) - slot * pin_step();
+    let x = screen_w - EDGE_MARGIN - frame_w;
+    let y = screen_h - EDGE_MARGIN - frame_h - slot * pin_step();
     hypr_dispatch(&format!(
         "hl.dsp.window.move({{ x = {x}, y = {y}, relative = false, {} }})",
         pin_selector()
@@ -342,7 +335,7 @@ fn place_in_slot(slot: i32) {
 
 /// How far apart stacked pins sit, centre to centre.
 fn pin_step() -> i32 {
-    pin_size().1 + PIN_PADDING * 2 + PIN_GAP
+    pin_size().1 + PIN_GAP
 }
 
 /// The slot a pin at `rect` is sitting in, or `None` if it isn't in
@@ -358,10 +351,10 @@ fn slot_of(rect: (i32, i32, i32, i32), screen: (i32, i32)) -> Option<i32> {
     const TOLERANCE: i32 = 4;
     let (frame_w, frame_h) = pin_size();
     let (x, y, _, _) = rect;
-    if (x - (screen.0 - EDGE_MARGIN - (frame_w + PIN_PADDING * 2))).abs() > TOLERANCE {
+    if (x - (screen.0 - EDGE_MARGIN - frame_w)).abs() > TOLERANCE {
         return None;
     }
-    let base = screen.1 - EDGE_MARGIN - (frame_h + PIN_PADDING * 2);
+    let base = screen.1 - EDGE_MARGIN - frame_h;
     let step = pin_step();
     let index = ((base - y) as f64 / step as f64).round() as i32;
     let expected = base - index * step;
@@ -632,8 +625,8 @@ fn target_origin(gesture: &gtk::GestureClick) -> Option<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DRAG_ICON_MAX, EDGE_MARGIN, PIN_PADDING, cover_thumbnail, first_free_slot, fit_within,
-        pin_size, pin_step, slot_of,
+        DRAG_ICON_MAX, EDGE_MARGIN, cover_thumbnail, first_free_slot, fit_within, pin_size,
+        pin_step, slot_of,
     };
     use relm4::gtk::gdk_pixbuf::{Colorspace, Pixbuf};
 
@@ -701,7 +694,7 @@ mod tests {
     /// the first — seeing both is the point of stacking them.
     #[test]
     fn stacked_pins_do_not_overlap() {
-        assert!(pin_step() > pin_size().1 + PIN_PADDING * 2);
+        assert!(pin_step() > pin_size().1);
     }
 
     /// A pin sitting in the column is recognised as being in its slot,
@@ -710,9 +703,9 @@ mod tests {
     fn a_pin_in_the_column_holds_its_slot() {
         let screen = (3072, 1728);
         let (frame_w, frame_h) = pin_size();
-        let side = frame_w + PIN_PADDING * 2;
+        let side = frame_w;
         let x = screen.0 - EDGE_MARGIN - side;
-        let base = screen.1 - EDGE_MARGIN - (frame_h + PIN_PADDING * 2);
+        let base = screen.1 - EDGE_MARGIN - frame_h;
         assert_eq!(slot_of((x, base, side, side), screen), Some(0));
         assert_eq!(slot_of((x, base - pin_step(), side, side), screen), Some(1));
     }
@@ -724,9 +717,9 @@ mod tests {
     fn a_moved_pin_frees_its_slot() {
         let screen = (3072, 1728);
         let (frame_w, frame_h) = pin_size();
-        let side = frame_w + PIN_PADDING * 2;
+        let side = frame_w;
         let x = screen.0 - EDGE_MARGIN - side;
-        let base = screen.1 - EDGE_MARGIN - (frame_h + PIN_PADDING * 2);
+        let base = screen.1 - EDGE_MARGIN - frame_h;
         // Dragged left, and dragged up between two slots.
         assert_eq!(slot_of((x - 300, base, side, side), screen), None);
         assert_eq!(slot_of((x, base - pin_step() / 2, side, side), screen), None);
