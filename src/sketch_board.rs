@@ -1168,10 +1168,7 @@ impl SketchBoard {
         let needs_pixbuf = actions.iter().any(|action| {
             matches!(
                 action,
-                Action::SaveToClipboard
-                    | Action::SaveToFile
-                    | Action::SaveToFileAs
-                    | Action::Pin
+                Action::SaveToClipboard | Action::SaveToFile | Action::SaveToFileAs | Action::Pin
             )
         });
 

@@ -197,6 +197,9 @@ pub struct Configuration {
     scroll_capture_restore_region_shortcut: String,
     scroll_capture_test: Option<ScrollCaptureTest>,
     scroll_capture: bool,
+    /// Command-line only: choose a region / window / the whole screen,
+    /// then edit it. See `crate::region_capture`.
+    capture: bool,
     auto_scroll_test: bool,
 }
 
@@ -1314,6 +1317,10 @@ impl Configuration {
         self.scroll_capture
     }
 
+    pub fn capture(&self) -> bool {
+        self.capture
+    }
+
     pub fn auto_scroll_test(&self) -> bool {
         self.auto_scroll_test
     }
@@ -1387,6 +1394,7 @@ impl Default for Configuration {
             scroll_capture_restore_region_shortcut: "r".into(),
             scroll_capture_test: None,
             scroll_capture: false,
+            capture: false,
             auto_scroll_test: false,
         }
     }

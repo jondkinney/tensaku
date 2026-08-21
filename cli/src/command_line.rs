@@ -46,7 +46,7 @@ pub struct CommandLine {
     #[arg(
         short,
         long,
-        required_unless_present_any = ["scroll_capture_test", "scroll_capture", "auto_scroll_test"]
+        required_unless_present_any = ["scroll_capture_test", "scroll_capture", "auto_scroll_test", "capture"]
     )]
     pub filename: Option<String>,
 
@@ -59,6 +59,12 @@ pub struct CommandLine {
     /// drag to select a region, then capture by manual scroll or auto-scroll.
     #[arg(long)]
     pub scroll_capture: bool,
+
+    /// Choose what to capture, then edit it: a fullscreen overlay where you
+    /// drag a region, press Space to snap to a window, F for the whole
+    /// screen, or S to switch to scrolling capture.
+    #[arg(long)]
+    pub capture: bool,
 
     /// Dev-only smoke test for the scrolling-screenshot capture pipeline.
     /// `FULL` captures the whole focused output; `x,y,w,h` captures a region.

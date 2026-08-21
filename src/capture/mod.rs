@@ -4,7 +4,7 @@ use relm4::gtk::gdk_pixbuf::Pixbuf;
 pub mod outputs;
 pub mod wlr_screencopy;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,

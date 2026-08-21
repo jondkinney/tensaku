@@ -30,7 +30,6 @@ use ui::welcome::{WelcomeDialog, WelcomeDialogInit, WelcomeDialogInput, WelcomeD
 use ui::zoom_indicator::{ZoomIndicator, ZoomIndicatorInput, ZoomIndicatorOutput};
 use xdg::BaseDirectories;
 
-mod pin;
 mod capture;
 mod chord_capture;
 mod configuration;
@@ -46,6 +45,8 @@ mod ime;
 mod math;
 mod notification;
 mod omarchy_wrapper;
+mod pin;
+mod region_capture;
 mod scroll_capture;
 mod sketch_board;
 mod state;
@@ -53,6 +54,7 @@ mod style;
 mod text_bands;
 mod tools;
 mod ui;
+mod windows;
 
 use crate::sketch_board::{SketchBoard, SketchBoardInput};
 use crate::tools::Tools;
@@ -2275,6 +2277,38 @@ fn start_gui(image: Pixbuf) -> Result<()> {
     start_gui_with_toast(image, None)
 }
 
+/// Choose what to capture, take it, and open the editor on it.
+///
+/// The overlay decides and this takes the picture, which is what keeps
+/// the overlay out of every shot and makes switching to scrolling
+/// capture free: at the moment of the switch, nothing has been
+/// captured yet.
+fn run_region_capture() -> Result<()> {
+    let monitor = crate::display::hyprland_focused_monitor();
+    let output = monitor.as_ref().map(|m| m.name.clone());
+    let image = match region_capture::run()? {
+        region_capture::RegionOutcome::Cancelled => return Ok(()),
+        region_capture::RegionOutcome::Fullscreen => capture::capture_output(output.as_deref())?,
+        region_capture::RegionOutcome::Region(rect) => {
+            capture::capture_region(rect, output.as_deref())?
+        }
+        region_capture::RegionOutcome::Scroll => {
+            let park_pointer = APP_CONFIG
+                .read()
+                .park_pointer_during_manual_scroll_capture();
+            return match scroll_capture::run(park_pointer)? {
+                None => Ok(()),
+                Some(outcome) => {
+                    load_gl()?;
+                    start_gui_with_toast(outcome.image, outcome.warning)
+                }
+            };
+        }
+    };
+    load_gl()?;
+    start_gui_with_toast(image, None)
+}
+
 fn start_gui_with_toast(image: Pixbuf, initial_toast: Option<String>) -> Result<()> {
     let app_id_pref = APP_CONFIG.read().app_id().map(|s| s.to_string());
     generate_profile_output!("image loaded, starting gui");
@@ -2386,6 +2420,10 @@ fn main() -> Result<()> {
     // launcher. In particular, migrate bindings that were recorded while a
     // local `target/debug` build happened to be running.
     hypr_bind::reconcile_saved_shortcut();
+
+    if APP_CONFIG.read().capture() {
+        return run_region_capture();
+    }
 
     if APP_CONFIG.read().scroll_capture() {
         let park_pointer = APP_CONFIG
