@@ -88,6 +88,42 @@ pub fn hyprland_focused_monitor() -> Option<HyprlandMonitor> {
     parse_focused_monitor(std::str::from_utf8(&output.stdout).ok()?)
 }
 
+/// The Hyprland monitor with connector `name`, e.g. `DP-3`.
+///
+/// The focused monitor can change while an overlay is up; anything that
+/// has already committed to an output should resolve it by name.
+pub fn hyprland_monitor_named(name: &str) -> Option<HyprlandMonitor> {
+    std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")?;
+    let output = Command::new("hyprctl")
+        .args(["monitors", "-j"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let monitors: Vec<HyprlandMonitor> =
+        serde_json::from_str(std::str::from_utf8(&output.stdout).ok()?).ok()?;
+    monitors.into_iter().find(|monitor| monitor.name == name)
+}
+
+/// The global cursor position in logical (layout) pixels, from
+/// Hyprland. `None` outside Hyprland or when `hyprctl` fails — callers
+/// treat that as "cannot watch the cursor" and skip whatever depended
+/// on knowing where it is.
+pub fn hyprland_cursor_position() -> Option<(f64, f64)> {
+    std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")?;
+    let output = Command::new("hyprctl")
+        .args(["cursorpos", "-j"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(std::str::from_utf8(&output.stdout).ok()?).ok()?;
+    Some((value.get("x")?.as_f64()?, value.get("y")?.as_f64()?))
+}
+
 /// Parse `hyprctl monitors -j` and return the focused monitor, falling back
 /// to the first one when none is marked focused.
 fn parse_focused_monitor(text: &str) -> Option<HyprlandMonitor> {

@@ -519,37 +519,6 @@ pub fn open<W: IsA<gtk::Widget>>(
     scroll_status.add_css_class("dim-label");
     outer.append(&scroll_status);
 
-    let park_pointer_help = "Moves the pointer near the lower-right of the selected area before capture to reduce \
-         hover effects. Turn this off to leave the pointer where you placed it.";
-    let park_pointer_check = gtk::CheckButton::builder()
-        .label("Park pointer when manual scroll capture starts")
-        .tooltip_text(park_pointer_help)
-        .active(
-            APP_CONFIG
-                .read()
-                .park_pointer_during_manual_scroll_capture(),
-        )
-        .build();
-    park_pointer_check
-        .update_property(&[gtk::accessible::Property::Description(park_pointer_help)]);
-    park_pointer_check.connect_toggled(|btn| {
-        let value = btn.is_active();
-        let current = APP_CONFIG
-            .read()
-            .park_pointer_during_manual_scroll_capture();
-        if value == current {
-            return;
-        }
-        let result = APP_CONFIG
-            .write()
-            .save_park_pointer_during_manual_scroll_capture(value);
-        if let Err(error) = result {
-            eprintln!("Warning: could not save park-pointer-during-manual-scroll-capture: {error}");
-            btn.set_active(current);
-        }
-    });
-    outer.append(&park_pointer_check);
-
     // Recordable in-overlay key that reselects the previous capture's
     // region while choosing a selection. Commits immediately, like the
     // other Scroll Capture controls.

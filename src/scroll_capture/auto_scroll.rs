@@ -453,11 +453,10 @@ fn spawn_worker_uinput(
     output_name: Option<&str>,
 ) -> Result<()> {
     let mut device = create_uinput_mouse()?;
-    // Parking is useful for keeping hover effects out of captured frames, but
-    // it is not a prerequisite for kernel wheel injection. Create at most one
-    // Wayland pointer context for the worker and reuse it for every cycle;
-    // compositors without the protocol can still use uinput at the cursor's
-    // current position.
+    // Parking places the pointer in the selection's lower-right gutter
+    // exactly once, before the first wheel group. It is not a
+    // prerequisite for kernel wheel injection; compositors without the
+    // protocol can still use uinput at the cursor's current position.
     let mut focus_context = match create_virtual_pointer(output_name) {
         Ok(context) => Some(context),
         Err(error) => {
@@ -484,12 +483,11 @@ fn spawn_worker_uinput(
 
         if !stop.load(Ordering::Acquire) {
             run_capture_scroll_loop(&stop, &handshake, |scroll_notches| {
-                // The user may have moved onto the outside capture pill while
-                // a cycle was paused. Repark before every wheel group so the
-                // event cannot scroll Tensaku or another surface.
-                if let Some(context) = focus_context.as_mut() {
-                    focus_underlying_with_context(context, cursor_x, cursor_y);
-                }
+                // No repark between wheel groups: the pointer was placed
+                // once above and belongs to the user from then on. If it
+                // leaves the selection, the capture loop stops
+                // acknowledging cycles and this loop holds — so a wheel
+                // group can never chase a pointer that walked away.
                 if stop.load(Ordering::Acquire) {
                     return Ok(());
                 }
@@ -545,15 +543,10 @@ fn spawn_worker_virtual_pointer(
 
         if !stop.load(Ordering::Acquire) {
             run_capture_scroll_loop(&stop, &handshake, |scroll_notches| {
-                focus_pointer(
-                    &pointer,
-                    &mut event_queue,
-                    start,
-                    cursor_x,
-                    cursor_y,
-                    screen_width,
-                    screen_height,
-                );
+                // No repark between wheel groups — the pointer was placed
+                // once above and is the user's from then on. A pointer
+                // outside the selection stops cycle acknowledgements, so
+                // this loop holds rather than scrolling something else.
                 if stop.load(Ordering::Acquire) {
                     return Ok(());
                 }
@@ -648,23 +641,6 @@ pub fn focus_underlying_once(
             focus_underlying_with_context(&mut context, cursor_x, cursor_y);
         }
         destroy_virtual_pointer_context(context);
-        stop.store(true, Ordering::Release);
-    });
-    Ok(())
-}
-
-/// Re-hit-test whatever point the user currently chose without relocating
-/// their cursor. If a relative kernel virtual mouse is unavailable, return an
-/// error rather than violating the caller's no-parking preference.
-pub fn refocus_under_pointer_once(stop: Arc<AtomicBool>) -> Result<()> {
-    let mut device = create_uinput_mouse()
-        .context("manual-scroll: relative pointer unavailable; leaving cursor in place")?;
-    thread::spawn(move || {
-        if sleep_unless_stopped(&stop, Duration::from_millis(UINPUT_DEVICE_SETTLE_MS))
-            && let Err(error) = nudge_uinput_pointer(&mut device)
-        {
-            eprintln!("manual-scroll: could not refresh pointer focus: {error:#}");
-        }
         stop.store(true, Ordering::Release);
     });
     Ok(())

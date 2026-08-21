@@ -39,12 +39,13 @@ const AUTO_CAPTURE_POLL_MS: u64 = 20;
 /// first screencopy request. Without this barrier, capture can race the frame
 /// that hides the in-selection controls and punches the selection transparent.
 const OVERLAY_COMMIT_SETTLE_MS: u64 = 34;
-/// After the manual pointer park has completed, leave the underlying client
-/// enough time to repaint hover-driven UI before preserving the first frame.
-const MANUAL_POINTER_HOVER_SETTLE_MS: u64 = 150;
 /// Poll the one-shot pointer worker promptly without busy-spinning GTK's main
 /// loop. The worker's stop flag is also its completion signal.
 const POINTER_FOCUS_POLL_MS: u64 = 20;
+/// How often the capture-time cursor watcher asks Hyprland where the
+/// pointer is. Fast enough that a pause lands within a frame or two of
+/// leaving the region; each ask is one cheap `hyprctl` round trip.
+const POINTER_WATCH_POLL_MS: u64 = 250;
 const MAX_CONSECUTIVE_CAPTURE_ERRORS: u32 = 3;
 /// A first frame that is one solid color is, in practice, screencopy racing
 /// the overlay: the transparent-hole frame hasn't reached the compositor yet
@@ -269,9 +270,10 @@ impl Selection {
     }
 }
 
-/// Physical-screen target shared by manual pointer parking and auto-scroll.
-/// Keeping it inside the selection preserves scroll targeting while favoring
-/// the lower-right page/scrollbar gutter, where hover UI is least likely.
+/// Physical-screen target for the auto-scroll pointer park. Keeping it
+/// inside the selection preserves scroll targeting while favoring the
+/// lower-right page/scrollbar gutter, where links and hover UI are
+/// least likely.
 fn pointer_park_target(selection: Selection, scale: i32) -> (i32, i32) {
     let scale = scale.max(1);
     let x = (selection.x + selection.w - 30.0).max(selection.x + 1.0) as i32;
@@ -490,20 +492,6 @@ fn auto_probe_decision(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ManualHandoffPointerPolicy {
-    ParkInSelection,
-    LeaveUnchanged,
-}
-
-fn manual_handoff_pointer_policy(park_manual_pointer: bool) -> ManualHandoffPointerPolicy {
-    if park_manual_pointer {
-        ManualHandoffPointerPolicy::ParkInSelection
-    } else {
-        ManualHandoffPointerPolicy::LeaveUnchanged
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AutoCaptureAcknowledgement {
     Normal,
     Probe,
@@ -685,9 +673,6 @@ struct OverlayState {
     /// callbacks use this to avoid arming a stale selection after cancellation.
     capture_epoch: u64,
     capture_mode: Option<CaptureMode>,
-    /// Whether a manual capture should relocate the pointer before frame one.
-    /// Snapshotted when the standalone scroll-capture overlay is launched.
-    park_manual_pointer: bool,
     /// Selected phase: the keyboard grab is currently released because the
     /// pointer is over the page inside the region (see
     /// `pointer_over_selected_page`).
@@ -699,10 +684,12 @@ struct OverlayState {
     output_name: Option<String>,
     auto_scroll_stop: Option<Arc<AtomicBool>>,
     pointer_focus_stop: Option<Arc<AtomicBool>>,
-    /// Lower-right focus target for the active manual capture. When parking is
-    /// enabled it is consumed before frame one; otherwise it remains as the
-    /// marker that triggers an in-place pointer refocus after frame one.
-    manual_pointer_target: Option<(i32, i32)>,
+    /// The cursor is currently outside the selected rectangle while a
+    /// capture runs. Sampling holds while this is true — and for
+    /// automatic capture, the unacknowledged cycle keeps the wheel
+    /// worker holding too — so leaving the region pauses the capture
+    /// and coming back resumes it.
+    pointer_outside: bool,
     auto_scroll_monitor: Option<glib::SourceId>,
     auto_scroll_handshake: Option<auto_scroll::CaptureHandshake>,
     auto_alignment: Option<AutoAlignmentState>,
@@ -803,7 +790,7 @@ fn gdk_monitor_named(name: &str) -> Option<gtk::gdk::Monitor> {
         })
 }
 
-pub fn run(park_manual_pointer: bool) -> Result<ScrollRun> {
+pub fn run() -> Result<ScrollRun> {
     let result: Rc<RefCell<Option<ScrollCaptureOutcome>>> = Rc::new(RefCell::new(None));
     let switch_to_area = Rc::new(std::cell::Cell::new(false));
 
@@ -815,9 +802,7 @@ pub fn run(park_manual_pointer: bool) -> Result<ScrollRun> {
     {
         let result = Rc::clone(&result);
         let switch_to_area = Rc::clone(&switch_to_area);
-        app.connect_activate(move |app| {
-            build_overlay(app, &result, park_manual_pointer, &switch_to_area)
-        });
+        app.connect_activate(move |app| build_overlay(app, &result, &switch_to_area));
     }
 
     let exit_code = app.run_with_args::<&str>(&[]);
@@ -840,7 +825,6 @@ pub fn run(park_manual_pointer: bool) -> Result<ScrollRun> {
 fn build_overlay(
     app: &gtk::Application,
     result: &Rc<RefCell<Option<ScrollCaptureOutcome>>>,
-    park_manual_pointer: bool,
     switch_to_area: &Rc<std::cell::Cell<bool>>,
 ) {
     let state = Rc::new(RefCell::new(OverlayState {
@@ -854,12 +838,11 @@ fn build_overlay(
         capture_timer: None,
         capture_epoch: 0,
         capture_mode: None,
-        park_manual_pointer,
         selected_keyboard_released: false,
         output_name: None,
         auto_scroll_stop: None,
         pointer_focus_stop: None,
-        manual_pointer_target: None,
+        pointer_outside: false,
         auto_scroll_monitor: None,
         auto_scroll_handshake: None,
         auto_alignment: None,
@@ -1554,7 +1537,7 @@ fn start_capture(
         s.capture_mode = Some(mode);
         s.capture = None;
         s.pointer_focus_stop = None;
-        s.manual_pointer_target = None;
+        s.pointer_outside = false;
         s.auto_scroll_handshake = None;
         s.auto_alignment = None;
         s.auto_step_calibration = AutoStepCalibration::default();
@@ -1579,13 +1562,73 @@ fn start_capture(
     window.set_keyboard_mode(KeyboardMode::None);
     position_capturing_pill_and_input(window, overlay, capturing_pill, sel);
 
-    if mode.is_manual() {
-        let scale = window.scale_factor().max(1);
-        state.borrow_mut().manual_pointer_target = Some(pointer_park_target(sel, scale));
-    }
-
+    watch_pointer_during_capture(state, sel, status);
     schedule_capture_after_overlay_commit(state, window, drawing, sel, status);
     true
+}
+
+/// Poll the cursor while a capture runs: leaving the selected rectangle
+/// pauses sampling (and, for automatic capture, the wheel worker with
+/// it), and coming back resumes. Hyprland-only — without a compositor
+/// to ask, the watcher never starts and captures run unpaused, as they
+/// always did.
+///
+/// This is what lets the pointer roam mid-capture: it is placed at most
+/// once, so reaching for Cancel/Done — or deliberately taking the wheel
+/// somewhere else — pauses the capture instead of fighting a re-park.
+fn watch_pointer_during_capture(
+    state: &Rc<RefCell<OverlayState>>,
+    sel: Selection,
+    status: &gtk::Label,
+) {
+    if crate::display::hyprland_cursor_position().is_none() {
+        return;
+    }
+    // The selection lives in overlay-local logical pixels; the cursor
+    // answer is global. The overlay covers one whole output, so its
+    // origin is that monitor's layout position.
+    let origin = state
+        .borrow()
+        .output_name
+        .as_deref()
+        .and_then(crate::display::hyprland_monitor_named)
+        .map(|monitor| (monitor.x as f64, monitor.y as f64))
+        .unwrap_or((0.0, 0.0));
+
+    let epoch = state.borrow().capture_epoch;
+    let state_w = Rc::clone(state);
+    let status_w = status.clone();
+    glib::timeout_add_local(Duration::from_millis(POINTER_WATCH_POLL_MS), move || {
+        if !capture_epoch_is_current(&state_w, epoch) {
+            return glib::ControlFlow::Break;
+        }
+        let Some((cursor_x, cursor_y)) = crate::display::hyprland_cursor_position() else {
+            return glib::ControlFlow::Continue;
+        };
+        let (x, y) = (cursor_x - origin.0, cursor_y - origin.1);
+        let outside = x < sel.x || x > sel.x + sel.w || y < sel.y || y > sel.y + sel.h;
+        let (changed, quiet, mode) = {
+            let mut s = state_w.borrow_mut();
+            let changed = s.pointer_outside != outside;
+            s.pointer_outside = outside;
+            // The alignment-pause panel owns the status while it is up;
+            // this watcher only speaks during ordinary capturing.
+            (changed, s.auto_alignment.is_some(), s.capture_mode)
+        };
+        if changed && !quiet {
+            // The status label is capped at 32 characters and
+            // ellipsizes past that — these have to fit, not wrap.
+            status_w.set_text(if outside {
+                "Paused — move back inside"
+            } else {
+                match mode {
+                    Some(CaptureMode::Auto(_)) => "Auto-scrolling…",
+                    _ => "Scroll inside selection",
+                }
+            });
+        }
+        glib::ControlFlow::Continue
+    });
 }
 
 /// Wait through two GTK frame ticks before arming screencopy. Tick callbacks
@@ -1621,9 +1664,8 @@ fn schedule_capture_after_overlay_commit(
                 gtk::prelude::WidgetExt::display(&window_w).sync();
                 let still_current = capture_epoch_is_current(&state_w, epoch);
                 if still_current {
-                    start_capture_after_optional_pointer_park(
-                        &state_w, &window_w, sel, &status_w, epoch,
-                    );
+                    eprintln!("scroll-capture: overlay frame committed; starting capture");
+                    run_capture_tick_and_reschedule(&state_w, &window_w, sel, &status_w);
                 }
             }
         });
@@ -1654,11 +1696,9 @@ fn schedule_manual_resume_after_pill_commit(
         if !saw_first_tick.replace(true) {
             return glib::ControlFlow::Continue;
         }
-        // A RefCell borrow used directly as a `match` scrutinee lives through
-        // the selected arm. Snapshot the policy in a short scope so either
-        // continuation may safely mutate capture state. Use `try_borrow` here
-        // because a panic must never cross GTK's C callback boundary.
-        let policy = {
+        // Use `try_borrow` here because a panic must never cross GTK's
+        // C callback boundary.
+        {
             let Ok(state) = state_w.try_borrow() else {
                 return glib::ControlFlow::Continue;
             };
@@ -1668,19 +1708,15 @@ fn schedule_manual_resume_after_pill_commit(
             {
                 return glib::ControlFlow::Break;
             }
-            manual_handoff_pointer_policy(state.park_manual_pointer)
-        };
+        }
 
         gtk::prelude::WidgetExt::display(&window_w).sync();
-        match policy {
-            ManualHandoffPointerPolicy::ParkInSelection => {
-                park_pointer_then_resume_manual(&state_w, &window_w, selection, &status_w, epoch);
-            }
-            ManualHandoffPointerPolicy::LeaveUnchanged => {
-                status_w.set_text("Move the pointer inside the selection, then scroll");
-                run_capture_tick_and_reschedule(&state_w, &window_w, selection, &status_w);
-            }
-        }
+        // The pointer stays wherever the user has it — manual capture
+        // never moves it. The cursor watcher holds sampling until the
+        // pointer is back inside the selection anyway. (The status
+        // label ellipsizes past 32 characters; keep this short.)
+        status_w.set_text("Scroll inside selection");
+        run_capture_tick_and_reschedule(&state_w, &window_w, selection, &status_w);
         glib::ControlFlow::Break
     });
     pill.queue_draw();
@@ -1759,8 +1795,7 @@ fn park_pointer_then_resume_auto(
         cursor_y,
         output_name.as_deref(),
     ) {
-        // A real-wheel worker will repeat this focus attempt immediately
-        // before injecting; the keyboard fallback only needs the committed
+        // The keyboard fallback only needs the committed
         // KeyboardMode::None above. Let the worker decide whether its own
         // backend remains usable.
         eprintln!("scroll-capture: could not pre-focus automatic continuation: {error:#}");
@@ -1805,134 +1840,9 @@ fn park_pointer_then_resume_auto(
     });
 }
 
-fn park_pointer_then_resume_manual(
-    state: &Rc<RefCell<OverlayState>>,
-    window: &gtk::ApplicationWindow,
-    selection: Selection,
-    status: &gtk::Label,
-    epoch: u64,
-) {
-    let (cursor_x, cursor_y) = pointer_park_target(selection, window.scale_factor().max(1));
-    let stop = Arc::new(AtomicBool::new(false));
-    let output_name = state.borrow().output_name.clone();
-    if let Err(error) = auto_scroll::focus_underlying_once(
-        Arc::clone(&stop),
-        cursor_x,
-        cursor_y,
-        output_name.as_deref(),
-    ) {
-        eprintln!("scroll-capture: could not repark pointer for manual continuation: {error:#}");
-        status.set_text("Move the pointer inside the selection, then scroll");
-        run_capture_tick_and_reschedule(state, window, selection, status);
-        return;
-    }
-    if !capture_epoch_is_current(state, epoch) {
-        stop.store(true, Ordering::Release);
-        return;
-    }
-    state.borrow_mut().pointer_focus_stop = Some(Arc::clone(&stop));
-    wait_for_manual_pointer_park(state, window, selection, status, epoch, stop);
-}
-
 fn capture_epoch_is_current(state: &Rc<RefCell<OverlayState>>, epoch: u64) -> bool {
     let state = state.borrow();
     state.phase == Phase::Capturing && state.capture_epoch == epoch
-}
-
-/// Start frame one immediately unless manual pointer parking is enabled. The
-/// park worker's stop flag becomes true when its absolute warp and focus
-/// nudges have completed; only then do we start the hover repaint delay.
-fn start_capture_after_optional_pointer_park(
-    state: &Rc<RefCell<OverlayState>>,
-    window: &gtk::ApplicationWindow,
-    sel: Selection,
-    status: &gtk::Label,
-    epoch: u64,
-) {
-    let target = {
-        let state = state.borrow();
-        (state.park_manual_pointer && state.capture_mode.is_some_and(CaptureMode::is_manual))
-            .then_some(state.manual_pointer_target)
-            .flatten()
-    };
-    let Some((cursor_x, cursor_y)) = target else {
-        eprintln!("scroll-capture: overlay frame committed; starting capture");
-        run_capture_tick_and_reschedule(state, window, sel, status);
-        return;
-    };
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let output_name = state.borrow().output_name.clone();
-    if let Err(error) = auto_scroll::focus_underlying_once(
-        Arc::clone(&stop),
-        cursor_x,
-        cursor_y,
-        output_name.as_deref(),
-    ) {
-        // Preserve the target so frame one's existing in-place refocus path
-        // still runs. A failed park must not make the capture unusable.
-        eprintln!("scroll-capture: could not park manual capture pointer: {error:#}");
-        run_capture_tick_and_reschedule(state, window, sel, status);
-        return;
-    }
-
-    if !capture_epoch_is_current(state, epoch) {
-        stop.store(true, Ordering::Release);
-        return;
-    }
-    {
-        let mut state = state.borrow_mut();
-        state.manual_pointer_target = None;
-        state.pointer_focus_stop = Some(Arc::clone(&stop));
-    }
-    eprintln!("scroll-capture: overlay frame committed; parking manual pointer");
-    wait_for_manual_pointer_park(state, window, sel, status, epoch, stop);
-}
-
-fn wait_for_manual_pointer_park(
-    state: &Rc<RefCell<OverlayState>>,
-    window: &gtk::ApplicationWindow,
-    sel: Selection,
-    status: &gtk::Label,
-    epoch: u64,
-    stop: Arc<AtomicBool>,
-) {
-    let state_w = Rc::clone(state);
-    let window_w = window.clone();
-    let status_w = status.clone();
-    glib::timeout_add_local(Duration::from_millis(POINTER_FOCUS_POLL_MS), move || {
-        if !capture_epoch_is_current(&state_w, epoch) {
-            return glib::ControlFlow::Break;
-        }
-        if !stop.load(Ordering::Acquire) {
-            return glib::ControlFlow::Continue;
-        }
-
-        {
-            let mut state = state_w.borrow_mut();
-            if state
-                .pointer_focus_stop
-                .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, &stop))
-            {
-                state.pointer_focus_stop = None;
-            }
-        }
-
-        let state_w = Rc::clone(&state_w);
-        let window_w = window_w.clone();
-        let status_w = status_w.clone();
-        glib::timeout_add_local_once(
-            Duration::from_millis(MANUAL_POINTER_HOVER_SETTLE_MS),
-            move || {
-                if capture_epoch_is_current(&state_w, epoch) {
-                    eprintln!("scroll-capture: manual pointer parked; starting capture");
-                    run_capture_tick_and_reschedule(&state_w, &window_w, sel, &status_w);
-                }
-            },
-        );
-        glib::ControlFlow::Break
-    });
 }
 
 /// Schedule the next sample relative to completion of the current one. A
@@ -1971,19 +1881,6 @@ fn capture_poll_interval_ms(mode: Option<CaptureMode>) -> u64 {
     match mode {
         Some(CaptureMode::Auto(_)) => AUTO_CAPTURE_POLL_MS,
         Some(CaptureMode::Manual(_)) | None => CAPTURE_INTERVAL_MS,
-    }
-}
-
-fn start_manual_pointer_refocus(state: &Rc<RefCell<OverlayState>>) {
-    if state.borrow().pointer_focus_stop.is_some() {
-        return;
-    }
-    let stop = Arc::new(AtomicBool::new(false));
-    match auto_scroll::refocus_under_pointer_once(Arc::clone(&stop)) {
-        Ok(()) => state.borrow_mut().pointer_focus_stop = Some(stop),
-        Err(error) => {
-            eprintln!("scroll-capture: could not refocus under manual pointer: {error:#}")
-        }
     }
 }
 
@@ -2050,6 +1947,12 @@ fn capture_tick(
         Some(AutoAlignmentState::Paused { .. })
     ) {
         return glib::ControlFlow::Break;
+    }
+    // The pointer is outside the selection: hold this sample. For
+    // automatic capture the pending cycle also goes unacknowledged, so
+    // the wheel worker holds with us until the pointer comes back.
+    if state.borrow().pointer_outside {
+        return glib::ControlFlow::Continue;
     }
     let (mode, auto_cycle) = {
         let s = state.borrow();
@@ -2182,21 +2085,6 @@ fn capture_tick(
                             s.consecutive_no_scroll = 0;
                             if let Some(done) = capturing_done_button(status) {
                                 done.set_sensitive(true);
-                            }
-                            if s.manual_pointer_target.take().is_some() {
-                                let state = Rc::clone(state);
-                                glib::idle_add_local_once(move || {
-                                    let should_focus = {
-                                        let state = state.borrow();
-                                        state.phase == Phase::Capturing
-                                            && state
-                                                .capture_mode
-                                                .is_some_and(CaptureMode::is_manual)
-                                    };
-                                    if should_focus {
-                                        start_manual_pointer_refocus(&state);
-                                    }
-                                });
                             }
                             eprintln!("scroll-capture: kept initial frame");
                         }
@@ -3186,14 +3074,24 @@ fn connect_finish_capture_button(
     let status = status.clone();
     let result = Rc::clone(result);
     button.connect_clicked(move |_| {
-        let final_manual_selection = {
-            let state = state.borrow();
-            (state.capture_mode.is_some_and(CaptureMode::is_manual) && !state.capture_halted)
-                .then_some(state.selection)
+        // Capture once at the click boundary so nothing visible when
+        // Done was pressed is omitted: the final manual timer interval,
+        // and for automatic capture a screenful the pause may have left
+        // scrolled-but-unsampled.
+        let boundary_selection = {
+            let mut state = state.borrow_mut();
+            // The pointer is on Done — outside the selection by design —
+            // so lift the pause gate for this one sample.
+            state.pointer_outside = false;
+            // Stop the wheel worker first: the boundary sample
+            // acknowledges any pending cycle, and an acknowledged live
+            // worker would answer it with one more scroll.
+            if let Some(stop) = state.auto_scroll_stop.clone() {
+                stop.store(true, Ordering::Release);
+            }
+            (!state.capture_halted).then_some(state.selection)
         };
-        if let Some(selection) = final_manual_selection {
-            // Capture once at the click boundary so movement in the final
-            // timer interval is not omitted.
+        if let Some(selection) = boundary_selection {
             let _ = capture_tick(&state, &window, selection, &status);
         }
         stop_capture_with_window(&state, &window);
@@ -3278,7 +3176,7 @@ fn stop_capture(state: &Rc<RefCell<OverlayState>>) {
     }
     let mut s = state.borrow_mut();
     s.phase = Phase::Selected;
-    s.manual_pointer_target = None;
+    s.pointer_outside = false;
     s.auto_scroll_handshake = None;
     s.auto_alignment = None;
     s.manual_stall.reset();
@@ -3299,9 +3197,12 @@ fn start_auto_scroll_at(
         return;
     }
 
-    // Park near the lower-right of the selection. This is usually empty page
-    // or scrollbar gutter, which avoids hover animations while ensuring the
-    // wheel targets a scrollable surface inside the selected application.
+    // Park near the lower-right of the selection, once. This is usually
+    // empty page or scrollbar gutter, which avoids hover animations and
+    // links while ensuring the wheel targets a scrollable surface inside
+    // the selected application. After this single placement the pointer
+    // is the user's again — moving it out pauses the capture rather
+    // than fighting a re-park.
     let scale = clicked_btn.scale_factor().max(1);
     let sel = state.borrow().selection;
     let (cursor_x, cursor_y) = pointer_park_target(sel, scale);
@@ -4930,18 +4831,6 @@ mod tests {
         assert!(!accepting_auto_pause_reaches_end(
             AutoProbePauseReason::StillAmbiguous
         ));
-    }
-
-    #[test]
-    fn manual_handoff_respects_the_pointer_parking_preference() {
-        assert_eq!(
-            manual_handoff_pointer_policy(true),
-            ManualHandoffPointerPolicy::ParkInSelection
-        );
-        assert_eq!(
-            manual_handoff_pointer_policy(false),
-            ManualHandoffPointerPolicy::LeaveUnchanged
-        );
     }
 
     #[test]

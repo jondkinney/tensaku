@@ -177,7 +177,6 @@ close-on-copy = false
 close-on-save = false
 hide-default-palette = false
 sticky-session-defaults = false
-park-pointer-during-manual-scroll-capture = true
 # Key pressed in the scroll-capture overlay (before capture starts) to reselect
 # the previous capture's region ("r", "ctrl+r", "f6", ... — empty disables)
 scroll-capture-restore-region-shortcut = "r"
@@ -314,7 +313,7 @@ custom = [
 Open the Preferences dialog with <kbd>Ctrl+,</kbd> or the gear button in the top toolbar. It has three parts:
 
 - **Keyboard Shortcuts** — a recorder row for every tool, Spotlight included. Click a row, press a key, then <kbd>Save</kbd> to update `[keybinds]` (or <kbd>Cancel</kbd> to discard).
-- **Scroll Capture** — record the global scroll-capture shortcut and choose whether Manual Scroll parks the pointer near the selection's lower-right edge when capture starts. Parking is on by default to reduce page-hover artifacts.
+- **Scroll Capture** — record the global scroll-capture shortcut.
 - **Behavior** — settings that apply immediately: the annotation size factor, close window on Esc/copy/save, whether the editor window resizes to cropped content, hide the default palette colors, and keep in-session tool adjustments across tool switches.
 
 Every tool shortcut and Behavior/Scroll Capture checkbox shown here reads from and writes to the active configuration file: the path passed to `--config`, or `~/.config/tensaku/config.toml`. The writer changes only the relevant keys, preserving comments, formatting, and unrelated tables. The sole exception is the global scroll-capture shortcut, which stays in `state.toml` because Tensaku also mirrors it into Hyprland's live and persisted binding state.
@@ -499,10 +498,13 @@ After selecting the scrolling region, choose **Manual Scroll** to use your
 wheel, touchpad, or scrolling keys, or choose an **Auto-Scroll** arrow. The
 automatic path sends real mouse-wheel events and waits for each captured
 frame before moving again. Click **Done** when manual capture is complete.
-By default, Manual Scroll parks the pointer near the selection's lower-right
-edge before taking the first frame, reducing browser hover effects and link
-status popups. You can turn this off under **Preferences → Scroll Capture**
-when you need to leave the pointer over a particular nested scroll area.
+Manual Scroll never moves your pointer — scroll with it anywhere inside the
+selection. Auto-Scroll places the pointer once, near the selection's
+lower-right edge (usually empty gutter, clear of links and hover popups), and
+it is yours again from then on. In either mode, moving the pointer out of the
+selection pauses the capture — sampling and auto-scrolling hold until you move
+it back inside, so reaching for **Cancel**/**Done** or pausing to do something
+else never captures or scrolls anything you didn't ask for.
 After manual content stops changing for two seconds, the capture pill shakes
 and highlights **Done** as a cue; scrolling again clears and rearms it.
 Duplicate frames are ignored. When similar-looking rows make an automatic

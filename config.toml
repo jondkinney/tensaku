@@ -13,7 +13,6 @@ close-on-save = false
 resize-window-to-content-on-crop = true
 hide-default-palette = false
 sticky-session-defaults = false
-park-pointer-during-manual-scroll-capture = true
 # Key pressed in the scroll-capture overlay (before capture starts) to reselect
 # the previous capture's region. Same format as layer-panel-shortcut, e.g. "r",
 # "ctrl+r", "f6". Empty string disables it.

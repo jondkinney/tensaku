@@ -182,10 +182,6 @@ pub struct Configuration {
     /// around the cropped content. This is config.toml-backed and defaults
     /// to true.
     resize_window_to_content_on_crop: bool,
-    /// When true, manual scroll capture moves the pointer near the
-    /// lower-right of the selected area before capturing so hover-driven UI
-    /// is less likely to appear in the stitched image. Defaults to true.
-    park_pointer_during_manual_scroll_capture: bool,
     /// Keyboard chord that toggles the layer panel. Parsed at the
     /// keypress site by `parse_shortcut`; format is e.g. "ctrl+l",
     /// "ctrl+shift+t", "f7". Unrecognised values silently fall back
@@ -773,10 +769,6 @@ impl Configuration {
         if let Some(v) = general.sticky_session_defaults {
             self.sticky_session_defaults = v;
         }
-        if let Some(v) = general.park_pointer_during_manual_scroll_capture {
-            self.park_pointer_during_manual_scroll_capture = v;
-        }
-
         // --- deprecated options ---
         if let Some(v) = general.right_click_copy
             && v
@@ -1264,19 +1256,6 @@ impl Configuration {
         })
     }
 
-    pub fn park_pointer_during_manual_scroll_capture(&self) -> bool {
-        self.park_pointer_during_manual_scroll_capture
-    }
-
-    pub(crate) fn save_park_pointer_during_manual_scroll_capture(
-        &mut self,
-        value: bool,
-    ) -> Result<(), ConfigurationWriteError> {
-        self.write_general_bool("park-pointer-during-manual-scroll-capture", value)?;
-        self.park_pointer_during_manual_scroll_capture = value;
-        Ok(())
-    }
-
     pub fn scroll_capture_restore_region_shortcut(&self) -> &str {
         &self.scroll_capture_restore_region_shortcut
     }
@@ -1401,7 +1380,6 @@ impl Default for Configuration {
             hide_default_palette: false,
             sticky_session_defaults: false,
             resize_window_to_content_on_crop: true,
-            park_pointer_during_manual_scroll_capture: true,
             layer_panel_shortcut: "ctrl+l".into(),
             scroll_capture_restore_region_shortcut: "r".into(),
             scroll_capture_test: None,
@@ -1692,6 +1670,11 @@ struct ConfigurationFileGeneral {
     close_on_save: Option<bool>,
     hide_default_palette: Option<bool>,
     sticky_session_defaults: Option<bool>,
+    /// Deprecated: manual scroll capture no longer moves the pointer at
+    /// all, and automatic capture always parks it exactly once. Still
+    /// parsed (`deny_unknown_fields`) so configs that set it keep
+    /// loading; the value is ignored.
+    #[allow(dead_code)]
     park_pointer_during_manual_scroll_capture: Option<bool>,
     /// Resize the editor window around crop-only content-size changes.
     /// This positive spelling is shared with the Preferences checkbox.
@@ -1822,7 +1805,6 @@ mod tests {
         assert!(config.close_on_save());
         assert!(config.hide_default_palette());
         assert!(config.sticky_session_defaults());
-        assert!(!config.park_pointer_during_manual_scroll_capture());
         assert!(!config.resize_window_to_content_on_crop());
     }
 

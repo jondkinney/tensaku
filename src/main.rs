@@ -2315,10 +2315,7 @@ fn run_capture_flow(mut scrolling: bool) -> Result<()> {
 
     loop {
         if scrolling {
-            let park_pointer = APP_CONFIG
-                .read()
-                .park_pointer_during_manual_scroll_capture();
-            match scroll_capture::run(park_pointer)? {
+            match scroll_capture::run()? {
                 scroll_capture::ScrollRun::Cancelled => return Ok(()),
                 scroll_capture::ScrollRun::SwitchToArea => {
                     scrolling = false;
