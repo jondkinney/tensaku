@@ -828,25 +828,6 @@ pub fn open<W: IsA<gtk::Widget>>(
         relm4::gtk::glib::Propagation::Proceed
     });
 
-    let invert_scroll_check = gtk::CheckButton::builder()
-        .label("Invert scrolling direction")
-        .active(APP_CONFIG.read().invert_scrolling())
-        .build();
-    invert_scroll_check.connect_toggled(|btn| {
-        let value = btn.is_active();
-        let current = APP_CONFIG.read().invert_scrolling();
-        if value == current {
-            return;
-        }
-        let result = APP_CONFIG.write().save_invert_scrolling(value);
-        if let Err(error) = result {
-            eprintln!("Warning: could not save invert-scrolling: {error}");
-            btn.set_active(current);
-        }
-    });
-    outer.append(&invert_scroll_check);
-
-    
     let close_on_esc_check = gtk::CheckButton::builder()
         .label("Close window on Esc")
         .active(APP_CONFIG.read().close_on_esc())

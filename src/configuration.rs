@@ -146,13 +146,6 @@ pub struct Configuration {
     input_scale: f32,
     title: Option<String>,
     app_id: Option<String>,
-    /// User preference: flip the sign of every mouse-wheel / trackpad
-    /// scroll delta inside the app, on top of whatever the OS does at
-    /// the compositor layer. Inverts pan direction, zoom direction,
-    /// scroll-resize, and the annotation-pill bump in one shot — all
-    /// scroll consumers read this through `invert_scrolling()` so a
-    /// single toggle reverses the entire app's scroll polarity.
-    invert_scrolling: bool,
     /// User preference: when true, clicking any existing annotation
     /// selects it regardless of which drawing tool is active (the
     /// Pointer grabs whatever was clicked). When false, a click only
@@ -758,9 +751,6 @@ impl Configuration {
         if let Some(v) = general.resize_window_to_content_on_crop {
             self.resize_window_to_content_on_crop = v;
         }
-        if let Some(v) = general.invert_scrolling {
-            self.invert_scrolling = v;
-        }
         if let Some(v) = general.close_on_esc {
             self.close_on_esc = v;
         }
@@ -1163,19 +1153,6 @@ impl Configuration {
         Ok(())
     }
 
-    pub fn invert_scrolling(&self) -> bool {
-        self.invert_scrolling
-    }
-
-    pub(crate) fn save_invert_scrolling(
-        &mut self,
-        value: bool,
-    ) -> Result<(), ConfigurationWriteError> {
-        self.write_general_bool("invert-scrolling", value)?;
-        self.invert_scrolling = value;
-        Ok(())
-    }
-
     pub fn close_on_esc(&self) -> bool {
         self.close_on_esc
     }
@@ -1396,7 +1373,6 @@ impl Default for Configuration {
             title: None,
             app_id: None,
             // Default matches the historical Preferences fallback.
-            invert_scrolling: true,
             close_on_esc: false,
             close_on_copy: false,
             close_on_save: false,
@@ -1528,13 +1504,6 @@ fn apply_legacy_preferences(
         legacy.annotation_size_factor,
         "annotation-size-factor",
         GeneralValue::Float,
-        &mut updates,
-    );
-    migrate_general_value(
-        &mut general.invert_scrolling,
-        legacy.invert_scrolling,
-        "invert-scrolling",
-        GeneralValue::Bool,
         &mut updates,
     );
     migrate_general_value(
@@ -1675,7 +1644,6 @@ struct ConfigurationFileGeneral {
     app_id: Option<String>,
     layer_panel_shortcut: Option<String>,
     scroll_capture_restore_region_shortcut: Option<String>,
-    invert_scrolling: Option<bool>,
     /// Removed. Selecting an annotation no longer has a mode: a large
     /// annotation is grabbed by its border and its interior belongs to
     /// whichever drawing tool is armed, while the Pointer tool selects
@@ -1687,6 +1655,15 @@ struct ConfigurationFileGeneral {
     /// value is ignored.
     #[allow(dead_code)]
     select_any_annotation: Option<bool>,
+    /// Removed: the compositor already applies the user's natural-
+    /// scrolling choice, and flipping it again here second-guessed a
+    /// decision they made for the whole desktop.
+    ///
+    /// Still accepted for the same reason as the key above — the
+    /// format denies unknown fields, so dropping it would turn an
+    /// existing config into a parse error. The value is ignored.
+    #[allow(dead_code)]
+    invert_scrolling: Option<bool>,
     close_on_esc: Option<bool>,
     close_on_copy: Option<bool>,
     close_on_save: Option<bool>,
@@ -1817,7 +1794,6 @@ mod tests {
 
         assert_eq!(config.annotation_size_factor(), 1.7);
         assert!(config.annotation_size_factor_is_explicit());
-        assert!(!config.invert_scrolling());
         assert!(config.close_on_esc());
         assert!(config.close_on_copy());
         assert!(config.close_on_save());
@@ -1868,7 +1844,6 @@ mod tests {
         );
         let legacy = LegacyPreferences {
             annotation_size_factor: Some(1.4),
-            invert_scrolling: Some(false),
             close_on_copy: Some(true),
             close_on_save: Some(true),
             keep_window_size_on_crop: Some(true),
@@ -1881,7 +1856,6 @@ mod tests {
 
         let updates = apply_legacy_preferences(&mut file, &legacy);
         let general = file.general.as_ref().expect("general table should exist");
-        assert_eq!(general.invert_scrolling, Some(true));
         assert_eq!(general.close_on_copy, Some(false));
         assert_eq!(general.close_on_save, Some(true));
         assert_eq!(general.resize_window_to_content_on_crop, Some(true));
@@ -2174,8 +2148,10 @@ mod tests {
             ..Configuration::default()
         };
 
-        assert!(config.save_invert_scrolling(false).is_err());
-        assert!(config.invert_scrolling());
+        // Saving the non-default value must fail AND leave the
+        // runtime on the default it started from.
+        assert!(config.save_close_on_esc(true).is_err());
+        assert!(!config.close_on_esc());
         assert_eq!(
             fs::read(&path).expect("fixture should remain readable"),
             original
@@ -2190,8 +2166,10 @@ mod tests {
         let parent = path.parent().expect("temporary path should have a parent");
         fs::create_dir_all(parent).expect("temporary directory should be created");
         fs::write(&path, "[broken\n").expect("invalid fixture should be written");
+        // A value that differs from the runtime default, so the
+        // assertions below can't pass on the default alone.
         let legacy = LegacyPreferences {
-            invert_scrolling: Some(false),
+            close_on_esc: Some(true),
             ..LegacyPreferences::default()
         };
         let mut file = ConfigurationFile::default();
@@ -2200,8 +2178,8 @@ mod tests {
         assert!(write_config_updates(&path, updates).is_err());
         let mut runtime = Configuration::default();
         runtime.merge(Some(file), command_line(&[]));
-        assert!(!runtime.invert_scrolling());
-        assert_eq!(legacy.invert_scrolling, Some(false));
+        assert!(runtime.close_on_esc());
+        assert_eq!(legacy.close_on_esc, Some(true));
 
         fs::remove_dir_all(parent).expect("temporary directory should be removed");
     }

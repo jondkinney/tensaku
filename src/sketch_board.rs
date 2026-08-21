@@ -4732,15 +4732,20 @@ impl Component for SketchBoard {
                     set_flags: gtk::EventControllerScrollFlags::BOTH_AXES,
                     connect_scroll[sender] => move |controller, dx, dy| {
                         let modifier = controller.current_event_state();
-                        // Single inversion site for the canvas — flips
-                        // both axes so pan, zoom, and the scroll-resize
-                        // gestures all reverse together when the
-                        // invert-scrolling preference is set.
-                        let (dx, dy) = if APP_CONFIG.read().invert_scrolling() {
-                            (-dx, -dy)
-                        } else {
-                            (dx, dy)
-                        };
+                        // GTK reports a scroll OFFSET: dy > 0 means the
+                        // view scrolls down, the wheel having rolled
+                        // toward the user. Everything downstream wants a
+                        // "more of this" sign instead, so flip once here
+                        // at the boundary and let every consumer read
+                        // `+delta` as an increase.
+                        //
+                        // Unconditional on purpose. There used to be an
+                        // invert-scrolling preference here, defaulting to
+                        // on; the compositor has already applied the
+                        // user's natural-scrolling choice to this number,
+                        // so flipping it again was a second opinion about
+                        // a direction they set for the whole desktop.
+                        let (dx, dy) = (-dx, -dy);
                         // Shift+vertical-wheel → horizontal pan: the
                         // standard "shift-flips-axis" remap. Only remap a
                         // pure vertical delta (a trackpad swipe already
