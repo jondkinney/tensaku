@@ -115,17 +115,13 @@ struct State {
     pointer: (f64, f64),
     /// Live pixel size of the selection, in the capture's own pixels —
     /// what the saved file will measure, not what the overlay shows.
-    readout: gtk::Box,
+    readout: gtk::Button,
     readout_label: gtk::Label,
     /// Eight edge grips and the move puck, shown on a settled
     /// selection so a restored region reads as adjustable rather than
     /// as a picture of where the last one was.
     grips: [gtk::Box; 8],
-    puck: gtk::Box,
-    /// Take-the-shot button, beside the puck. A restored region is
-    /// framed and waiting; the keyboard says Enter, and this says the
-    /// same thing to a hand already on the mouse.
-    shutter: gtk::Button,
+    puck: gtk::DrawingArea,
     /// The overlay's size in logical pixels, learned once it maps.
     size: (i32, i32),
     /// Image pixels per logical pixel, learned at draw time — the
@@ -196,13 +192,34 @@ fn build_overlay(
     });
 
     let fixed = gtk::Fixed::new();
+    // The size pill IS the shutter: it already sits under the region
+    // saying how big the shot is, and "take it" is the only thing
+    // anyone wants to do next. Hovering swaps the number for a camera
+    // so the click is advertised before it is made.
     let readout_label = gtk::Label::new(None);
     readout_label.add_css_class("scroll-capture-prompt-label");
-    let readout = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    let readout_camera = gtk::Image::from_icon_name("camera-regular");
+    let readout_faces = gtk::Stack::new();
+    readout_faces.add_named(&readout_label, Some("size"));
+    readout_faces.add_named(&readout_camera, Some("camera"));
+    readout_faces.set_visible_child_name("size");
+
+    let readout = gtk::Button::new();
+    readout.set_child(Some(&readout_faces));
     readout.add_css_class("scroll-capture-pill");
     readout.add_css_class("capture-readout");
-    readout.append(&readout_label);
+    readout.set_focusable(false);
+    readout.set_focus_on_click(false);
+    readout.set_tooltip_text(Some("Capture this region"));
     readout.set_visible(false);
+    {
+        let faces = readout_faces.clone();
+        let hover = gtk::EventControllerMotion::new();
+        let faces_leave = faces.clone();
+        hover.connect_enter(move |_, _, _| faces.set_visible_child_name("camera"));
+        hover.connect_leave(move |_| faces_leave.set_visible_child_name("size"));
+        readout.add_controller(hover);
+    }
 
     let grips: [gtk::Box; 8] = std::array::from_fn(|_| {
         let grip = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -211,33 +228,21 @@ fn build_overlay(
         grip.set_visible(false);
         grip
     });
-    let puck = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    puck.add_css_class("capture-puck");
+    // The scrolling capture's puck, drawn by the same code rather than
+    // approximated with a glyph: it is one control and should look
+    // like one. A DrawingArea this small repaints for nothing.
+    let puck = gtk::DrawingArea::new();
     puck.set_size_request(PUCK, PUCK);
     puck.set_visible(false);
-    {
-        // A plus, the way every move affordance draws one. A label
-        // rather than two nested bars: the glyph is in every font and
-        // needs no layout of its own.
-        let cross = gtk::Label::new(Some("+"));
-        cross.set_hexpand(true);
-        cross.set_vexpand(true);
-        puck.append(&cross);
-    }
-
-    let shutter = gtk::Button::from_icon_name("camera-regular");
-    shutter.add_css_class("capture-shutter");
-    shutter.set_focusable(false);
-    shutter.set_focus_on_click(false);
-    shutter.set_tooltip_text(Some("Capture this region"));
-    shutter.set_size_request(PUCK, PUCK);
-    shutter.set_visible(false);
+    puck.set_draw_func(|_, ctx, w, h| {
+        let r = (w.min(h) as f64 / 2.0 - 1.0).max(1.0);
+        crate::scroll_capture::draw_move_puck(ctx, w as f64 / 2.0, h as f64 / 2.0, r);
+    });
 
     let state = Rc::new(RefCell::new(State {
         frozen: frozen.clone(),
         grips: grips.clone(),
         puck: puck.clone(),
-        shutter: shutter.clone(),
         readout: readout.clone(),
         readout_label: readout_label.clone(),
         fixed: fixed.clone(),
@@ -297,7 +302,6 @@ fn build_overlay(
         fixed.put(grip, 0.0, 0.0);
     }
     fixed.put(&puck, 0.0, 0.0);
-    fixed.put(&shutter, 0.0, 0.0);
     overlay.add_overlay(&fixed);
     {
         // Commits exactly what Enter would, through the same path, so
@@ -305,7 +309,7 @@ fn build_overlay(
         let state_for_shutter = Rc::clone(&state);
         let shared_for_shutter = Rc::clone(shared);
         let window_for_shutter = window.clone();
-        shutter.connect_clicked(move |_| {
+        readout.connect_clicked(move |_| {
             let choice = committed_region(&state_for_shutter.borrow());
             if let Some(choice) = choice {
                 *shared_for_shutter.borrow_mut() = choice;
@@ -508,17 +512,13 @@ fn layout_grips(state: &State, rect: Rect) {
         .set_text(&format!("{} × {}", rect.width, rect.height));
     let (_, pill_w, _, _) = state.readout.measure(gtk::Orientation::Horizontal, -1);
     let (_, pill_h, _, _) = state.readout.measure(gtk::Orientation::Vertical, pill_w);
-    let row_w = pill_w as f64 + PUCK_GAP + PUCK as f64;
-    let row_x = centre_x - row_w / 2.0;
     let row_y = puck_top + PUCK as f64 + PUCK_GAP;
     let row_fits = fits && h > PUCK as f64 * 2.0 + pill_h as f64 + PUCK_GAP;
 
-    state.fixed.move_(&state.readout, row_x, row_y);
-    state.readout.set_visible(row_fits);
     state
         .fixed
-        .move_(&state.shutter, row_x + pill_w as f64 + PUCK_GAP, row_y);
-    state.shutter.set_visible(row_fits);
+        .move_(&state.readout, centre_x - pill_w as f64 / 2.0, row_y);
+    state.readout.set_visible(row_fits);
 }
 
 fn hide_grips(state: &State) {
@@ -526,7 +526,6 @@ fn hide_grips(state: &State) {
         grip.set_visible(false);
     }
     state.puck.set_visible(false);
-    state.shutter.set_visible(false);
 }
 
 
@@ -903,7 +902,6 @@ fn install_css(app: &gtk::Application) {
          /* The dim sheet, as strips GTK composites rather than pixels
             cairo blends on every motion event. */
          .capture-shade { background: rgba(0, 0, 0, 0.45); }
-         .capture-readout { padding: 4px 10px; }
          /* Grips and puck: the scrolling capture's white-on-dark, so a
             selection looks the same in either overlay. */
          .capture-grip {
@@ -911,24 +909,14 @@ fn install_css(app: &gtk::Application) {
              border-radius: 3px;
              box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
          }
-         .capture-shutter {
-             background: rgba(20, 20, 26, 0.84);
-             border: 2px solid rgba(255, 255, 255, 0.92);
-             border-radius: 999px;
-             color: rgba(255, 255, 255, 0.92);
+         .capture-readout {
+             color: rgba(245, 245, 247, 0.92);
+             padding: 4px 12px;
              min-height: 0;
              min-width: 0;
-             padding: 0;
          }
-         .capture-shutter:hover {
-             background: rgba(60, 60, 70, 0.92);
-         }
-         .capture-puck {
-             background: rgba(20, 20, 26, 0.84);
-             border: 2px solid rgba(255, 255, 255, 0.92);
-             border-radius: 999px;
-             color: rgba(255, 255, 255, 0.92);
-             font-size: 17px;
+         .capture-readout:hover {
+             background-color: rgba(60, 60, 70, 0.94);
          }
          .region-capture-outline {
              border: 1px solid rgba(255, 255, 255, 0.9);

@@ -4222,7 +4222,15 @@ fn draw_handles(cr: &cairo::Context, sel: Selection) {
 
     // Move handle: filled circle with a 4-way arrow glyph at the center.
     let (cx, cy) = ResizeHandle::Move.center(sel);
-    let r = MOVE_HANDLE_RADIUS;
+    draw_move_puck(cr, cx, cy, MOVE_HANDLE_RADIUS);
+}
+
+/// The move puck: a dark disc with a white ring and a four-way arrow.
+///
+/// Shared with the area capture, which draws it into a small widget of
+/// its own — the same control should look the same in both overlays,
+/// and this is a glyph rather than a shape a stylesheet can describe.
+pub(crate) fn draw_move_puck(cr: &cairo::Context, cx: f64, cy: f64, r: f64) {
     cr.arc(cx, cy, r, 0.0, std::f64::consts::TAU);
     cr.set_source_rgba(0.0, 0.0, 0.0, 0.6);
     let _ = cr.fill_preserve();
