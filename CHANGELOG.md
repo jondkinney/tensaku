@@ -11,33 +11,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- *(canvas)* expand onto a neutral background with a screenshot shadow
-- open images from launcher or positional CLI input ([#56](https://github.com/jondkinney/tensaku/pull/56))
-- add persistent fixed-canvas preference ([#50](https://github.com/jondkinney/tensaku/pull/50))
+- Add an app-wide **Keep canvas size fixed** preference to clip annotations at the canvas boundary instead of expanding it. Automatic expansion remains the default. (#50)
+- Open a file picker when Tensaku starts without arguments, and accept `tensaku photo.jpg` or `tensaku -` for stdin input. Clipboard annotation is documented with `wl-paste --type image/png | tensaku -`. (#56)
+- Choose an output format in Save As, or convert by changing the filename extension. PNG, JPEG, WebP, AVIF, TIFF, and BMP are available when supported by the installed encoders. Conversion also works with `--output-filename`. (#54)
+
+### Changed
+
+- Expand the canvas onto a neutral background with a subtle shadow around the original screenshot, preserving its crisp edges.
 
 ### Fixed
 
-- *(export)* preserve source formats and support conversion ([#54](https://github.com/jondkinney/tensaku/pull/54))
-- *(render)* prevent canvas seams at fractional zoom
-- *(text)* preserve wrapping and full bounds when moving committed text
-- *(canvas)* use short, stable transitions for expanded edges
-- omit editor selection decorations from exports ([#53](https://github.com/jondkinney/tensaku/pull/53))
-- keep Save As filenames consistent with PNG output ([#54](https://github.com/jondkinney/tensaku/pull/54))
-- parent welcome dialog before presenting it ([#52](https://github.com/jondkinney/tensaku/pull/52))
+- Keep the first-run welcome dialog above its editor so it remains visible and usable. (#52)
+- Exclude selection handles, selection glow, text carets, and other editing decorations from saved images and clipboard copies. (#53)
+- Preserve the input image format in Save As by default and add the correct extension when it is omitted. Unsupported source formats fall back to PNG. (#54)
+- Preserve text wrapping after editing, allow committed text to be dragged beyond the canvas, and include the full text height when expanding the background.
+- Remove seams along the expanded canvas at fractional zoom levels.
+- Keep the editor open after a failed save and preserve the entered filename and format when retrying Save As.
+- Remove routine startup diagnostics and the message for an absent optional CSS overrides file.
 
-### Other
+### Compatibility
 
-- remove routine startup diagnostics
-- satisfy current Clippy pixel-chunk checks
-- update star history chart
-- update star history chart
-- update star history chart
-- update star history chart
-- update star history chart
-- update star history chart
-- update star history chart
-- update star history chart
-- update star history chart
+- `tensaku_cli::CommandLine` adds an `input` field for positional filenames. Rust callers constructing this struct directly must supply the new field.
 
 ## [0.28.0](https://github.com/jondkinney/tensaku/compare/v0.27.0...v0.28.0) - 2026-08-21
 
