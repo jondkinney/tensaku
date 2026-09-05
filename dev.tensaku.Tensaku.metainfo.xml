@@ -36,6 +36,34 @@
        Version history section on the listing page; the latest
        release is the only one strictly required. -->
   <releases>
+    <release version="0.29.0" date="2026-09-05">
+      <description>
+        <p>Added:</p>
+        <ul>
+          <li>Add an app-wide **Keep canvas size fixed** preference to clip annotations at the canvas boundary instead of expanding it. Automatic expansion remains the default. (#50)</li>
+          <li>Open a file picker when Tensaku starts without arguments, and accept `tensaku photo.jpg` or `tensaku -` for stdin input. Clipboard annotation is documented with `wl-paste --type image/png | tensaku -`. (#56)</li>
+          <li>Choose an output format in Save As, or convert by changing the filename extension. PNG, JPEG, WebP, AVIF, TIFF, and BMP are available when supported by the installed encoders. Conversion also works with `--output-filename`. (#54)</li>
+        </ul>
+        <p>Changed:</p>
+        <ul>
+          <li>Expand the canvas onto a neutral background with a subtle shadow around the original screenshot, preserving its crisp edges.</li>
+        </ul>
+        <p>Fixed:</p>
+        <ul>
+          <li>Keep the first-run welcome dialog above its editor so it remains visible and usable. (#52)</li>
+          <li>Exclude selection handles, selection glow, text carets, and other editing decorations from saved images and clipboard copies. (#53)</li>
+          <li>Preserve the input image format in Save As by default and add the correct extension when it is omitted. Unsupported source formats fall back to PNG. (#54)</li>
+          <li>Preserve text wrapping after editing, allow committed text to be dragged beyond the canvas, and include the full text height when expanding the background.</li>
+          <li>Remove seams along the expanded canvas at fractional zoom levels.</li>
+          <li>Keep the editor open after a failed save and preserve the entered filename and format when retrying Save As.</li>
+          <li>Remove routine startup diagnostics and the message for an absent optional CSS overrides file.</li>
+        </ul>
+        <p>Compatibility:</p>
+        <ul>
+          <li>`tensaku_cli::CommandLine` adds an `input` field for positional filenames. Rust callers constructing this struct directly must supply the new field.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.28.0" date="2026-08-21">
       <description>
         <p>Added:</p>
