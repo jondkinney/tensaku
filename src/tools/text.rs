@@ -55,6 +55,7 @@ const DESCENDER_RATIO_OF_LINE_HEIGHT: f32 = 0.22;
 /// Extra CSS-px breathing room added below the deepest descender
 /// when we extend the bottom pad to contain them at large sizes.
 const DESCENDER_SAFETY_CSS: f32 = 2.0;
+const CAP_HEIGHT_RATIO: f32 = 0.72;
 /// Combined CSS-pixel pad from text glyph to the visible outline —
 /// used by bounds() and move_handle to convert between drag positions
 /// and wrap-width.
@@ -254,6 +255,9 @@ struct LayoutCache {
     /// `bounds()` / handle hit-tests use this to reason about the
     /// box height without re-measuring the font.
     line_height: f32,
+    /// Width actually passed to the line breaker in the last draw. Committing
+    /// auto-fit text preserves it so moving the box never changes its wrapping.
+    wrap_width: f32,
     /// CSS-px → image-space conversion factor (= 1 /
     /// canvas.transform.average_scale × DPR). `bounds` / `move_handle`
     /// use it to translate the CSS-pixel PILL_PAD / OUTLINE_PADDING
@@ -279,6 +283,7 @@ impl LayoutCache {
             rect: Rectangle::new(0, 0, 0, 0),
             editing_rect: Rect::default(),
             line_height: 0.0,
+            wrap_width: 0.0,
             // 1.0 (not 0.0) so an early `bounds()` call before the
             // first draw doesn't collapse into degenerate math.
             css_to_image: 1.0,
@@ -310,10 +315,8 @@ pub struct Text {
     /// any draw-derived data.
     cursor_visible: RefCell<bool>,
     font_ids: Vec<FontId>,
-    /// Explicit wrap width set on creation and by side-handle drags.
-    /// When `None`, layout falls back to "use available image width from
-    /// `pos.x` to the right edge" — only relevant for legacy/edge-case
-    /// Text instances; new Texts always carry an explicit width.
+    /// New text auto-fits to the canvas while typing. Finishing the edit or
+    /// dragging a side handle fixes the wrap width in image coordinates.
     text_box_width: Option<f32>,
 }
 
@@ -406,6 +409,16 @@ impl Text {
         }
         let room = right_edge - pos_x - pill_pad_x;
         (room >= MIN_TEXT_BOX_WIDTH).then_some(room)
+    }
+
+    fn finish_editing(&mut self) {
+        if self.text_box_width.is_none() {
+            let width = self.layout.borrow().wrap_width;
+            if width > 0.0 {
+                self.text_box_width = Some(width);
+            }
+        }
+        self.editing = false;
     }
 
     fn byte_index_from_char_index(text: &str, char_index: usize) -> usize {
@@ -590,9 +603,9 @@ impl Drawable for Text {
         // 0.7em, line ≈ 1.2em → 0.7/1.2 ≈ 0.58, but bumped up so
         // ascenders like "d"/"h" still fit cleanly).
         let cursor_height = if line_height.abs() > f32::EPSILON {
-            line_height.abs() * 0.72
+            line_height.abs() * CAP_HEIGHT_RATIO
         } else {
-            (font_metrics.height() / canva_scale).abs() * 0.72
+            (font_metrics.height() / canva_scale).abs() * CAP_HEIGHT_RATIO
         };
         let cursor_top_offset = -cursor_height;
 
@@ -769,7 +782,8 @@ impl Drawable for Text {
             ),
         };
         layout.editing_rect = editing_box;
-        layout.line_height = cursor_height;
+        layout.line_height = line_height;
+        layout.wrap_width = wrap_width;
         layout.css_to_image = css_to_image_dpr;
         // Measure the full text on a single line (no wrapping) so
         // bounds() can estimate live line count during a drag.
@@ -1014,6 +1028,7 @@ impl Drawable for Text {
         let css_to_image = layout.css_to_image;
         let natural_w = layout.natural_text_width.max(0.0);
         let cached_line_count = layout.line_ranges.len().max(1) as f32;
+        let cached_wrap_width = layout.wrap_width;
         drop(layout);
         if line_height <= 0.0 || css_to_image <= 0.0 {
             return None;
@@ -1030,41 +1045,36 @@ impl Drawable for Text {
             .max(descender_estimate_img + DESCENDER_SAFETY_CSS * css_to_image);
         let total_pad_y_bottom = pill_pad_bottom_dyn + OUTLINE_PADDING_CSS * css_to_image;
 
-        // Width: text_box_width when set, else the cached glyph
-        // width + jitter buffer (matches the auto-fit branch in
-        // draw). Floor to MIN_TEXT_BOX_WIDTH.
+        // Preserve the measured wrap area, including short lines and explicit
+        // newlines. Glyph width alone isn't the width used by the line breaker.
         let glyph_w = self.glyph_rect().map(|g| g.size.x).unwrap_or(0.0);
-        let wrap_width = match self.text_box_width {
-            Some(w) => w.max(MIN_TEXT_BOX_WIDTH).max(glyph_w),
-            None => (glyph_w + 4.0).max(MIN_TEXT_BOX_WIDTH),
+        let wrap_width = self
+            .text_box_width
+            .unwrap_or(cached_wrap_width)
+            .max(MIN_TEXT_BOX_WIDTH);
+
+        // A body drag doesn't change layout. Always use the actual line count
+        // then; dividing natural width by wrap width misses word breaks and
+        // explicit newlines. Only estimate during a width change before draw
+        // has refreshed the line ranges.
+        let live_line_count = if (wrap_width - cached_wrap_width).abs() < 0.01 {
+            cached_line_count
+        } else {
+            (natural_w / wrap_width)
+                .ceil()
+                .max(self.text_buffer.line_count() as f32)
         };
 
-        // Live line-count: while a handle drag sets an explicit width,
-        // estimate from the natural text width divided by current
-        // wrap_width so the outline reflects wrapping in real time,
-        // instead of waiting for the next draw to re-run
-        // break_text_vec. The cached natural-text-width covers the
-        // whole text laid out on a single line; combined with current
-        // wrap_width this gives the correct line count even mid-drag
-        // when the cached line_ranges is still from the previous
-        // frame. Auto-fit text (no explicit width) wraps only at the
-        // image edge, where the widest laid-out line can be well short
-        // of the room, so its cached line count is the accurate one.
-        let live_line_count = match self.text_box_width {
-            Some(_) if natural_w > 0.0 && wrap_width > 0.0 => {
-                (natural_w / wrap_width).ceil().max(1.0)
-            }
-            _ => cached_line_count,
-        };
-
-        // Vertical: stack_top = pos.y - line_height (matches draw).
-        let stack_top = self.pos.y - line_height;
-        let stack_height = live_line_count * line_height;
+        // Baselines are a full line-height apart; the first line extends only
+        // a cap-height above its baseline. Match the geometry used by draw.
+        let cap_height = line_height * CAP_HEIGHT_RATIO;
+        let stack_top = self.pos.y - cap_height;
+        let stack_height = (live_line_count - 1.0) * line_height + cap_height;
 
         Some(Rect {
             pos: Vec2D::new(self.pos.x - total_pad_x, stack_top - total_pad_y_top),
             size: Vec2D::new(
-                wrap_width + 2.0 * total_pad_x,
+                wrap_width.max(glyph_w) + 2.0 * total_pad_x,
                 stack_height + total_pad_y_top + total_pad_y_bottom,
             ),
         })
@@ -1860,7 +1870,7 @@ impl Tool for TextTool {
                     }
                     _ => {
                         t.preedit = None;
-                        t.editing = false;
+                        t.finish_editing();
                         t.im_context = None;
                         t.text_buffer
                             .select_range(&t.text_buffer.start_iter(), &t.text_buffer.start_iter());
@@ -2240,7 +2250,7 @@ impl Tool for TextTool {
                         // gesture. The user clicks again to create one.
                         if let Some(l) = self.text.as_mut() {
                             l.preedit = None;
-                            l.editing = false;
+                            l.finish_editing();
                             l.im_context = None;
                             l.text_buffer.select_range(
                                 &l.text_buffer.start_iter(),
@@ -2442,7 +2452,7 @@ impl Tool for TextTool {
         self.stop_cursor_blink_timer();
         if let Some(t) = &mut self.text {
             t.preedit = None;
-            t.editing = false;
+            t.finish_editing();
             t.im_context = None;
             t.text_buffer
                 .select_range(&t.text_buffer.start_iter(), &t.text_buffer.start_iter());
@@ -2963,6 +2973,127 @@ impl TextTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires GTK and OpenGL; run with --ignored --test-threads=1"]
+    fn committed_text_keeps_its_wrap_and_expands_past_the_last_line() {
+        gtk::init().unwrap();
+        crate::load_gl().unwrap();
+        let gl_area = gtk::GLArea::new();
+        let window = gtk::Window::builder().child(&gl_area).build();
+        window.present();
+        gl_area.make_current();
+        assert!(gl_area.error().is_none());
+        // SAFETY: the GTK GLArea's context is current on this thread.
+        let renderer = unsafe {
+            femtovg::renderer::OpenGl::new_from_function(|s| epoxy::get_proc_addr(s) as *const _)
+        }
+        .unwrap();
+        let mut canvas = femtovg::Canvas::new(renderer).unwrap();
+        canvas.set_size(2048, 2048, 1.0);
+        let font = canvas
+            .add_font_mem(&resource::resource!("src/assets/InterDisplay-SemiBold.ttf"))
+            .unwrap();
+        let image_bounds = (Vec2D::zero(), Vec2D::new(400.0, 400.0));
+
+        for finish in 0..3 {
+            let text = Text::new(
+                Vec2D::new(100.0, 80.0),
+                Style {
+                    annotation_size_factor: 1.5,
+                    ..Style::default()
+                },
+                TextBackground::Outlined,
+                None,
+            );
+            text.text_buffer
+                .set_text("So what is the thing that we're doing here?\n\nTyping and dragging.");
+            text.draw(&mut canvas, font, image_bounds).unwrap();
+            let original_lines = text.layout.borrow().line_ranges.clone();
+            assert!(
+                original_lines.len() > 3,
+                "typing must wrap at the image edge"
+            );
+            let original_width = text.layout.borrow().wrap_width;
+            assert!(original_width < 300.0);
+            let mut tool = TextTool {
+                text: Some(text),
+                input_enabled: true,
+                ..TextTool::default()
+            };
+            let result = match finish {
+                0 => tool.handle_mouse_event(MouseEventMsg {
+                    type_: MouseEventType::Click,
+                    pos: Vec2D::new(10.0, 10.0),
+                    button: MouseButton::Primary,
+                    n_pressed: 1,
+                    modifier: ModifierType::empty(),
+                    release: false,
+                }),
+                1 => tool.handle_key_event(KeyEventMsg {
+                    key: Key::Return,
+                    code: 0,
+                    modifier: ModifierType::empty(),
+                }),
+                _ => tool.handle_deactivated(),
+            };
+            let ToolUpdateResult::Commit(drawable) = result else {
+                panic!("edit should commit")
+            };
+            assert!(!tool.active());
+            let mut text = drawable.as_any().downcast_ref::<Text>().unwrap().clone();
+            assert_eq!(text.text_box_width, Some(original_width));
+
+            // The very first body drag must preserve the layout, even while
+            // its preview is outside the old canvas and after that canvas grows.
+            let before = text.bounds().unwrap();
+            let delta = Vec2D::new(450.0, 500.0);
+            text.translate(delta);
+            assert_eq!(text.bounds().unwrap().size, before.size);
+            assert_eq!(text.bounds().unwrap().pos, before.pos + delta);
+            for bounds in [image_bounds, (Vec2D::zero(), Vec2D::new(1600.0, 1600.0))] {
+                text.draw(&mut canvas, font, bounds).unwrap();
+                assert_eq!(text.layout.borrow().line_ranges, original_lines);
+                let actual = text.layout.borrow().editing_rect;
+                let reported = text.bounds().unwrap();
+                assert!((reported.pos.y - actual.pos.y).abs() < 0.01);
+                assert!(
+                    (reported.size.y - actual.size.y).abs() < 0.01,
+                    "bounds must include full line spacing, blank lines, and descenders"
+                );
+            }
+
+            let expected = text.bounds().unwrap();
+            let tools = super::super::ToolsManager::new();
+            let pointer = tools.get(&Tools::Pointer);
+            let (sender, _receiver) = relm4::channel();
+            let mut area = femtovg_area::FemtoVGArea::default();
+            let background =
+                gtk::gdk_pixbuf::Pixbuf::new(gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, 400, 400)
+                    .unwrap();
+            background.fill(0xffffffff);
+            area.init(
+                sender,
+                Rc::new(RefCell::new(super::super::CropTool::default())),
+                pointer.clone(),
+                pointer,
+                background,
+            );
+            let id = area.commit(text.clone_box());
+            let (_, width, height) = area.auto_resize_for_drawables(&[id]).unwrap();
+            assert!(
+                width >= expected.pos.x + expected.size.x
+                    && height >= expected.pos.y + expected.size.y,
+                "expanded background must contain the entire text block"
+            );
+            area.undo();
+            assert_eq!(area.image_dimensions(), (400, 400));
+            area.redo();
+            assert_eq!(area.image_dimensions(), (width as i32, height as i32));
+        }
+        drop(canvas);
+        window.close();
+    }
 
     #[test]
     fn auto_fit_room_caps_wrap_at_the_image_edge() {
