@@ -1371,15 +1371,11 @@ impl SketchBoard {
             Self::save_as_last_dir_file().as_deref(),
             configured_output_path.as_deref(),
         );
-        // A configured output name is an explicit choice, so it wins.
-        // Otherwise suggest the next untitled: an empty name box means
-        // typing one from scratch every time, and a fixed suggestion
-        // means overwriting yesterday's shot.
-        let suggested_filename = configured_output_path
-            .as_deref()
-            .and_then(Path::file_name)
-            .map(|name| name.to_string_lossy().into_owned())
-            .or_else(|| initial_dir.as_deref().map(Self::next_untitled_name));
+        let suggested_filename = Self::save_as_suggested_filename(
+            configured_output_path.as_deref(),
+            APP_CONFIG.read().input_filename(),
+            initial_dir.as_deref(),
+        );
 
         let data = match pixbuf.save_to_bufferv("png", &Vec::new()) {
             Ok(d) => d,
@@ -1399,8 +1395,8 @@ impl SketchBoard {
                 .accept_label("Save")
                 .cancel_label("Cancel");
 
-            let dialog = match root {
-                Some(w) => builder.transient_for(&w),
+            let dialog = match &root {
+                Some(w) => builder.transient_for(w),
                 None => builder,
             }
             .build();
@@ -1412,22 +1408,47 @@ impl SketchBoard {
                 }
             }
 
-            if let Some(filename) = suggested_filename {
-                dialog.set_current_name(&filename);
-            }
+            dialog.set_current_name(&suggested_filename);
 
-            dialog.connect_response(move |dialog, response| {
+            let response = dialog.run_future().await;
+            dialog.hide();
+            {
                 let mut exit_app = false;
                 let mut filename: Option<String> = None;
                 if response == gtk::ResponseType::Accept
                     && let Some(file) = dialog.file()
                 {
-                    let output_filename = match file.path() {
-                        Some(path) => path.to_string_lossy().into_owned(),
+                    let selected_path = match file.path() {
+                        Some(path) => path,
                         None => return,
                     };
+                    let output_path = Self::png_output_path(&selected_path);
+                    // The chooser only confirmed the name the user entered.
+                    // Adding/changing its suffix may target a different existing
+                    // file, so confirm that destination before replacing it.
+                    if output_path != selected_path && output_path.exists() {
+                        let confirm = gtk::MessageDialog::builder()
+                            .modal(true)
+                            .message_type(gtk::MessageType::Question)
+                            .text("Replace existing image?")
+                            .secondary_text(format!(
+                                "{} already exists. Replace it with the edited image?",
+                                output_path.display()
+                            ))
+                            .build();
+                        confirm.set_transient_for(root.as_ref());
+                        confirm.add_button("Cancel", gtk::ResponseType::Cancel);
+                        confirm.add_button("Replace", gtk::ResponseType::Accept);
+                        confirm.set_default_response(gtk::ResponseType::Cancel);
+                        let replace = confirm.run_future().await == gtk::ResponseType::Accept;
+                        confirm.close();
+                        if !replace {
+                            return;
+                        }
+                    }
+                    let output_filename = output_path.to_string_lossy().into_owned();
 
-                    match fs::write(&output_filename, &data) {
+                    match fs::write(&output_path, &data) {
                         Err(e) => log_result(
                             &format!("Error while saving file: {e}"),
                             !APP_CONFIG.read().disable_notifications(),
@@ -1446,7 +1467,7 @@ impl SketchBoard {
                 if exit_app {
                     log_result("early exit after save as, ignoring further actions.", false);
                     sender.input(SketchBoardInput::Exit);
-                } else if filename.is_some() || !followup_actions.is_empty() {
+                } else if filename.is_some() {
                     let followup_actions_clone = followup_actions.clone();
                     let pixbuf_clone = Some(pixbuf.clone());
                     sender.input(SketchBoardInput::RenderResultFollowup(
@@ -1455,10 +1476,40 @@ impl SketchBoard {
                         filename,
                     ));
                 }
-            });
-
-            dialog.show();
+            }
         });
+    }
+
+    fn png_output_path(path: &Path) -> PathBuf {
+        if path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
+        {
+            path.to_path_buf()
+        } else {
+            path.with_extension("png")
+        }
+    }
+
+    fn save_as_suggested_filename(
+        configured: Option<&Path>,
+        input: &str,
+        directory: Option<&Path>,
+    ) -> String {
+        if let Some(name) = configured.and_then(Path::file_name) {
+            return Self::png_output_path(Path::new(name))
+                .to_string_lossy()
+                .into_owned();
+        }
+        if !input.is_empty()
+            && input != "-"
+            && let Some(stem) = Path::new(input).file_stem()
+        {
+            return format!("{}-edited.png", stem.to_string_lossy());
+        }
+        directory
+            .map(Self::next_untitled_name)
+            .unwrap_or_else(|| "untitled.png".into())
     }
 
     fn save_texture_to_clipboard(&self, texture: &impl IsA<Texture>) -> anyhow::Result<()> {
@@ -6763,6 +6814,42 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[test]
+    fn save_as_names_match_png_encoding() {
+        for (input, expected) in [
+            ("abc", "abc.png"),
+            ("abc.jpg", "abc.png"),
+            ("abc.PNG", "abc.PNG"),
+            ("a.b/abc", "a.b/abc.png"),
+            (".hidden", ".hidden.png"),
+        ] {
+            assert_eq!(
+                SketchBoard::png_output_path(Path::new(input)),
+                Path::new(expected)
+            );
+        }
+        assert_eq!(
+            SketchBoard::save_as_suggested_filename(None, "/tmp/photo.jpg", None),
+            "photo-edited.png"
+        );
+        assert_eq!(
+            SketchBoard::save_as_suggested_filename(
+                Some(Path::new("/tmp/custom.jpg")),
+                "photo.jpg",
+                None
+            ),
+            "custom.png"
+        );
+        assert_eq!(
+            SketchBoard::save_as_suggested_filename(None, "-", None),
+            "untitled.png"
+        );
+        assert_eq!(
+            SketchBoard::save_as_suggested_filename(None, "", None),
+            "untitled.png"
+        );
     }
 
     #[test]

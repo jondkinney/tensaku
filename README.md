@@ -99,6 +99,11 @@ Tensaku resolves its settings from two layers:
 - <kbd>Ctrl+0</kbd>: Reset zoom to 100%; <kbd>Ctrl+1</kbd>: fit to window; <kbd>Ctrl+2</kbd>–<kbd>5</kbd>: zoom to 200–500%; <kbd>Ctrl+9</kbd>: zoom to 50%
 - <kbd>Alt</kbd>+(<kbd>Left</kbd>/<kbd>Right</kbd>/<kbd>Up</kbd>/<kbd>Down</kbd>): Pan, also available with middle mouse button drag <sup>0.20.1</sup>
 
+Exports use PNG regardless of the input format. Save As suggests the configured
+output name, or `<input-name>-edited.png` for an opened image. Captures and stdin
+input use an untitled name. A missing or different extension is changed to `.png`;
+if this selects a different existing file, Tensaku asks before replacing it.
+
 #### Color Selection Shortcuts <sup>0.20.1</sup>
 
 <kbd>1</kbd>, <kbd>2</kbd>, <kbd>3</kbd>, …, <kbd>9</kbd>, <kbd>0</kbd> — select nth color from the color palette
