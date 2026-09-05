@@ -790,8 +790,7 @@ impl Configuration {
         // ---
     }
     fn merge(&mut self, file: Option<ConfigurationFile>, command_line: CommandLine) {
-        // input_filename is required and needs to be overwritten
-        self.input_filename = command_line.filename;
+        self.input_filename = command_line.filename.or(command_line.input);
 
         // overwrite with all specified values from config file
         if let Some(file) = file {
@@ -1043,6 +1042,10 @@ impl Configuration {
             Some(ref v) => v,
             None => "",
         }
+    }
+
+    pub(crate) fn set_input_filename(&mut self, filename: String) {
+        self.input_filename = Some(filename);
     }
 
     pub fn annotation_size_factor(&self) -> f32 {

@@ -2,9 +2,8 @@
 Name=Tensaku
 GenericName=Modern Screenshot Annotation.
 TryExec=tensaku
-Exec=tensaku -f %f
+Exec=tensaku %f
 Terminal=false
-NoDisplay=true
 Type=Application
 Keywords=wayland;snapshot;annotation;editing;
 Icon=dev.tensaku.Tensaku

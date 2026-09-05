@@ -71,6 +71,27 @@ See [Dependencies](#dependencies) and [Build from source](#build-from-source) fo
 
 Start by providing a filename or a screenshot via stdin (or use `--scroll-capture`, below) and annotate using the available tools. Save to clipboard or file when finished. Tools and interface have been kept simple.
 
+```sh
+tensaku                    # open a launcher with an Open Image button
+tensaku photo.jpg          # annotate an existing image
+tensaku --filename photo.jpg  # the original -f/--filename syntax also works
+```
+
+To annotate an image from the Wayland clipboard, pipe its image data to stdin:
+
+```sh
+wl-paste --type image/png | tensaku -
+# Equivalent, including on older releases:
+wl-paste --type image/png | tensaku --filename -
+```
+
+The clipboard must contain an image, rather than copied text or a filename.
+Use `wl-paste --list-types` to check the available formats; substitute
+`--type image/jpeg` if that is the image format offered by the clipboard.
+The `-` input accepts encoded image data from any command, for example
+`cat screenshot.png | tensaku -`. Input from stdin is explicit: running
+`tensaku` with no image argument always opens the launcher.
+
 Tensaku resolves its settings from two layers:
 
 - **`config.toml`** — the persistent source of truth, normally at `~/.config/tensaku/config.toml` (see [Configuration File](#configuration-file)). You can edit it by hand or use the Preferences dialog; Preferences updates only the relevant keys and preserves unrelated settings and comments.
@@ -343,7 +364,10 @@ On the first launch after upgrading, Tensaku migrates old Preferences values fro
 » tensaku --help
 Modern Screenshot Annotation.
 
-Usage: tensaku [OPTIONS]
+Usage: tensaku [OPTIONS] [IMAGE]
+
+Arguments:
+  [IMAGE]  Path to input image or '-' to read from stdin. Omit to open the file launcher
 
 Options:
       --man
@@ -368,6 +392,8 @@ Options:
           Dev-only smoke test for real mouse-wheel injection used by Auto-Scroll. Sends three wheel notches beneath the current pointer
       --scroll-capture
           Enter scrolling-screenshot capture mode: opens a fullscreen overlay, drag to select a region, then capture by manual scroll or auto-scroll
+      --capture
+          Choose what to capture, then edit it: a fullscreen overlay where you drag a region, press Space to snap to a window, F for the whole screen, or S to switch to scrolling capture
       --scroll-capture-test <FULL|X,Y,W,H>
           Dev-only smoke test for the scrolling-screenshot capture pipeline. `FULL` captures the whole focused output; `x,y,w,h` captures a region. The captured frame is fed into tensaku's normal annotation canvas
       --fullscreen [<FULLSCREEN>]

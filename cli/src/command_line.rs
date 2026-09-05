@@ -62,12 +62,12 @@ pub struct CommandLine {
     pub config: Option<String>,
 
     /// Path to input image or '-' to read from stdin
-    #[arg(
-        short,
-        long,
-        required_unless_present_any = ["scroll_capture_test", "scroll_capture", "auto_scroll_test", "capture"]
-    )]
+    #[arg(short, long, conflicts_with = "input")]
     pub filename: Option<String>,
+
+    /// Path to input image or '-' to read from stdin. Omit to open the file launcher.
+    #[arg(value_name = "IMAGE")]
+    pub input: Option<String>,
 
     /// Dev-only smoke test for real mouse-wheel injection used by Auto-Scroll.
     /// Sends three wheel notches beneath the current pointer.
@@ -370,5 +370,41 @@ impl std::fmt::Display for Tools {
             Brush => "brush",
         };
         f.write_str(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CommandLine;
+    use clap::Parser;
+
+    #[test]
+    fn accepts_launcher_files_and_stdin() {
+        let launcher = CommandLine::try_parse_from(["tensaku"]).unwrap();
+        assert!(launcher.filename.is_none() && launcher.input.is_none());
+        for file in ["photo.jpg", "-", "an image.png"] {
+            let positional = CommandLine::try_parse_from(["tensaku", file]).unwrap();
+            assert_eq!(positional.input.as_deref(), Some(file));
+            for flag in ["-f", "--filename"] {
+                let named = CommandLine::try_parse_from(["tensaku", flag, file]).unwrap();
+                assert_eq!(named.filename.as_deref(), Some(file));
+            }
+        }
+        let dashed = CommandLine::try_parse_from(["tensaku", "--", "-photo.png"]).unwrap();
+        assert_eq!(dashed.input.as_deref(), Some("-photo.png"));
+        assert!(CommandLine::try_parse_from(["tensaku", "--filename", "a.png", "b.png"]).is_err());
+        assert!(CommandLine::try_parse_from(["tensaku", "a.png", "b.png"]).is_err());
+    }
+
+    #[test]
+    fn capture_and_utility_modes_still_work_without_an_image() {
+        for flag in [
+            "--capture",
+            "--scroll-capture",
+            "--doctor",
+            "--install-desktop",
+        ] {
+            assert!(CommandLine::try_parse_from(["tensaku", flag]).is_ok());
+        }
     }
 }

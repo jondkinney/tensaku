@@ -2221,11 +2221,25 @@ fn load_gl() -> Result<()> {
 }
 
 fn run_satty() -> Result<()> {
+    let needs_launcher = {
+        let config = APP_CONFIG.read();
+        config.input_filename().is_empty() && config.scroll_capture_test().is_none()
+    };
+    let image = if needs_launcher {
+        let Some((image, path)) = ui::launcher::choose_image()? else {
+            return Ok(());
+        };
+        APP_CONFIG
+            .write()
+            .set_input_filename(path.to_string_lossy().into_owned());
+        image
+    } else {
+        load_input_image()?
+    };
     // load OpenGL
     load_gl()?;
     generate_profile_output!("loaded gl");
 
-    let image = load_input_image()?;
     start_gui(image)
 }
 
