@@ -358,9 +358,8 @@ impl FemtoVGArea {
 
     /// Re-fit the background image around the original screenshot
     /// plus the current drawable bounds. Grows the canvas when a
-    /// drawable spills past the edge (filling new strips with the
-    /// dominant color of the corresponding edge of the existing
-    /// image), shrinks it back toward the original when no drawable
+    /// drawable spills past the edge (adding a neutral background and
+    /// a shadow around the original screenshot), shrinks it back when no drawable
     /// still needs the extension. Returns the new `(width, height)`
     /// if a resize happened, `None` otherwise. The `ids_to_exclude`
     /// list names drawables whose just-pushed Add/Modify/Remove

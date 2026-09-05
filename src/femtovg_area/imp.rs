@@ -157,10 +157,6 @@ fn spring_back_progress(start: f32, limit: f32, elapsed_ms: f32) -> (f32, bool) 
     }
 }
 
-/// Depth of each edge-line sample. A median rejects isolated text and
-/// antialiasing pixels before the short extension transition is drawn.
-const AUTO_EXTEND_EDGE_SAMPLE_DEPTH: i32 = 8;
-
 /// Slack allocated around the background raster so a run of small
 /// grows can re-view the same memory instead of reallocating and
 /// copying. Costs ~15 MB on a 6144x3456 RGB capture, and absorbs a few
@@ -212,7 +208,7 @@ impl ResizeLayout {
 }
 
 /// How far each side of a raster extends past the original capture.
-/// Both the colour samples and fade distances stay anchored to that capture.
+/// The background shadow stays anchored to that capture across every resize.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct CaptureInset {
     left: i32,
@@ -222,25 +218,17 @@ struct CaptureInset {
 }
 
 impl CaptureInset {
-    /// The original screenshot inside an already extended raster. Auto-resize
-    /// always retains this rectangle, including when it shrinks the margin.
-    fn capture(self, image: &Pixbuf) -> Pixbuf {
-        image.new_subpixbuf(
-            self.left,
-            self.top,
-            image.width() - self.left - self.right,
-            image.height() - self.top - self.bottom,
-        )
+    fn from_rect(rect: crate::math::Rect, image: &Pixbuf) -> Self {
+        Self {
+            left: rect.pos.x.floor().max(0.0) as i32,
+            top: rect.pos.y.floor().max(0.0) as i32,
+            right: (image.width() as f32 - (rect.pos.x + rect.size.x).ceil()).max(0.0) as i32,
+            bottom: (image.height() as f32 - (rect.pos.y + rect.size.y).ceil()).max(0.0) as i32,
+        }
     }
 }
 
-fn extend_edges(
-    dst: &Pixbuf,
-    src: &Pixbuf,
-    layout: ResizeLayout,
-    settled: Rgba,
-    inset: CaptureInset,
-) {
+fn extend_background(dst: &Pixbuf, src: &Pixbuf, layout: ResizeLayout, inset: CaptureInset) {
     if layout.grow_left == 0
         && layout.grow_top == 0
         && layout.grow_right == 0
@@ -249,27 +237,19 @@ fn extend_edges(
         return;
     }
 
-    // Sample the capture, never a previous expansion. Otherwise small grows
-    // repeatedly sample the fade and produce different pixels than one large
-    // grow. Own all samples before writing: src and dst can share an allocation.
-    let capture = inset.capture(src);
-    let has_alpha = capture.has_alpha();
-    let extension = EdgeExtension {
+    // Screenshot pixels stay intact. Only the surrounding canvas grows, with
+    // a neutral fill and a shadow around the original screenshot rectangle.
+    let extension = CanvasBackground {
         x: layout.dst_x - layout.src_x + inset.left,
         y: layout.dst_y - layout.src_y + inset.top,
-        width: capture.width(),
-        height: capture.height(),
-        left: edge_line_colors(&capture, Side::Left, has_alpha),
-        right: edge_line_colors(&capture, Side::Right, has_alpha),
-        top: edge_line_colors(&capture, Side::Top, has_alpha),
-        bottom: edge_line_colors(&capture, Side::Bottom, has_alpha),
-        settled,
+        width: src.width() - inset.left - inset.right,
+        height: src.height() - inset.top - inset.bottom,
     };
 
     let (w, h) = (dst.width(), dst.height());
-    // Four disjoint rectangles cover only newly exposed pixels. Corners use
-    // the same distance-based transition as the sides, with no flat corner
-    // blocks cutting across the fade. Existing pixels and undo views survive.
+    // Four disjoint rectangles cover only newly exposed pixels. The shadow is
+    // a function of distance to the source, so growing in small steps has the
+    // same result as growing once. Existing pixels and undo views survive.
     extension.fill(dst, 0, 0, w, layout.grow_top);
     extension.fill(dst, 0, h - layout.grow_bottom, w, layout.grow_bottom);
     let middle_height = h - layout.grow_top - layout.grow_bottom;
@@ -301,7 +281,6 @@ fn resize_raster_in_alloc(
     src_y: i32,
     new_w: i32,
     new_h: i32,
-    settled: Rgba,
     inset: CaptureInset,
 ) -> Option<(Pixbuf, Pixbuf, (i32, i32))> {
     if new_w <= 0 || new_h <= 0 {
@@ -315,11 +294,9 @@ fn resize_raster_in_alloc(
         if nx >= 0 && ny >= 0 && nx + new_w <= alloc.width() && ny + new_h <= alloc.height() {
             let view = alloc.new_subpixbuf(nx, ny, new_w, new_h);
             // The surviving pixels are already in place, so only the
-            // strips the view newly covers need painting. Every edge
-            // colour is sampled before the first write, which is what
-            // makes reading `old` while writing an overlapping `view`
-            // safe.
-            extend_edges(&view, old, layout, settled, inset);
+            // strips the view newly covers need painting. The fill doesn't
+            // read source pixels, so overlapping views are safe.
+            extend_background(&view, old, layout, inset);
             return Some((view, alloc.clone(), (nx, ny)));
         }
     }
@@ -346,7 +323,7 @@ fn resize_raster_in_alloc(
         );
     }
     let view = fresh.new_subpixbuf(pad, pad, new_w, new_h);
-    extend_edges(&view, old, layout, settled, inset);
+    extend_background(&view, old, layout, inset);
     Some((view, fresh, (pad, pad)))
 }
 
@@ -364,7 +341,6 @@ fn resize_pixbuf_to_rect(
     src_y: i32,
     new_w: i32,
     new_h: i32,
-    settled: Rgba,
     inset: CaptureInset,
 ) -> Option<Pixbuf> {
     if new_w <= 0 || new_h <= 0 {
@@ -377,7 +353,7 @@ fn resize_pixbuf_to_rect(
         new_w,
         new_h,
     )?;
-    // No clear first: the copy below plus the strips `extend_edges`
+    // No clear first: the copy below plus the strips `extend_background`
     // paints cover the new raster exactly, which `resize_covers_every_
     // pixel` pins down.
     let layout = ResizeLayout::new(
@@ -399,7 +375,7 @@ fn resize_pixbuf_to_rect(
             layout.dst_y,
         );
     }
-    extend_edges(&new, original, layout, settled, inset);
+    extend_background(&new, original, layout, inset);
     Some(new)
 }
 
@@ -469,134 +445,52 @@ fn fill_rect(p: &Pixbuf, x: i32, y: i32, w: i32, h: i32, color: Rgba) {
     blit_row(p, x, y, h, &pixel_bytes(p, color).repeat(w as usize));
 }
 
-/// Keep the edge match local: a short, eased transition into one solid
-/// extension colour. The old 96-pixel linear fade looked like a broad shadow
-/// and carried edge detail far into the margin.
-const EDGE_FADE_PX: i32 = 24;
+/// Neutral canvas around the screenshot. This is also the editor's backdrop,
+/// so expanding the canvas reveals annotation space without stretching pixels.
+const CANVAS_GRAY: u8 = 0x24;
+const CANVAS_COLOR: Rgba = (CANVAS_GRAY, CANVAS_GRAY, CANVAS_GRAY, 255);
+const SHADOW_EXTENT: i32 = (SHADOW_KEY_BLUR_CSS + SHADOW_KEY_OFFSET_Y_CSS) as i32;
 
-fn blend(from: Rgba, to: Rgba, amount: f32) -> Rgba {
-    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * amount).round() as u8;
-    (
-        mix(from.0, to.0),
-        mix(from.1, to.1),
-        mix(from.2, to.2),
-        mix(from.3, to.3),
-    )
-}
-
-/// The colour a side settles to away from the capture: the per-channel
-/// median of its lines, so one bright line can't set it.
-fn settled_color(colors: &[Rgba]) -> Rgba {
-    if colors.is_empty() {
-        return (0, 0, 0, 255);
-    }
-    let mut out = [0u8; 4];
-    let mut scratch: Vec<u8> = Vec::with_capacity(colors.len());
-    for (channel, slot) in out.iter_mut().enumerate() {
-        scratch.clear();
-        scratch.extend(colors.iter().map(|c| match channel {
-            0 => c.0,
-            1 => c.1,
-            2 => c.2,
-            _ => c.3,
-        }));
-        scratch.sort_unstable();
-        *slot = scratch[scratch.len() / 2];
-    }
-    (out[0], out[1], out[2], out[3])
-}
-
-/// The colour an image's extension settles to away from the capture:
-/// one value for the whole frame, pooled across all four edges.
-///
-/// ONE value, not one per side: per-side medians differ by a level or
-/// two — they sample different edges of the same background — and that
-/// difference lands as a step wherever two sides' far fields meet,
-/// which is every corner.
-///
-/// Computed ONCE per raster and reused for every subsequent grow (see
-/// `FemtoVgAreaMut::extension_settled`). Recomputing it per grow is
-/// what produced a line per expansion: after the first grow an edge is
-/// the previous extension rather than the capture, so the pooled median
-/// drifts, and each new strip settles to a slightly different colour
-/// than the one beside it.
-pub fn image_settled_color(image: &Pixbuf) -> Rgba {
-    let has_alpha = image.has_alpha();
-    let pooled: Vec<Rgba> = [Side::Left, Side::Right, Side::Top, Side::Bottom]
-        .into_iter()
-        .flat_map(|side| edge_line_colors(image, side, has_alpha))
-        .collect();
-    settled_color(&pooled)
-}
-
-/// A stable extension field in destination coordinates. Every pixel depends
-/// only on its distance from the original capture, not the resize history.
-struct EdgeExtension {
+struct CanvasBackground {
     x: i32,
     y: i32,
     width: i32,
     height: i32,
-    left: Vec<Rgba>,
-    right: Vec<Rgba>,
-    top: Vec<Rgba>,
-    bottom: Vec<Rgba>,
-    settled: Rgba,
 }
 
-impl EdgeExtension {
+impl CanvasBackground {
     fn color(&self, x: i32, y: i32) -> Rgba {
-        let (x, y) = (x - self.x, y - self.y);
-        let outside_x = x < 0 || x >= self.width;
-        let outside_y = y < 0 || y >= self.height;
-        // The first pixel just outside each edge matches its sampled colour.
-        let dx = (-x - 1).max(x - self.width).max(0) as f32;
-        let dy = (-y - 1).max(y - self.height).max(0) as f32;
-        let distance = if outside_x && outside_y {
-            dx.hypot(dy)
-        } else {
-            dx.max(dy)
+        // Match the two box-gradient layers used by the editor shadow. Pixel
+        // centers and signed distance give smooth corners without sampling or
+        // smearing any screenshot content into the new canvas.
+        let shadow = |offset_y: f32, blur: f32, alpha: f32| {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5 - offset_y;
+            let dx = (self.x as f32 - px).max(px - (self.x + self.width) as f32);
+            let dy = (self.y as f32 - py).max(py - (self.y + self.height) as f32);
+            let distance = dx.max(0.0).hypot(dy.max(0.0)) + dx.max(dy).min(0.0);
+            alpha * (0.5 - distance / blur).clamp(0.0, 1.0)
         };
-        if distance >= EDGE_FADE_PX as f32 {
-            return self.settled;
-        }
-        let row = y.clamp(0, self.height - 1) as usize;
-        let col = x.clamp(0, self.width - 1) as usize;
-        let vertical = if x < 0 {
-            self.left[row]
-        } else {
-            self.right[row]
-        };
-        let horizontal = if y < 0 {
-            self.top[col]
-        } else {
-            self.bottom[col]
-        };
-        let edge = match (outside_x, outside_y) {
-            (true, true) => {
-                // Blend adjacent edge endpoints around the corner. Along
-                // either side's continuation this becomes that side's colour.
-                let weight = if dx + dy == 0.0 { 0.5 } else { dy / (dx + dy) };
-                blend(vertical, horizontal, weight)
-            }
-            (true, false) => vertical,
-            (false, true) => horizontal,
-            (false, false) => return self.settled,
-        };
-        let t = distance / EDGE_FADE_PX as f32;
-        blend(edge, self.settled, t * t * (3.0 - 2.0 * t))
+        let ambient = shadow(0.0, SHADOW_AMBIENT_BLUR_CSS, SHADOW_AMBIENT_ALPHA);
+        let key = shadow(
+            SHADOW_KEY_OFFSET_Y_CSS,
+            SHADOW_KEY_BLUR_CSS,
+            SHADOW_KEY_ALPHA,
+        );
+        let value = (CANVAS_GRAY as f32 * (1.0 - ambient) * (1.0 - key)).round() as u8;
+        (value, value, value, 255)
     }
 
     fn fill(&self, dst: &Pixbuf, x: i32, y: i32, w: i32, h: i32) {
         if w <= 0 || h <= 0 {
             return;
         }
-        fill_rect(dst, x, y, w, h, self.settled);
-        // Only the narrow ring around the capture needs per-pixel work. The
-        // rest of even a very large extension stays a fast, uniform row fill.
-        let x0 = x.max(self.x - EDGE_FADE_PX);
-        let y0 = y.max(self.y - EDGE_FADE_PX);
-        let x1 = (x + w).min(self.x + self.width + EDGE_FADE_PX);
-        let y1 = (y + h).min(self.y + self.height + EDGE_FADE_PX);
+        fill_rect(dst, x, y, w, h, CANVAS_COLOR);
+        // The rest is a flat fill; compute shadow pixels only near the source.
+        let x0 = x.max(self.x - SHADOW_EXTENT);
+        let y0 = y.max(self.y - SHADOW_EXTENT);
+        let x1 = (x + w).min(self.x + self.width + SHADOW_EXTENT);
+        let y1 = (y + h).min(self.y + self.height + SHADOW_EXTENT);
         if x0 >= x1 || y0 >= y1 {
             return;
         }
@@ -617,114 +511,42 @@ impl EdgeExtension {
     }
 }
 
-/// Which side of the raster an extension strip is being sampled from.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Side {
-    Left,
-    Right,
-    Top,
-    Bottom,
-}
-
-/// One extension colour per line along `side` — per row for the
-/// left/right sides, per column for top/bottom.
-///
-/// Replaces a single dominant colour for the whole side, which is what
-/// made the extension visibly mismatch the capture: a 6K screenshot's
-/// right edge might be a near-black window for part of its height and
-/// desktop background for the rest, and one flat fill can only match
-/// one of them.
-///
-/// Robustness without a histogram: each line takes the per-channel
-/// MEDIAN of its `AUTO_EXTEND_EDGE_SAMPLE_DEPTH` samples, so a few
-/// antialiased glyph pixels can't drag the result (that was the job the
-/// quantized histogram used to do, and a median does it with a handful
-/// of samples instead of a HashMap over the whole side). The result is
-/// then median-filtered ALONG the side, so one line that happens to cut
-/// through a glyph can't stand out from its neighbours, while a real
-/// content boundary — which persists across many lines — survives.
-fn edge_line_colors(p: &Pixbuf, side: Side, has_alpha: bool) -> Vec<Rgba> {
-    let w = p.width();
-    let h = p.height();
-    let depth = AUTO_EXTEND_EDGE_SAMPLE_DEPTH.min(w).min(h).max(1);
-    let lines = match side {
-        Side::Left | Side::Right => h,
-        Side::Top | Side::Bottom => w,
+/// Repaint only the margins of a newly transformed raster. Rotating/resampling
+/// the old shadow would leave it pointing sideways or at a different scale
+/// from the next canvas expansion. Call only on a fresh, unshared image.
+fn repaint_background_margins(image: &Pixbuf, source_rect: crate::math::Rect) {
+    let inset = CaptureInset::from_rect(source_rect, image);
+    let background = CanvasBackground {
+        x: inset.left,
+        y: inset.top,
+        width: image.width() - inset.left - inset.right,
+        height: image.height() - inset.top - inset.bottom,
     };
-
-    let stride = p.rowstride() as usize;
-    let bpp = if has_alpha { 4 } else { 3 };
-    // SAFETY: read-only access to the Pixbuf's live buffer; every index
-    // below is inside `depth` pixels of an edge of a `w` x `h` raster.
-    let buf = unsafe { p.pixels() };
-
-    let mut colors = Vec::with_capacity(lines as usize);
-    let mut channels = [[0u8; AUTO_EXTEND_EDGE_SAMPLE_DEPTH as usize]; 4];
-    for line in 0..lines {
-        let used = depth as usize;
-        for d in 0..depth {
-            let (x, y) = match side {
-                Side::Left => (d, line),
-                Side::Right => (w - 1 - d, line),
-                Side::Top => (line, d),
-                Side::Bottom => (line, h - 1 - d),
-            };
-            let idx = y as usize * stride + x as usize * bpp;
-            channels[0][d as usize] = buf[idx];
-            channels[1][d as usize] = buf[idx + 1];
-            channels[2][d as usize] = buf[idx + 2];
-            channels[3][d as usize] = if has_alpha { buf[idx + 3] } else { 255 };
-        }
-        let mut median = [0u8; 4];
-        for (c, out) in channels.iter_mut().zip(median.iter_mut()) {
-            let slice = &mut c[..used];
-            slice.sort_unstable();
-            *out = slice[used / 2];
-        }
-        colors.push((median[0], median[1], median[2], median[3]));
-    }
-
-    median_filter_along(&colors)
-}
-
-/// Median-filter a run of colours with a 5-wide window, per channel.
-fn median_filter_along(colors: &[Rgba]) -> Vec<Rgba> {
-    const RADIUS: usize = 2;
-    if colors.len() <= RADIUS * 2 {
-        return colors.to_vec();
-    }
-    (0..colors.len())
-        .map(|i| {
-            let lo = i.saturating_sub(RADIUS);
-            let hi = (i + RADIUS + 1).min(colors.len());
-            let window = &colors[lo..hi];
-            let mut out = [0u8; 4];
-            let mut scratch = [0u8; RADIUS * 2 + 1];
-            for (channel, slot) in out.iter_mut().enumerate() {
-                for (dst, c) in scratch.iter_mut().zip(window) {
-                    *dst = match channel {
-                        0 => c.0,
-                        1 => c.1,
-                        2 => c.2,
-                        _ => c.3,
-                    };
-                }
-                let used = &mut scratch[..window.len()];
-                used.sort_unstable();
-                *slot = used[used.len() / 2];
-            }
-            (out[0], out[1], out[2], out[3])
-        })
-        .collect()
+    background.fill(image, 0, 0, image.width(), inset.top);
+    background.fill(
+        image,
+        0,
+        image.height() - inset.bottom,
+        image.width(),
+        inset.bottom,
+    );
+    background.fill(image, 0, inset.top, inset.left, background.height);
+    background.fill(
+        image,
+        image.width() - inset.right,
+        inset.top,
+        inset.right,
+        background.height,
+    );
 }
 
 /// Dark gray fill behind the screenshot (replaces solid black). Matches
 /// the surrounding toolbar chrome so the canvas reads as part of the
 /// app surface, not a void.
 const CANVAS_BG: femtovg::Color = femtovg::Color {
-    r: 0x24 as f32 / 255.0,
-    g: 0x24 as f32 / 255.0,
-    b: 0x24 as f32 / 255.0,
+    r: CANVAS_GRAY as f32 / 255.0,
+    g: CANVAS_GRAY as f32 / 255.0,
+    b: CANVAS_GRAY as f32 / 255.0,
     a: 1.0,
 };
 
@@ -882,16 +704,6 @@ pub struct FemtoVgAreaMut {
     background_alloc: Option<Pixbuf>,
     /// Origin of `background_image` inside `background_alloc`.
     background_origin: (i32, i32),
-    /// Colour the edge extension settles to, computed once from the
-    /// capture and reused for every grow of it. `None` until the first
-    /// grow; cleared whenever a foreign raster is adopted.
-    ///
-    /// It has to be stable: after the first grow, an edge of the image
-    /// IS the previous extension, so recomputing from the live image
-    /// drifts a level or two each time and every strip settles to a
-    /// slightly different colour than its neighbour — which is a
-    /// visible line per expansion, stacking up along the growing edge.
-    extension_settled: Option<Rgba>,
     background_tiles: Vec<BackgroundTile>,
     /// Image-space rects whose pixels are on the CPU but not yet on the
     /// GPU. Set by an incremental canvas grow, consumed by the next
@@ -1282,7 +1094,6 @@ impl FemtoVGArea {
             background_image,
             background_alloc: None,
             background_origin: (0, 0),
-            extension_settled: None,
             background_tiles: Vec::new(),
             pending_tile_strips: Vec::new(),
             max_texture_size: 8192,
@@ -1553,7 +1364,7 @@ impl FemtoVgAreaMut {
     /// After a drawable mutation, re-fit the canvas so it tightly
     /// contains `original_rect` (the un-extended screenshot) plus the
     /// union of all current drawable bounds. Grows the background
-    /// Pixbuf (with dominant-color edge fill for new strips) when a
+    /// Pixbuf (with a neutral background and screenshot shadow) when a
     /// drawable spills past the current image, and shrinks it back
     /// toward `original_rect` when no drawable still needs the
     /// previously-added strips. Translates all drawables EXCEPT those
@@ -2571,12 +2382,42 @@ impl FemtoVgAreaMut {
 
         {
             let dpr = self.device_pixel_ratio.max(0.0001);
-            let img_w = self.display_rect_size.x;
-            let img_h = self.display_rect_size.y;
-            let img_x = self.display_rect_origin.x;
-            let img_y = self.display_rect_origin.y;
+            let has_margins = self.original_rect.pos != Vec2D::zero()
+                || self.original_rect.size
+                    != Vec2D::new(
+                        self.background_image.width() as f32,
+                        self.background_image.height() as f32,
+                    );
+            let (shadow_pos, shadow_size, shadow_scale) = if has_margins {
+                // The source screenshot casts the shadow, including where it
+                // reaches the viewport's backdrop. The expanded canvas has no
+                // shadow of its own. Use image units to match the exported fill.
+                let mut source = self.original_rect;
+                if let Some((x, y, w, h)) = scissor {
+                    let right = (source.pos.x + source.size.x).min(x + w);
+                    let bottom = (source.pos.y + source.size.y).min(y + h);
+                    source.pos.x = source.pos.x.max(x);
+                    source.pos.y = source.pos.y.max(y);
+                    source.size = Vec2D::new(
+                        (right - source.pos.x).max(0.0),
+                        (bottom - source.pos.y).max(0.0),
+                    );
+                }
+                (
+                    eff_offset + source.pos * eff_scale,
+                    source.size * eff_scale,
+                    eff_scale,
+                )
+            } else {
+                (self.display_rect_origin, self.display_rect_size, dpr)
+            };
+            let (img_x, img_y) = (shadow_pos.x, shadow_pos.y);
+            let (img_w, img_h) = (shadow_size.x, shadow_size.y);
 
             let mut draw_layer = |center_x: f32, center_y: f32, blur: f32, alpha: f32| {
+                if img_w <= 0.0 || img_h <= 0.0 {
+                    return;
+                }
                 let mut path = Path::new();
                 path.rect(
                     center_x - blur,
@@ -2601,15 +2442,15 @@ impl FemtoVgAreaMut {
             draw_layer(
                 img_x,
                 img_y,
-                SHADOW_AMBIENT_BLUR_CSS * dpr,
+                SHADOW_AMBIENT_BLUR_CSS * shadow_scale,
                 SHADOW_AMBIENT_ALPHA,
             );
 
             // Key (elevation) layer — wide, offset downward.
             draw_layer(
                 img_x,
-                img_y + SHADOW_KEY_OFFSET_Y_CSS * dpr,
-                SHADOW_KEY_BLUR_CSS * dpr,
+                img_y + SHADOW_KEY_OFFSET_Y_CSS * shadow_scale,
+                SHADOW_KEY_BLUR_CSS * shadow_scale,
                 SHADOW_KEY_ALPHA,
             );
         }
@@ -3224,6 +3065,7 @@ impl FemtoVgAreaMut {
             s.drawable.apply_canvas_transform(t, old_w, old_h);
         }
         self.original_rect = t.map_rect(self.original_rect, old_w, old_h);
+        repaint_background_margins(&self.background_image, self.original_rect);
         let new_w = self.background_image.width() as f32;
         let new_h = self.background_image.height() as f32;
         self.record_canvas_op(prev_image, prev_rect, t, new_w, new_h);
@@ -3286,6 +3128,7 @@ impl FemtoVgAreaMut {
             self.original_rect = t.map_rect(self.original_rect, old_w, old_h);
             self.record_canvas_op(prev_image, prev_rect, t, w, h);
         }
+        repaint_background_margins(&resized, self.original_rect);
         self.adopt_background_image(resized);
         Some((w, h))
     }
@@ -3468,21 +3311,7 @@ impl FemtoVgAreaMut {
             return None;
         }
         let old = self.background_image.clone();
-        // How far the raster already reaches past the capture on each
-        // side, so the fade stays anchored to the capture across any
-        // number of grows.
-        let rect = self.original_rect;
-        let inset = CaptureInset {
-            left: rect.pos.x.max(0.0) as i32,
-            top: rect.pos.y.max(0.0) as i32,
-            right: (old.width() as f32 - (rect.pos.x + rect.size.x)).max(0.0) as i32,
-            bottom: (old.height() as f32 - (rect.pos.y + rect.size.y)).max(0.0) as i32,
-        };
-        // Derive from the unextended capture even after undo/redo or a
-        // transform invalidated the cache while margins were still present.
-        let settled = *self
-            .extension_settled
-            .get_or_insert_with(|| image_settled_color(&inset.capture(&old)));
+        let inset = CaptureInset::from_rect(self.original_rect, &old);
         let (view, alloc, origin) = resize_raster_in_alloc(
             &old,
             self.background_alloc.as_ref(),
@@ -3491,7 +3320,6 @@ impl FemtoVgAreaMut {
             src_y,
             new_w,
             new_h,
-            settled,
             inset,
         )?;
         self.background_alloc = Some(alloc);
@@ -3506,9 +3334,6 @@ impl FemtoVgAreaMut {
     fn adopt_background_image(&mut self, image: Pixbuf) -> Pixbuf {
         self.background_alloc = None;
         self.background_origin = (0, 0);
-        // A different raster has a different edge; re-derive on its
-        // first grow.
-        self.extension_settled = None;
         self.invalidate_background_tiles();
         std::mem::replace(&mut self.background_image, image)
     }
@@ -4382,6 +4207,18 @@ mod tests {
             );
             canvas.set_render_target(RenderTarget::Screen);
             canvas.delete_image(target);
+
+            // Export the same background and source shadow that the editor uses.
+            let mut moved = inner.drawables[0].drawable.clone_box();
+            moved.translate(Vec2D::new(220.0, 220.0));
+            let moved_id = inner.commit(moved);
+            inner.auto_resize_for_drawables(&[moved_id]).unwrap();
+            let expanded = inner.render_native_resolution(canvas, font).unwrap();
+            for (x, y) in [(140, 30), (140, 140), (expanded.width() - 1, 20)] {
+                let expected = read_pixel(&inner.background_image, x as i32, y as i32, false);
+                let actual = expanded.buf()[y * expanded.stride() + x];
+                assert_eq!((actual.r, actual.g, actual.b, actual.a), expected);
+            }
         }
         window.close();
     }
@@ -4592,138 +4429,143 @@ mod tests {
         assert!(hits.iter().all(|h| *h == 0));
     }
 
-    /// Two properties, in tension, that together define a good
-    /// extension.
-    ///
-    /// At the boundary it must MATCH the capture per line — a single
-    /// flat colour per side steps away from the capture wherever its
-    /// edge content varies, which is a visible seam.
-    ///
-    /// Far from the boundary it must be CONSTANT down the side — a
-    /// capture's flat region is not bit-flat, and carrying that wander
-    /// across a large fill turns an invisible wobble into a visible
-    /// stripe.
     #[test]
-    fn edge_extension_matches_at_the_boundary_and_settles_beyond_it() {
-        const BAND: i32 = 20;
-        // Wider than EDGE_FADE_PX so both regimes are present.
-        const PAD: i32 = 200;
-        let (w, h) = (120, 120);
-        let src = Pixbuf::new(relm4::gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, w, h).unwrap();
-        let band_color = |y: i32| -> (u8, u8, u8) { (((y / BAND) * 40) as u8, 60, 200) };
-        let col_color = |x: i32| -> (u8, u8, u8) { (10, ((x / BAND) * 40) as u8, 90) };
-        const EDGE: i32 = 12;
-        for y in 0..h {
-            for x in 0..w {
-                let (r, g, b) = if y < EDGE || y >= h - EDGE {
-                    col_color(x)
-                } else {
-                    band_color(y)
-                };
-                src.put_pixel(x as u32, y as u32, r, g, b, 255);
+    fn expanded_canvas_preserves_source_pixels_and_uses_a_neutral_background() {
+        let (w, h, pad) = (80, 60, 100);
+        for has_alpha in [false, true] {
+            let src =
+                Pixbuf::new(relm4::gtk::gdk_pixbuf::Colorspace::Rgb, has_alpha, 8, w, h).unwrap();
+            for y in 0..h {
+                for x in 0..w {
+                    src.put_pixel(
+                        x as u32,
+                        y as u32,
+                        (x * 3) as u8,
+                        (y * 4) as u8,
+                        90,
+                        (x * 3) as u8,
+                    );
+                }
             }
-        }
-
-        let settled = super::image_settled_color(&src);
-        let out = super::resize_pixbuf_to_rect(
-            &src,
-            -PAD,
-            -PAD,
-            w + 2 * PAD,
-            h + 2 * PAD,
-            settled,
-            Default::default(),
-        )
-        .unwrap();
-
-        // Boundary columns carry each row's own colour.
-        for y in (EDGE + BAND / 2..h - EDGE).step_by(BAND as usize) {
-            let want = band_color(y);
-            for boundary_x in [PAD - 1, w + PAD] {
-                let got = super::read_pixel(&out, boundary_x, y + PAD, false);
-                assert_eq!((got.0, got.1, got.2), want, "row {y} at x={boundary_x}");
-            }
-        }
-        // Boundary rows carry each column's own colour.
-        for x in (BAND / 2..w).step_by(BAND as usize) {
-            let want = col_color(x);
-            for boundary_y in [PAD - 1, h + PAD] {
-                let got = super::read_pixel(&out, x + PAD, boundary_y, false);
-                assert_eq!((got.0, got.1, got.2), want, "column {x} at y={boundary_y}");
-            }
-        }
-
-        // Far field: constant along the WHOLE of each side, however
-        // much the capture's edge varied. Spanning the corners matters
-        // — they abut two sides at once, so a per-side settled colour
-        // would step there even with each side internally uniform.
-        // This is the anti-banding property.
-        for probe_x in [0, out.width() - 1] {
-            let first = super::read_pixel(&out, probe_x, 0, false);
+            let out = resize_pixbuf_to_rect(
+                &src,
+                -pad,
+                -pad,
+                w + pad * 2,
+                h + pad * 2,
+                Default::default(),
+            )
+            .unwrap();
             for y in 0..out.height() {
-                assert_eq!(
-                    super::read_pixel(&out, probe_x, y, false),
-                    first,
-                    "banding down x={probe_x} at y={y}"
-                );
+                for x in 0..out.width() {
+                    let pixel = super::read_pixel(&out, x, y, has_alpha);
+                    if (pad..pad + w).contains(&x) && (pad..pad + h).contains(&y) {
+                        assert_eq!(
+                            pixel,
+                            super::read_pixel(&src, x - pad, y - pad, has_alpha),
+                            "every source pixel, including alpha, must be unchanged"
+                        );
+                    } else {
+                        assert_eq!(pixel.0, pixel.1);
+                        assert_eq!(pixel.1, pixel.2);
+                        assert_eq!(pixel.3, 255, "the background must be opaque");
+                        assert!(pixel.0 <= super::CANVAS_GRAY);
+                        if x == 0 || y == 0 || x == out.width() - 1 || y == out.height() - 1 {
+                            assert_eq!(
+                                pixel,
+                                super::CANVAS_COLOR,
+                                "no shadow around the expanded canvas edge"
+                            );
+                        }
+                    }
+                }
             }
-        }
-        for probe_y in [0, out.height() - 1] {
-            let first = super::read_pixel(&out, 0, probe_y, false);
-            for x in 0..out.width() {
-                assert_eq!(
-                    super::read_pixel(&out, x, probe_y, false),
-                    first,
-                    "banding across y={probe_y} at x={x}"
-                );
-            }
+            let top = super::read_pixel(&out, pad + w / 2, pad - 1, has_alpha).0;
+            let bottom = super::read_pixel(&out, pad + w / 2, pad + h, has_alpha).0;
+            assert!(
+                bottom < top && top < super::CANVAS_GRAY,
+                "shadow belongs to the screenshot, with a downward offset"
+            );
+            let left = |distance| super::read_pixel(&out, pad - distance, pad + h / 2, has_alpha).0;
+            assert!(
+                left(1) < left(8) && left(8) < left(16) && left(16) < left(40),
+                "shadow must soften into the neutral background"
+            );
         }
     }
 
-    /// A single stray pixel at the edge — an antialiased glyph, say —
-    /// must not become a streak across the whole extension for that
-    /// line. That robustness used to come from a quantized histogram
-    /// over the entire side; it now comes from a per-line median.
     #[test]
-    fn edge_extension_blends_corners_and_settles_within_a_short_margin() {
-        let (w, h, pad) = (60, 40, 40);
-        let src = Pixbuf::new(relm4::gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, w, h).unwrap();
-        src.fill(0x141414ff);
-        let settled = (220, 220, 220, 255);
-        let out = resize_pixbuf_to_rect(
-            &src,
-            -pad,
-            -pad,
-            w + pad * 2,
-            h + pad * 2,
-            settled,
-            Default::default(),
-        )
-        .unwrap();
-        for y in 0..out.height() {
-            for x in 0..out.width() {
-                let pixel = super::read_pixel(&out, x, y, false);
-                if (pad..pad + w).contains(&x) && (pad..pad + h).contains(&y) {
-                    assert_eq!(pixel, (20, 20, 20, 255), "capture pixels must be untouched");
-                } else if x < pad - 24 || x >= pad + w + 24 || y < pad - 24 || y >= pad + h + 24 {
-                    assert_eq!(pixel, settled, "the margin must be flat past 24 pixels");
+    fn canvas_background_is_independent_of_screenshot_colors() {
+        let a = Pixbuf::new(relm4::gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, 60, 60).unwrap();
+        let b = a.copy().unwrap();
+        a.fill(0xff0000ff);
+        b.fill(0x00ffffff);
+        let extend = |source: &Pixbuf| {
+            resize_pixbuf_to_rect(source, -80, -80, 220, 220, Default::default()).unwrap()
+        };
+        let (a, b) = (extend(&a), extend(&b));
+        for y in 0..220 {
+            for x in 0..220 {
+                if !(80..140).contains(&x) || !(80..140).contains(&y) {
+                    assert_eq!(
+                        super::read_pixel(&a, x, y, false),
+                        super::read_pixel(&b, x, y, false)
+                    );
                 }
             }
         }
-        // The corner continues the neighbouring edges, instead of a solid
-        // block meeting the dark edge at a right-angled step.
-        assert_eq!(
-            super::read_pixel(&out, pad - 1, pad - 1, false),
-            (20, 20, 20, 255)
-        );
-        let corner = super::read_pixel(&out, pad - 9, pad - 9, false).0;
-        assert!(corner > 20 && corner < 220);
-        let edge = |d| super::read_pixel(&out, pad - 1 - d, pad + h / 2, false).0;
-        assert!(edge(0) < edge(8) && edge(8) < edge(16) && edge(16) < edge(24));
     }
 
     #[test]
-    fn edge_extension_is_independent_of_resize_steps() {
+    fn rotated_canvas_keeps_the_shadow_below_the_screenshot() {
+        use super::*;
+        let source = Pixbuf::new(gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, 60, 40).unwrap();
+        source.fill(0x8090a0ff);
+        let grown = resize_pixbuf_to_rect(&source, -20, -30, 120, 140, Default::default()).unwrap();
+        let rotated = grown
+            .rotate_simple(gtk::gdk_pixbuf::PixbufRotation::Counterclockwise)
+            .unwrap();
+        let rect = CanvasTransform::RotateCcw.map_rect(
+            crate::math::Rect::new(Vec2D::new(20.0, 30.0), Vec2D::new(60.0, 40.0)),
+            120.0,
+            140.0,
+        );
+        repaint_background_margins(&rotated, rect);
+        // A further grow must agree with placing the rotated original screenshot
+        // onto a fresh background. No rotated shadow may remain in the old margins.
+        let next = resize_pixbuf_to_rect(
+            &rotated,
+            -15,
+            -10,
+            170,
+            140,
+            CaptureInset::from_rect(rect, &rotated),
+        )
+        .unwrap();
+        let source = source
+            .rotate_simple(gtk::gdk_pixbuf::PixbufRotation::Counterclockwise)
+            .unwrap();
+        let reference = resize_pixbuf_to_rect(
+            &source,
+            -(rect.pos.x as i32) - 15,
+            -(rect.pos.y as i32) - 10,
+            170,
+            140,
+            Default::default(),
+        )
+        .unwrap();
+        for y in 0..next.height() {
+            for x in 0..next.width() {
+                assert_eq!(
+                    read_pixel(&next, x, y, false),
+                    read_pixel(&reference, x, y, false)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn canvas_background_is_independent_of_resize_steps() {
         for has_alpha in [false, true] {
             let (w, h) = (64, 48);
             let src =
@@ -4733,7 +4575,6 @@ mod tests {
                     src.put_pixel(x as u32, y as u32, (x * 3) as u8, (y * 4) as u8, 40, 200);
                 }
             }
-            let settled = super::image_settled_color(&src);
             let mut view = src.clone();
             let mut alloc = None;
             let mut origin = (0, 0);
@@ -4755,7 +4596,6 @@ mod tests {
                     inset.top - top,
                     w + left + right,
                     h + top + bottom,
-                    settled,
                     inset,
                 )
                 .unwrap();
@@ -4765,7 +4605,6 @@ mod tests {
                     -top,
                     next.width(),
                     next.height(),
-                    settled,
                     Default::default(),
                 )
                 .unwrap();
@@ -4789,23 +4628,6 @@ mod tests {
                 };
             }
         }
-    }
-
-    #[test]
-    fn edge_extension_ignores_a_stray_edge_pixel() {
-        let (w, h) = (60, 60);
-        let src = Pixbuf::new(relm4::gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, w, h).unwrap();
-        src.fill(0x20304000);
-        // Two bright pixels in one row's sampled depth — a minority of
-        // the 8 samples, so the median must reject them.
-        src.put_pixel(0, 30, 255, 0, 0, 255);
-        src.put_pixel(1, 30, 255, 0, 0, 255);
-
-        let settled = super::image_settled_color(&src);
-        let out = super::resize_pixbuf_to_rect(&src, -8, 0, w + 8, h, settled, Default::default())
-            .unwrap();
-        let got = super::read_pixel(&out, 0, 30, false);
-        assert_eq!((got.0, got.1, got.2), (0x20, 0x30, 0x40));
     }
 
     /// The view-based resize must produce exactly the pixels the
@@ -4841,39 +4663,19 @@ mod tests {
             (-2, -2, 4, 4),         // small again, in the fresh allocation
         ];
 
-        // Both paths take the SAME settled colour, derived once from the
-        // capture — that is the production contract, and re-deriving it
-        // per step is exactly the drift this pins against.
-        let settled = super::image_settled_color(&src);
         let mut view = src.clone();
         let mut reference = src.clone();
         let mut alloc: Option<Pixbuf> = None;
         let mut origin = (0, 0);
+        let mut inset = super::CaptureInset::default();
 
         for (i, (sx, sy, dw, dh)) in steps.into_iter().enumerate() {
             let (nw, nh) = (view.width() + dw, view.height() + dh);
-            let (next_view, next_alloc, next_origin) = super::resize_raster_in_alloc(
-                &view,
-                alloc.as_ref(),
-                origin,
-                sx,
-                sy,
-                nw,
-                nh,
-                settled,
-                Default::default(),
-            )
-            .unwrap();
-            let next_reference = super::resize_pixbuf_to_rect(
-                &reference,
-                sx,
-                sy,
-                nw,
-                nh,
-                settled,
-                Default::default(),
-            )
-            .unwrap();
+            let (next_view, next_alloc, next_origin) =
+                super::resize_raster_in_alloc(&view, alloc.as_ref(), origin, sx, sy, nw, nh, inset)
+                    .unwrap();
+            let next_reference =
+                super::resize_pixbuf_to_rect(&reference, sx, sy, nw, nh, inset).unwrap();
 
             assert_eq!(
                 (next_view.width(), next_view.height()),
@@ -4894,38 +4696,26 @@ mod tests {
             alloc = Some(next_alloc);
             origin = next_origin;
             reference = next_reference;
+            inset.left -= sx;
+            inset.top -= sy;
+            inset.right += sx + dw;
+            inset.bottom += sy + dh;
         }
     }
 
-    /// A run of small grows — what nudging an annotation outward does —
-    /// must leave the extension seamless.
-    ///
-    /// The regression this pins: the fade from the capture's edge
-    /// colour to the settled colour used to restart inside every strip.
-    /// `edge_line_colors` samples several pixels deep, so each grow
-    /// re-sampled the previous strip's ramp and laid down another one,
-    /// drawing a line per expansion that stacked up along the growing
-    /// edge. The fade is a function of distance from the CAPTURE, so a
-    /// strip beyond it must come out flat.
-    ///
-    /// Needs a capture whose growing edge differs sharply from the
-    /// settled colour, or there is no ramp to repeat and the bug is
-    /// invisible.
+    /// Repeated nudges must expose one continuous background. Every margin
+    /// pixel is based on the original screenshot rectangle, never the last grow.
     #[test]
     fn successive_grows_leave_no_step_between_strips() {
         let (w, h) = (80, 60);
         let src = Pixbuf::new(relm4::gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, w, h).unwrap();
         for y in 0..h {
             for x in 0..w {
-                // Dark left and top edges against a light everything
-                // else: the pooled settled colour lands light, so the
-                // extension on those two sides has a long way to fade.
                 let v: u8 = if x < 8 || y < 8 { 20 } else { 220 };
                 src.put_pixel(x as u32, y as u32, v, v, v, 255);
             }
         }
 
-        let settled = super::image_settled_color(&src);
         let mut view = src.clone();
         let mut alloc: Option<Pixbuf> = None;
         let mut origin = (0, 0);
@@ -4943,7 +4733,6 @@ mod tests {
                 -STEP,
                 view.width() + STEP,
                 view.height() + STEP,
-                settled,
                 inset,
             )
             .unwrap();
@@ -4954,9 +4743,8 @@ mod tests {
             inset.top += STEP;
         }
 
-        // Everything more than one fade from the capture is far field
-        // and must be ONE colour across every strip boundary in it.
-        let far = GROWS * STEP - super::EDGE_FADE_PX - STEP;
+        // Beyond the screenshot shadow, every strip must be the same color.
+        let far = GROWS * STEP - super::SHADOW_EXTENT - STEP;
         assert!(far > STEP * 2, "test must span several strips");
         let first = super::read_pixel(&view, 0, 0, false);
         for y in 0..far {
@@ -4988,7 +4776,6 @@ mod tests {
         let src = Pixbuf::new(relm4::gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, w, h).unwrap();
         src.fill(0x11223300);
 
-        let settled = super::image_settled_color(&src);
         let (first, alloc, origin) = super::resize_raster_in_alloc(
             &src,
             None,
@@ -4997,7 +4784,6 @@ mod tests {
             -2,
             w + 4,
             h + 4,
-            settled,
             Default::default(),
         )
         .unwrap();
@@ -5015,8 +4801,12 @@ mod tests {
             -5,
             first.width() + 10,
             first.height() + 10,
-            settled,
-            Default::default(),
+            super::CaptureInset {
+                left: 2,
+                top: 2,
+                right: 2,
+                bottom: 2,
+            },
         )
         .unwrap();
 
@@ -5051,7 +4841,6 @@ mod tests {
             -pad * 3 / 4,
             w + 2 * pad,
             h + pad * 3 / 2,
-            super::image_settled_color(&src),
             Default::default(),
         )
         .unwrap();
@@ -5100,9 +4889,7 @@ mod tests {
         // A drawable that has spilled 40 px past the right and bottom
         // edges — the shape of a grow triggered mid-drag.
         let start = std::time::Instant::now();
-        let settled = super::image_settled_color(&src);
-        let out =
-            resize_pixbuf_to_rect(&src, 0, 0, w + 40, h + 40, settled, Default::default()).unwrap();
+        let out = resize_pixbuf_to_rect(&src, 0, 0, w + 40, h + 40, Default::default()).unwrap();
         let elapsed = start.elapsed();
         assert_eq!(out.width(), w + 40);
         println!(
@@ -5130,16 +4917,6 @@ mod tests {
             .unwrap();
             n.fill(0x000000ff);
         });
-        t("4x edge_line_colors", &|| {
-            for side in [
-                super::Side::Left,
-                super::Side::Right,
-                super::Side::Top,
-                super::Side::Bottom,
-            ] {
-                super::edge_line_colors(&src, side, false);
-            }
-        });
         let dst = Pixbuf::new(
             relm4::gtk::gdk_pixbuf::Colorspace::Rgb,
             false,
@@ -5160,7 +4937,6 @@ mod tests {
             -4,
             w + 8,
             h + 8,
-            settled,
             Default::default(),
         )
         .unwrap();
@@ -5173,7 +4949,6 @@ mod tests {
             -4,
             w + 16,
             h + 16,
-            settled,
             Default::default(),
         )
         .unwrap();
@@ -5190,7 +4965,6 @@ mod tests {
             -600,
             view2.width() + 1200,
             view2.height() + 1200,
-            settled,
             Default::default(),
         )
         .unwrap();
@@ -5200,11 +4974,10 @@ mod tests {
         );
 
         t("fill right+bottom strips", &|| {
-            super::extend_edges(
+            super::extend_background(
                 &dst,
                 &src,
                 super::ResizeLayout::new(0, 0, w + 40, h + 40, w, h),
-                settled,
                 Default::default(),
             );
         });

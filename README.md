@@ -358,9 +358,10 @@ moving them back inside reveals the clipped portions. The setting applies immedi
 and persists across launches; it does not undo canvas expansion that already happened.
 Explicit cropping still works normally.
 
-With automatic growth enabled, new margins follow the screenshot's edge through
-a short transition, then settle to one solid color. Repeated small expansions
-use the same transition as a single large expansion.
+With automatic growth enabled, annotations can extend onto a neutral dark gray
+background. The screenshot keeps its original edges, with a soft drop shadow
+around it. Text wraps at the image edge while typing; after you finish editing,
+dragging preserves those line breaks and expands the canvas to fit the full block.
 
 On the first launch after upgrading, Tensaku migrates old Preferences values from `state.toml` into missing `config.toml` keys. Explicit config values always win. Once migration succeeds, those legacy preference fields are removed from state so the two files cannot silently disagree.
 
