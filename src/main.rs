@@ -425,12 +425,16 @@ impl App {
     /// always re-persists the chosen factor (idempotent for an
     /// unchanged value), so reuse is safe.
     fn show_welcome_dialog(&mut self, root: &Window, sender: ComponentSender<Self>) {
-        let connector = WelcomeDialog::builder()
-            .transient_for(root)
-            .launch(WelcomeDialogInit {
-                detected_scale: self.detected_scale,
-                detected: self.scale_detected,
-            });
+        let builder = WelcomeDialog::builder();
+        // Relm4's transient_for() defers parenting to the main loop, but
+        // WelcomeDialog presents during init. Parent it before it is mapped
+        // so the compositor can stack the modal above the editor immediately.
+        builder.widget().set_transient_for(Some(root));
+        builder.widget().set_destroy_with_parent(true);
+        let connector = builder.launch(WelcomeDialogInit {
+            detected_scale: self.detected_scale,
+            detected: self.scale_detected,
+        });
         let controller = connector.forward(sender.input_sender(), |out| match out {
             WelcomeDialogOutput::Saved(value) => AppInput::WelcomeDialogSaved(value),
             WelcomeDialogOutput::ValueChanged(value) => {
