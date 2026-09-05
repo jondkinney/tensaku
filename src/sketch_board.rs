@@ -916,7 +916,7 @@ impl SketchBoard {
         ids_to_exclude: &[crate::tools::DrawableId],
         sender: &ComponentSender<Self>,
     ) {
-        if self.active_tool_type() == Tools::Crop {
+        if APP_CONFIG.read().fixed_canvas() || self.active_tool_type() == Tools::Crop {
             return;
         }
         // With a committed crop, the canvas isn't "locked" — a freshly

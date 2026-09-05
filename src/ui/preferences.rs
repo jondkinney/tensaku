@@ -882,6 +882,32 @@ pub fn open<W: IsA<gtk::Widget>>(
     });
     outer.append(&resize_window_to_content_on_crop_check);
 
+    let fixed_canvas_check = gtk::CheckButton::builder()
+        .label("Keep canvas size fixed")
+        .tooltip_text(
+            "Clip annotations at the current image or crop edges instead of automatically \
+             enlarging the canvas. Moving an annotation back inside reveals it again. \
+             Applies immediately and is remembered for future sessions.",
+        )
+        .active(APP_CONFIG.read().fixed_canvas())
+        .build();
+    let fixed_canvas_sender = sketch_board_sender.clone();
+    fixed_canvas_check.connect_toggled(move |btn| {
+        let value = btn.is_active();
+        let current = APP_CONFIG.read().fixed_canvas();
+        if value == current {
+            return;
+        }
+        let result = APP_CONFIG.write().save_fixed_canvas(value);
+        if let Err(error) = result {
+            eprintln!("Warning: could not save fixed-canvas: {error}");
+            btn.set_active(current);
+        } else {
+            fixed_canvas_sender.emit(SketchBoardInput::Refresh);
+        }
+    });
+    outer.append(&fixed_canvas_check);
+
     let hide_palette_check = gtk::CheckButton::builder()
         .label("Hide default palette colors")
         .tooltip_text(

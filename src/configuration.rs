@@ -182,6 +182,8 @@ pub struct Configuration {
     /// around the cropped content. This is config.toml-backed and defaults
     /// to true.
     resize_window_to_content_on_crop: bool,
+    /// Clip annotations to the current image/crop instead of growing it.
+    fixed_canvas: bool,
     /// Keyboard chord that toggles the layer panel. Parsed at the
     /// keypress site by `parse_shortcut`; format is e.g. "ctrl+l",
     /// "ctrl+shift+t", "f7". Unrecognised values silently fall back
@@ -754,6 +756,9 @@ impl Configuration {
         if let Some(v) = general.resize_window_to_content_on_crop {
             self.resize_window_to_content_on_crop = v;
         }
+        if let Some(v) = general.fixed_canvas {
+            self.fixed_canvas = v;
+        }
         if let Some(v) = general.close_on_esc {
             self.close_on_esc = v;
         }
@@ -1228,6 +1233,16 @@ impl Configuration {
         self.resize_window_to_content_on_crop
     }
 
+    pub fn fixed_canvas(&self) -> bool {
+        self.fixed_canvas
+    }
+
+    pub(crate) fn save_fixed_canvas(&mut self, value: bool) -> Result<(), ConfigurationWriteError> {
+        self.write_general_bool("fixed-canvas", value)?;
+        self.fixed_canvas = value;
+        Ok(())
+    }
+
     pub(crate) fn save_resize_window_to_content_on_crop(
         &mut self,
         value: bool,
@@ -1380,6 +1395,7 @@ impl Default for Configuration {
             hide_default_palette: false,
             sticky_session_defaults: false,
             resize_window_to_content_on_crop: true,
+            fixed_canvas: false,
             layer_panel_shortcut: "ctrl+l".into(),
             scroll_capture_restore_region_shortcut: "r".into(),
             scroll_capture_test: None,
@@ -1679,6 +1695,7 @@ struct ConfigurationFileGeneral {
     /// Resize the editor window around crop-only content-size changes.
     /// This positive spelling is shared with the Preferences checkbox.
     resize_window_to_content_on_crop: Option<bool>,
+    fixed_canvas: Option<bool>,
 
     // --- deprecated options ---
     right_click_copy: Option<bool>,
@@ -1764,6 +1781,28 @@ mod tests {
 
     fn parsed_config(content: &str) -> ConfigurationFile {
         toml::from_str(content).expect("test config should parse")
+    }
+
+    #[test]
+    fn fixed_canvas_persists_and_reloads_without_changing_other_preferences() {
+        let path = temporary_config_path("fixed-canvas");
+        let mut config = Configuration {
+            config_file_path: Some(path.clone()),
+            ..Configuration::default()
+        };
+        assert!(!config.fixed_canvas());
+        config.save_fixed_canvas(true).unwrap();
+        assert!(config.fixed_canvas());
+        let file = parsed_config(&fs::read_to_string(&path).unwrap());
+        let mut reloaded = Configuration::default();
+        reloaded.merge(Some(file), command_line(&[]));
+        assert!(reloaded.fixed_canvas());
+        assert!(reloaded.resize_window_to_content_on_crop());
+        config.save_fixed_canvas(false).unwrap();
+        let file = parsed_config(&fs::read_to_string(&path).unwrap());
+        reloaded.merge(Some(file), command_line(&[]));
+        assert!(!reloaded.fixed_canvas());
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]

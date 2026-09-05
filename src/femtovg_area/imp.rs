@@ -2670,7 +2670,11 @@ impl FemtoVgAreaMut {
             let mut t = Transform2D::identity();
             t.scale(self.scale_factor, self.scale_factor);
             t.translate(self.offset.x, self.offset.y);
-            (t, None, self.scale_factor, self.offset)
+            let scissor = APP_CONFIG
+                .read()
+                .fixed_canvas()
+                .then_some((0.0, 0.0, image_w, image_h));
+            (t, scissor, self.scale_factor, self.offset)
         };
 
         // (Effective-scale → zoom indicator emit happens in the

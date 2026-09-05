@@ -164,6 +164,9 @@ resize = { mode = "size", width=2000, height=800 }
 # Resize the editor window to follow cropped content. This is on by default;
 # set false to keep the current editor window size while cropping.
 resize-window-to-content-on-crop = true
+# Clip annotations at the current image/crop edges instead of growing the canvas.
+# Also available in Preferences as "Keep canvas size fixed". Off by default.
+fixed-canvas = false
 # try to have the window float (0.20.1). This may depend on the compositor.
 floating-hack = true
 # Change to true to automatically copy to clipboard after every annotation change (0.21.0)
@@ -319,6 +322,13 @@ Open the Preferences dialog with <kbd>Ctrl+,</kbd> or the gear button in the top
 Every tool shortcut and Behavior/Scroll Capture checkbox shown here reads from and writes to the active configuration file: the path passed to `--config`, or `~/.config/tensaku/config.toml`. The writer changes only the relevant keys, preserving comments, formatting, and unrelated tables. The sole exception is the global scroll-capture shortcut, which stays in `state.toml` because Tensaku also mirrors it into Hyprland's live and persisted binding state.
 
 **Resize window to content on crop** maps directly to `[general] resize-window-to-content-on-crop`. It is checked / `true` by default. Uncheck it to keep the editor window at its current size for crop-only changes; the cropped image still fits inside that unchanged window.
+
+**Keep canvas size fixed** maps to `[general] fixed-canvas` and is off by default.
+Enable it in Preferences to clip annotations at the current image or committed crop
+edges, both in the editor and when exporting. Annotations keep their full geometry:
+moving them back inside reveals the clipped portions. The setting applies immediately
+and persists across launches; it does not undo canvas expansion that already happened.
+Explicit cropping still works normally.
 
 On the first launch after upgrading, Tensaku migrates old Preferences values from `state.toml` into missing `config.toml` keys. Explicit config values always win. Once migration succeeds, those legacy preference fields are removed from state so the two files cannot silently disagree.
 
