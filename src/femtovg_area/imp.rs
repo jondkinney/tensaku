@@ -3220,27 +3220,21 @@ impl FemtoVgAreaMut {
             self.background_tiles.extend(new_tiles);
         }
 
-        let transparency_bg_id = match self.transparent_background_id {
-            Some(id) if onscreen => Some(id),
-            None => {
-                if let Some(id) = Self::create_transparency_bg(canvas) {
-                    self.transparent_background_id.replace(id);
-                    Some(id)
-                } else {
-                    None
-                }
+        let transparency_bg_id = if onscreen && self.background_image.has_alpha() {
+            if self.transparent_background_id.is_none() {
+                self.transparent_background_id = Self::create_transparency_bg(canvas);
             }
-            _ => None,
+            self.transparent_background_id
+        } else {
+            None
         };
 
         let w = self.background_image.width() as f32;
         let h = self.background_image.height() as f32;
 
-        // (The on-screen drop shadow is drawn pre-scissor by
-        //  `render_framebuffer` so it doesn't get clipped to the
-        //  cropped region in committed-crop mode — see the shadow
-        //  block at the top of that function. Saved exports skip
-        //  shadow entirely.)
+        // The viewport shadow is drawn pre-scissor by `render_framebuffer`.
+        // The screenshot's shadow within expanded margins is already part of
+        // the background image, shared by the editor and exports.
 
         // render the image
         let mut path = Path::new();
@@ -3257,7 +3251,8 @@ impl FemtoVgAreaMut {
                     TRANSPARENCY_SQUARE_SIZE as f32,
                     0f32,
                     1f32,
-                ),
+                )
+                .with_anti_alias(false),
             );
         }
 
@@ -3276,9 +3271,14 @@ impl FemtoVgAreaMut {
             }
             let mut tile_path = Path::new();
             tile_path.rect(x0, y0, x1 - x0, y1 - y0);
+            // These axis-aligned tiles need full pixel coverage at their joins
+            // and outer edges. Shape antialiasing creates a translucent fringe
+            // that exposes the checkerboard at fractional zoom. Texture filtering
+            // still interpolates the screenshot normally.
             canvas.fill_path(
                 &tile_path,
-                &Paint::image(tile.id, tile.x, tile.y, tile.w, tile.h, 0f32, 1f32),
+                &Paint::image(tile.id, tile.x, tile.y, tile.w, tile.h, 0f32, 1f32)
+                    .with_anti_alias(false),
             );
         }
 
@@ -4108,6 +4108,132 @@ impl FemtoVgAreaMut {
 #[cfg(test)]
 mod tests {
     use super::{Pixbuf, Vec2D, resize_pixbuf_to_rect, tile_ranges};
+
+    #[test]
+    #[ignore = "Requires a GTK display and OpenGL"]
+    fn fractional_zoom_keeps_expanded_canvas_edges_continuous() {
+        use super::*;
+        use crate::tools::{Tools, ToolsManager};
+
+        gtk::init().unwrap();
+        crate::load_gl().unwrap();
+        let source = Pixbuf::new(gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, 40, 36).unwrap();
+        source.fill(0xffffffff);
+        let tools = ToolsManager::new();
+        let pointer = tools.get(&Tools::Pointer);
+        let (sender, _receiver) = relm4::channel();
+        let mut area = super::super::FemtoVGArea::default();
+        area.init(
+            sender,
+            Rc::new(RefCell::new(CropTool::default())),
+            pointer.clone(),
+            pointer,
+            source,
+        );
+        let window = gtk::Window::builder()
+            .default_width(512)
+            .default_height(512)
+            .child(&area)
+            .build();
+        window.present();
+        area.make_current();
+        assert!(area.error().is_none());
+        let imp = area.imp();
+        imp.ensure_canvas();
+        {
+            let mut inner = imp.inner();
+            let inner = inner.as_mut().unwrap();
+            let mut canvas = imp.canvas.borrow_mut();
+            let canvas = canvas.as_mut().unwrap();
+            let font = imp.font.borrow().unwrap();
+            let target = canvas
+                .create_image_empty(512, 512, PixelFormat::Rgba8, ImageFlags::empty())
+                .unwrap();
+            canvas.set_size(512, 512, 1.0);
+
+            for (has_alpha, alpha) in [(false, 255), (true, 255), (true, 128)] {
+                let source =
+                    Pixbuf::new(gtk::gdk_pixbuf::Colorspace::Rgb, has_alpha, 8, 40, 36).unwrap();
+                source.fill(0xffffff00 | alpha);
+                inner.adopt_background_image(source);
+                inner.original_rect = crate::math::Rect::new(Vec2D::zero(), Vec2D::new(40.0, 36.0));
+                canvas.set_render_target(RenderTarget::Image(target));
+                canvas.reset_transform();
+                // Upload before growing to exercise reuse of the original tile.
+                inner.render_background_image(canvas, true).unwrap();
+                canvas.flush();
+                inner.background_image = inner.resize_raster(-73, -59, 237, 199).unwrap();
+                let translation = Vec2D::new(73.0, 59.0);
+                inner.original_rect.pos += translation;
+                inner.reuse_background_tiles(translation, 40.0, 36.0, 237.0, 199.0);
+
+                for rebuild in [false, true] {
+                    if rebuild {
+                        inner.invalidate_background_tiles();
+                    }
+                    for zoom in [0.92, 0.67, 0.38, 1.0, 1.25, 1.87] {
+                        for offset in [Vec2D::new(30.0, 25.0), Vec2D::new(30.25, 25.75)] {
+                            canvas.set_render_target(RenderTarget::Image(target));
+                            canvas.reset_transform();
+                            canvas.clear_rect(0, 0, 512, 512, CANVAS_BG);
+                            let mut transform = Transform2D::identity();
+                            transform.scale(zoom, zoom);
+                            transform.translate(offset.x, offset.y);
+                            canvas.set_transform(&transform);
+                            inner.render_background_image(canvas, true).unwrap();
+                            canvas.flush();
+                            let pixels = canvas.screenshot().unwrap();
+                            // Outside the screenshot and its shadow, image tiles
+                            // and viewport must form one uninterrupted gray field,
+                            // including every pixel along the outer canvas edges.
+                            let source = inner.original_rect.inflated(SHADOW_EXTENT as f32 + 2.0);
+                            for y in 0..pixels.height() {
+                                for x in 0..pixels.width() {
+                                    let p = Vec2D::new(
+                                        (x as f32 + 0.5 - offset.x) / zoom,
+                                        (y as f32 + 0.5 - offset.y) / zoom,
+                                    );
+                                    if !source.contains(p) {
+                                        let actual = pixels.buf()[y * pixels.stride() + x];
+                                        assert_eq!(
+                                            (actual.r, actual.g, actual.b, actual.a),
+                                            CANVAS_COLOR,
+                                            "seam at ({x},{y}), zoom={zoom}, offset={offset:?}, alpha={has_alpha}/{alpha}, rebuild={rebuild}"
+                                        );
+                                    }
+                                }
+                            }
+                            if alpha == 128 {
+                                let x =
+                                    (offset.x + (inner.original_rect.pos.x + 20.0) * zoom) as usize;
+                                let y =
+                                    (offset.y + (inner.original_rect.pos.y + 18.0) * zoom) as usize;
+                                let actual = pixels.buf()[y * pixels.stride() + x];
+                                assert_eq!(
+                                    actual.a, 255,
+                                    "transparent source uses the checkerboard in the editor"
+                                );
+                                assert!(actual.r > 200 && actual.r < 255);
+                            }
+                        }
+                    }
+                }
+                if has_alpha {
+                    // Export before any checkerboard has been cached must also
+                    // preserve alpha; the checkerboard is only an editor aid.
+                    if let Some(id) = inner.transparent_background_id.take() {
+                        canvas.delete_image(id);
+                    }
+                    let exported = inner.render_native_resolution(canvas, font).unwrap();
+                    let center = exported.buf()[77 * exported.stride() + 93];
+                    assert_eq!(center.a, alpha as u8);
+                }
+            }
+            canvas.set_render_target(RenderTarget::Screen);
+            canvas.delete_image(target);
+        }
+        window.close();
+    }
 
     #[test]
     #[ignore = "Requires a GTK display and OpenGL"]
