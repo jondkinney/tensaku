@@ -673,11 +673,6 @@ impl App {
         let image_width = self.image_dimensions.0 as f64 / scale;
         let image_height = self.image_dimensions.1 as f64 / scale;
 
-        eprintln!(
-            "Fullscreen {:?} | Resize {:?} | Floatinghack {:?}",
-            fullscreen, resize, floating_hack
-        );
-
         if fullscreen == Some(Fullscreen::All)
             && let Some(surface) = root.surface()
             && let Ok(toplevel) = surface.downcast::<Toplevel>()
@@ -2181,10 +2176,6 @@ fn read_css_overrides() -> Option<String> {
     let path = dirs.get_config_file("overrides.css")?;
 
     if !path.exists() {
-        eprintln!(
-            "CSS overrides file {} does not exist, using builtin CSS only.",
-            path.display()
-        );
         return None;
     }
 

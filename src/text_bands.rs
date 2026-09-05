@@ -141,24 +141,6 @@ pub fn init_from_pixbuf(pixbuf: &Pixbuf) {
         return;
     }
     let bands = detect(pixbuf);
-    // Temporary diagnostic — dump every band so we can correlate
-    // against the source image when the cursor previews land in the
-    // wrong row. Remove once detection is tuned.
-    eprintln!(
-        "text_bands: image {}x{} → {} bands",
-        pixbuf.width(),
-        pixbuf.height(),
-        bands.len()
-    );
-    for (i, b) in bands.iter().enumerate() {
-        eprintln!(
-            "  [{:2}] y=[{:.0}..{:.0}] h={:.0}",
-            i,
-            b.y_start,
-            b.y_end,
-            b.height()
-        );
-    }
     let _ = BANDS.set(bands);
 }
 
