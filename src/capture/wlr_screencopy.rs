@@ -166,7 +166,7 @@ fn to_pixbuf(canvas: &[u8], info: &ShmBufferInfo) -> Result<Pixbuf> {
 
     for y in 0..height {
         let row = &canvas[y * stride..y * stride + row_bytes];
-        for px in row.chunks_exact(4) {
+        for px in row.as_chunks::<4>().0 {
             let (r, g, b) = if swap_bgra {
                 (px[2], px[1], px[0])
             } else {

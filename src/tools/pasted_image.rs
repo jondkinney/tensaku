@@ -89,7 +89,7 @@ impl PastedImage {
                 } else {
                     // Inflate RGB → RGBA with full alpha so femtovg
                     // gets a single canonical pixel layout.
-                    for px in src.chunks_exact(3) {
+                    for px in src.as_chunks::<3>().0 {
                         rgba.push(px[0]);
                         rgba.push(px[1]);
                         rgba.push(px[2]);
