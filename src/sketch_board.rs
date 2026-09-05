@@ -21,6 +21,7 @@ use relm4::{Component, ComponentParts, ComponentSender, RelmWidgetExt, gtk};
 
 use crate::configuration::{APP_CONFIG, Action};
 use crate::femtovg_area::FemtoVGArea;
+use crate::image_export::{self, ImageFormat};
 use crate::ime::pango_adapter::spans_from_pango_attrs;
 use crate::math::Vec2D;
 use crate::notification::log_result;
@@ -1135,7 +1136,9 @@ impl SketchBoard {
                 }
                 Action::SaveToFile => {
                     if let Some(ref pix_buf) = pix_buf {
-                        self.handle_save(pix_buf);
+                        if !self.handle_save(pix_buf) {
+                            return;
+                        }
                         early_exit = APP_CONFIG.read().close_on_save();
                     }
                 }
@@ -1248,23 +1251,24 @@ impl SketchBoard {
         dirs.place_state_file(SAVE_AS_LAST_DIR_FILE).ok()
     }
 
-    /// `untitled-N.png`, where N is one past the highest already in
+    /// `untitled-N.<format>`, where N is one past the highest already in
     /// `dir`. Counting from what is there rather than from one means a
     /// second save doesn't land on the first, and a directory full of
     /// them still numbers forward after some are deleted.
-    fn next_untitled_name(dir: &Path) -> String {
+    fn next_untitled_name(dir: &Path, format: ImageFormat) -> String {
         let highest = fs::read_dir(dir)
             .into_iter()
             .flatten()
             .flatten()
             .filter_map(|entry| {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                let stem = name.strip_suffix(".png")?;
+                let path = entry.path();
+                ImageFormat::from_path(&path)?;
+                let stem = path.file_stem()?.to_str()?;
                 stem.strip_prefix("untitled-")?.parse::<u32>().ok()
             })
             .max()
             .unwrap_or(0);
-        format!("untitled-{}.png", highest + 1)
+        format!("untitled-{}.{}", highest + 1, format.extension())
     }
 
     fn save_as_initial_dir(
@@ -1304,59 +1308,60 @@ impl SketchBoard {
         let _ = fs::write(last_dir_file, parent.to_string_lossy().as_bytes());
     }
 
-    fn handle_save(&self, image: &Pixbuf) {
+    fn handle_save(&self, image: &Pixbuf) -> bool {
         let output_filename = match APP_CONFIG.read().output_filename() {
             None => {
                 println!("No Output filename specified!");
-                return;
+                return false;
             }
             Some(o) => o.clone(),
         };
 
         let Some(output_filename) = Self::resolve_output_filename(&output_filename) else {
-            return;
-        };
-
-        // TODO: we could support more data types
-        if output_filename != "-" && !output_filename.ends_with(".png") {
-            log_result(
-                "The only supported format is png, but the filename does not end in png",
-                !APP_CONFIG.read().disable_notifications(),
-            );
-            return;
-        }
-
-        let data = match image.save_to_bufferv("png", &Vec::new()) {
-            Ok(d) => d,
-            Err(e) => {
-                println!("Error serializing image: {e}");
-                return;
-            }
+            return false;
         };
 
         if output_filename == "-" {
-            // "-" means stdout
-            let stdout = io::stdout();
-            let mut handle = stdout.lock();
-            if let Err(e) = handle.write_all(&data) {
-                eprintln!("Error writing image to stdout: {e}");
+            // Keep the existing PNG contract for pipelines and clipboard tools.
+            let result = ImageFormat::Png.encode(image).and_then(|data| {
+                io::stdout().lock().write_all(&data)?;
+                Ok(())
+            });
+            if let Err(e) = result {
+                eprintln!("Error writing image to stdout: {e:#}");
+                return false;
             }
-            return;
+            return true;
         }
-        match fs::write(&output_filename, data) {
-            Err(e) => log_result(
-                &format!("Error while saving file: {e}"),
-                !APP_CONFIG.read().disable_notifications(),
-            ),
-            Ok(_) => {
+
+        let available = ImageFormat::available();
+        let default =
+            image_export::default_format(None, APP_CONFIG.read().source_format(), &available);
+        let result =
+            image_export::resolve_output(Path::new(&output_filename), None, default, &available)
+                .and_then(|(path, format)| {
+                    fs::write(&path, format.encode(image)?)?;
+                    Ok(path)
+                });
+        match result {
+            Err(e) => {
+                log_result(
+                    &format!("Error while saving file: {e:#}"),
+                    !APP_CONFIG.read().disable_notifications(),
+                );
+                false
+            }
+            Ok(path) => {
+                let output_filename = path.to_string_lossy().into_owned();
                 // Store the filepath for copy-filepath action
                 *self.last_saved_filepath.borrow_mut() = Some(output_filename.clone());
                 log_result(
                     &format!("File saved to '{}'.", output_filename),
                     !APP_CONFIG.read().disable_notifications(),
-                )
+                );
+                true
             }
-        };
+        }
     }
 
     fn handle_save_as(
@@ -1371,19 +1376,18 @@ impl SketchBoard {
             Self::save_as_last_dir_file().as_deref(),
             configured_output_path.as_deref(),
         );
+        let available = ImageFormat::available();
+        let default = image_export::default_format(
+            configured_output_path.as_deref(),
+            APP_CONFIG.read().source_format(),
+            &available,
+        );
         let suggested_filename = Self::save_as_suggested_filename(
             configured_output_path.as_deref(),
             APP_CONFIG.read().input_filename(),
             initial_dir.as_deref(),
+            default,
         );
-
-        let data = match pixbuf.save_to_bufferv("png", &Vec::new()) {
-            Ok(d) => d,
-            Err(e) => {
-                println!("Error serializing image: {e}");
-                return;
-            }
-        };
 
         let root = self.renderer.toplevel_window();
 
@@ -1401,6 +1405,15 @@ impl SketchBoard {
             }
             .build();
 
+            let mut choices = vec![("auto", "Automatic (from filename)")];
+            choices.extend(
+                available
+                    .iter()
+                    .map(|format| (format.name(), format.label())),
+            );
+            dialog.add_choice("format", "File type", &choices);
+            dialog.set_choice("format", "auto");
+
             if let Some(initial_dir) = initial_dir {
                 let initial_dir = gtk::gio::File::for_path(initial_dir);
                 if let Err(e) = dialog.set_current_folder(Some(&initial_dir)) {
@@ -1410,94 +1423,120 @@ impl SketchBoard {
 
             dialog.set_current_name(&suggested_filename);
 
-            let response = dialog.run_future().await;
-            dialog.hide();
-            {
-                let mut exit_app = false;
-                let mut filename: Option<String> = None;
-                if response == gtk::ResponseType::Accept
-                    && let Some(file) = dialog.file()
-                {
-                    let selected_path = match file.path() {
-                        Some(path) => path,
-                        None => return,
-                    };
-                    let output_path = Self::png_output_path(&selected_path);
-                    // The chooser only confirmed the name the user entered.
-                    // Adding/changing its suffix may target a different existing
-                    // file, so confirm that destination before replacing it.
-                    if output_path != selected_path && output_path.exists() {
-                        let confirm = gtk::MessageDialog::builder()
-                            .modal(true)
-                            .message_type(gtk::MessageType::Question)
-                            .text("Replace existing image?")
-                            .secondary_text(format!(
-                                "{} already exists. Replace it with the edited image?",
-                                output_path.display()
-                            ))
-                            .build();
-                        confirm.set_transient_for(root.as_ref());
-                        confirm.add_button("Cancel", gtk::ResponseType::Cancel);
-                        confirm.add_button("Replace", gtk::ResponseType::Accept);
-                        confirm.set_default_response(gtk::ResponseType::Cancel);
-                        let replace = confirm.run_future().await == gtk::ResponseType::Accept;
-                        confirm.close();
-                        if !replace {
-                            return;
-                        }
-                    }
-                    let output_filename = output_path.to_string_lossy().into_owned();
-
-                    match fs::write(&output_path, &data) {
-                        Err(e) => log_result(
-                            &format!("Error while saving file: {e}"),
-                            !APP_CONFIG.read().disable_notifications(),
-                        ),
-                        Ok(_) => {
-                            exit_app = APP_CONFIG.read().early_exit_save_as();
-                            filename = Some(output_filename.clone());
-                            Self::remember_save_as_dir(Path::new(&output_filename));
-                            log_result(
-                                &format!("File saved to '{}'.", output_filename),
-                                !APP_CONFIG.read().disable_notifications(),
-                            )
-                        }
-                    };
+            loop {
+                let response = dialog.run_future().await;
+                dialog.hide();
+                if response != gtk::ResponseType::Accept {
+                    return;
                 }
-                if exit_app {
+                let Some(selected_path) = dialog.file().and_then(|file| file.path()) else {
+                    return;
+                };
+                let selected_format = dialog
+                    .choice("format")
+                    .as_deref()
+                    .and_then(ImageFormat::from_name);
+                let output = image_export::resolve_output(
+                    &selected_path,
+                    selected_format,
+                    default,
+                    &available,
+                );
+                let result = match output {
+                    Ok((output_path, format)) => {
+                        // The chooser only confirmed the name the user entered.
+                        // Adding/changing its suffix may target a different existing
+                        // file, so confirm that destination before replacing it.
+                        if output_path != selected_path && output_path.exists() {
+                            let confirm = gtk::MessageDialog::builder()
+                                .modal(true)
+                                .message_type(gtk::MessageType::Question)
+                                .text("Replace existing image?")
+                                .secondary_text(format!(
+                                    "{} already exists. Replace it with the edited image?",
+                                    output_path.display()
+                                ))
+                                .build();
+                            confirm.set_transient_for(root.as_ref());
+                            confirm.add_button("Cancel", gtk::ResponseType::Cancel);
+                            confirm.add_button("Replace", gtk::ResponseType::Accept);
+                            confirm.set_default_response(gtk::ResponseType::Cancel);
+                            let replace = confirm.run_future().await == gtk::ResponseType::Accept;
+                            confirm.close();
+                            if !replace {
+                                return;
+                            }
+                        }
+                        format.encode(&pixbuf).and_then(|data| {
+                            fs::write(&output_path, data)?;
+                            Ok(output_path)
+                        })
+                    }
+                    Err(error) => Err(error),
+                };
+                let output_path = match result {
+                    Ok(path) => path,
+                    Err(error) => {
+                        let error_dialog = gtk::MessageDialog::builder()
+                            .modal(true)
+                            .message_type(gtk::MessageType::Error)
+                            .text("Could not save image")
+                            .secondary_text(format!("{error:#}"))
+                            .buttons(gtk::ButtonsType::Close)
+                            .build();
+                        error_dialog.set_transient_for(root.as_ref());
+                        error_dialog.run_future().await;
+                        error_dialog.close();
+                        // Keep the entered filename and format so the user can
+                        // correct them without losing the edited image.
+                        // Native portal dialogs do not update current_name
+                        // when they return a selected file.
+                        if let Some(parent) = selected_path.parent()
+                            && let Err(error) =
+                                dialog.set_current_folder(Some(&gtk::gio::File::for_path(parent)))
+                        {
+                            eprintln!("Error setting Save As folder: {error}");
+                        }
+                        if let Some(name) = selected_path.file_name() {
+                            dialog.set_current_name(&name.to_string_lossy());
+                        }
+                        dialog.set_choice(
+                            "format",
+                            selected_format.map_or("auto", ImageFormat::name),
+                        );
+                        continue;
+                    }
+                };
+                Self::remember_save_as_dir(&output_path);
+                let output_filename = output_path.to_string_lossy().into_owned();
+                log_result(
+                    &format!("File saved to '{}'.", output_filename),
+                    !APP_CONFIG.read().disable_notifications(),
+                );
+                if APP_CONFIG.read().early_exit_save_as() {
                     log_result("early exit after save as, ignoring further actions.", false);
                     sender.input(SketchBoardInput::Exit);
-                } else if filename.is_some() {
-                    let followup_actions_clone = followup_actions.clone();
-                    let pixbuf_clone = Some(pixbuf.clone());
+                } else {
                     sender.input(SketchBoardInput::RenderResultFollowup(
-                        pixbuf_clone,
-                        followup_actions_clone,
-                        filename,
+                        Some(pixbuf),
+                        followup_actions,
+                        Some(output_filename),
                     ));
                 }
+                return;
             }
         });
-    }
-
-    fn png_output_path(path: &Path) -> PathBuf {
-        if path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
-        {
-            path.to_path_buf()
-        } else {
-            path.with_extension("png")
-        }
     }
 
     fn save_as_suggested_filename(
         configured: Option<&Path>,
         input: &str,
         directory: Option<&Path>,
+        format: ImageFormat,
     ) -> String {
         if let Some(name) = configured.and_then(Path::file_name) {
-            return Self::png_output_path(Path::new(name))
+            return format
+                .output_path(Path::new(name))
                 .to_string_lossy()
                 .into_owned();
         }
@@ -1505,11 +1544,20 @@ impl SketchBoard {
             && input != "-"
             && let Some(stem) = Path::new(input).file_stem()
         {
-            return format!("{}-edited.png", stem.to_string_lossy());
+            let input = Path::new(input);
+            let extension = if ImageFormat::from_path(input) == Some(format) {
+                input
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap_or(format.extension())
+            } else {
+                format.extension()
+            };
+            return format!("{}-edited.{extension}", stem.to_string_lossy());
         }
         directory
-            .map(Self::next_untitled_name)
-            .unwrap_or_else(|| "untitled.png".into())
+            .map(|directory| Self::next_untitled_name(directory, format))
+            .unwrap_or_else(|| format!("untitled.{}", format.extension()))
     }
 
     fn save_texture_to_clipboard(&self, texture: &impl IsA<Texture>) -> anyhow::Result<()> {
@@ -6786,6 +6834,7 @@ impl KeyEventMsg {
 #[cfg(test)]
 mod tests {
     use super::SketchBoard;
+    use crate::image_export::ImageFormat;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -6817,38 +6866,62 @@ mod tests {
     }
 
     #[test]
-    fn save_as_names_match_png_encoding() {
-        for (input, expected) in [
-            ("abc", "abc.png"),
-            ("abc.jpg", "abc.png"),
-            ("abc.PNG", "abc.PNG"),
-            ("a.b/abc", "a.b/abc.png"),
-            (".hidden", ".hidden.png"),
+    fn save_as_names_preserve_the_detected_input_format() {
+        for (input, format, expected) in [
+            ("/tmp/photo.jpg", ImageFormat::Jpeg, "photo-edited.jpg"),
+            ("/tmp/photo.JPEG", ImageFormat::Jpeg, "photo-edited.JPEG"),
+            ("/tmp/photo.tif", ImageFormat::Tiff, "photo-edited.tif"),
+            ("/tmp/photo.webp", ImageFormat::Webp, "photo-edited.webp"),
+            ("/tmp/photo", ImageFormat::Jpeg, "photo-edited.jpg"),
+            (
+                "/tmp/misnamed.png",
+                ImageFormat::Jpeg,
+                "misnamed-edited.jpg",
+            ),
+            (
+                "/tmp/unsupported.gif",
+                ImageFormat::Png,
+                "unsupported-edited.png",
+            ),
+            ("-", ImageFormat::Jpeg, "untitled.jpg"),
+            ("-", ImageFormat::Png, "untitled.png"),
+            ("", ImageFormat::Png, "untitled.png"),
         ] {
             assert_eq!(
-                SketchBoard::png_output_path(Path::new(input)),
-                Path::new(expected)
+                SketchBoard::save_as_suggested_filename(None, input, None, format),
+                expected
             );
         }
-        assert_eq!(
-            SketchBoard::save_as_suggested_filename(None, "/tmp/photo.jpg", None),
-            "photo-edited.png"
-        );
+    }
+
+    #[test]
+    fn save_as_names_honor_configured_output_and_number_untitled_files() {
         assert_eq!(
             SketchBoard::save_as_suggested_filename(
-                Some(Path::new("/tmp/custom.jpg")),
+                Some(Path::new("/tmp/custom.webp")),
                 "photo.jpg",
-                None
+                None,
+                ImageFormat::Webp,
             ),
-            "custom.png"
+            "custom.webp"
         );
+        let temp = TempDir::new("untitled-formats");
+        for name in [
+            "untitled-2.png",
+            "untitled-5.jpg",
+            "untitled-3.webp",
+            "untitled-99.txt",
+        ] {
+            fs::write(temp.path().join(name), []).unwrap();
+        }
         assert_eq!(
-            SketchBoard::save_as_suggested_filename(None, "-", None),
-            "untitled.png"
-        );
-        assert_eq!(
-            SketchBoard::save_as_suggested_filename(None, "", None),
-            "untitled.png"
+            SketchBoard::save_as_suggested_filename(
+                None,
+                "-",
+                Some(temp.path()),
+                ImageFormat::Jpeg
+            ),
+            "untitled-6.jpg"
         );
     }
 

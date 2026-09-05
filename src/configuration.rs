@@ -102,6 +102,8 @@ pub struct Configuration {
     wire_omarchy: bool,
     wire_capture_key: Option<String>,
     input_filename: Option<String>,
+    /// Detected input encoding for this document, never persisted as a preference.
+    source_format: crate::image_export::ImageFormat,
     output_filename: Option<String>,
     fullscreen: Option<Fullscreen>,
     resize: Option<Resize>,
@@ -1044,6 +1046,14 @@ impl Configuration {
         }
     }
 
+    pub fn source_format(&self) -> crate::image_export::ImageFormat {
+        self.source_format
+    }
+
+    pub(crate) fn set_source_format(&mut self, format: crate::image_export::ImageFormat) {
+        self.source_format = format;
+    }
+
     pub(crate) fn set_input_filename(&mut self, filename: String) {
         self.input_filename = Some(filename);
     }
@@ -1346,6 +1356,7 @@ impl Default for Configuration {
             wire_omarchy: false,
             wire_capture_key: None,
             input_filename: Some(String::new()),
+            source_format: crate::image_export::ImageFormat::default(),
             output_filename: None,
             fullscreen: None,
             resize: None,

@@ -108,7 +108,8 @@ pub struct CommandLine {
     #[arg(long)]
     pub floating_hack: bool,
 
-    /// Filename to use for saving action or '-' to print to stdout. Omit to disable saving to file. Might contain format
+    /// Filename to use for saving action; its extension selects the image format. Use '-' to print PNG to stdout.
+    /// Omit to disable saving to file. Might contain format
     /// specifiers: <https://docs.rs/chrono/latest/chrono/format/strftime/index.html>.
     /// Since 0.20.0, can contain tilde (~) for home dir
     #[arg(short, long)]

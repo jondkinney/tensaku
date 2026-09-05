@@ -41,6 +41,7 @@ mod glyph_font;
 mod hypr;
 mod hypr_bind;
 mod icons;
+mod image_export;
 mod ime;
 mod math;
 mod notification;
@@ -2220,9 +2221,10 @@ fn run_satty() -> Result<()> {
         let Some((image, path)) = ui::launcher::choose_image()? else {
             return Ok(());
         };
-        APP_CONFIG
-            .write()
-            .set_input_filename(path.to_string_lossy().into_owned());
+        let source_format = image_export::ImageFormat::from_file(&path).unwrap_or_default();
+        let mut config = APP_CONFIG.write();
+        config.set_input_filename(path.to_string_lossy().into_owned());
+        config.set_source_format(source_format);
         image
     } else {
         load_input_image()?
@@ -2274,11 +2276,21 @@ fn load_input_image() -> Result<Pixbuf> {
         let pb_loader = PixbufLoader::new();
         pb_loader.write(&buf)?;
         pb_loader.close()?;
+        let format = pb_loader
+            .format()
+            .and_then(|format| format.name())
+            .and_then(|name| image_export::ImageFormat::from_name(&name))
+            .unwrap_or_default();
+        APP_CONFIG.write().set_source_format(format);
         pb_loader
             .pixbuf()
             .ok_or(anyhow!("Conversion to Pixbuf failed"))
     } else {
-        Pixbuf::from_file(&input_filename).context("couldn't load image")
+        let image = Pixbuf::from_file(&input_filename).context("couldn't load image")?;
+        let format = image_export::ImageFormat::from_file(std::path::Path::new(&input_filename))
+            .unwrap_or_default();
+        APP_CONFIG.write().set_source_format(format);
+        Ok(image)
     }
 }
 

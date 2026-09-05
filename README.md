@@ -120,10 +120,23 @@ Tensaku resolves its settings from two layers:
 - <kbd>Ctrl+0</kbd>: Reset zoom to 100%; <kbd>Ctrl+1</kbd>: fit to window; <kbd>Ctrl+2</kbd>–<kbd>5</kbd>: zoom to 200–500%; <kbd>Ctrl+9</kbd>: zoom to 50%
 - <kbd>Alt</kbd>+(<kbd>Left</kbd>/<kbd>Right</kbd>/<kbd>Up</kbd>/<kbd>Down</kbd>): Pan, also available with middle mouse button drag <sup>0.20.1</sup>
 
-Exports use PNG regardless of the input format. Save As suggests the configured
-output name, or `<input-name>-edited.png` for an opened image. Captures and stdin
-input use an untitled name. A missing or different extension is changed to `.png`;
-if this selects a different existing file, Tensaku asks before replacing it.
+Save As keeps the input image's format when an encoder is available: opening
+`photo.jpg` suggests `photo-edited.jpg`, and entering `abc` saves `abc.jpg`.
+The configured output filename takes precedence when set. Captures default to PNG;
+stdin input uses its detected format and an untitled name. Inputs without a
+supported encoder, such as GIF or SVG, default to PNG.
+
+To convert an image, enter a different extension or choose **File type** in
+Save As. PNG, JPEG, WebP, AVIF, TIFF, and BMP are offered when the system can
+encode them. **Automatic (from filename)** uses the extension you enter, or the
+document's default if you omit it. Choosing a specific type overrides the
+extension and corrects the filename. If that correction targets an existing
+file, Tensaku asks before replacing it. JPEG uses quality 95; transparent areas
+are flattened onto white for JPEG and BMP.
+
+The same conversion works with `--output-filename`: for example,
+`tensaku photo.jpg --output-filename photo-edited.webp`, then <kbd>Ctrl+S</kbd>.
+Clipboard copies and `--output-filename -` (stdout) continue to use PNG.
 Saved images and clipboard copies omit selection handles, selection glow, and
 text-editing decorations. Selecting an annotation does not change the exported image.
 
@@ -224,6 +237,7 @@ annotation-size-factor = 2
 # Filename to use for saving action. Omit to disable saving to file. Might contain format specifiers: https://docs.rs/chrono/latest/chrono/format/strftime/index.html
 # starting with 0.20.0, can contain leading tilde (~) for home directory
 # starting with 0.21.0, save as uses this as initial filename/path when available
+# The extension selects the image format; no extension uses the input format (PNG for captures).
 output-filename = "/tmp/test-%Y-%m-%d_%H:%M:%S.png"
 # After copying the screenshot, save it to a file as well
 save-after-copy = false
@@ -410,7 +424,7 @@ Options:
       --floating-hack
           Try to enforce floating (0.20.1). Mileage may vary depending on compositor
   -o, --output-filename <OUTPUT_FILENAME>
-          Filename to use for saving action or '-' to print to stdout. Omit to disable saving to file. Might contain format specifiers: <https://docs.rs/chrono/latest/chrono/format/strftime/index.html>. Since 0.20.0, can contain tilde (~) for home dir
+          Filename to use for saving action; its extension selects the image format. Use '-' to print PNG to stdout. Omit to disable saving to file. Might contain format specifiers: <https://docs.rs/chrono/latest/chrono/format/strftime/index.html>. Since 0.20.0, can contain tilde (~) for home dir
       --early-exit
           Exit directly after copy/save action. 0.20.1: This does not apply to "save as"
       --early-exit-save-as
