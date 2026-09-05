@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0](https://github.com/jondkinney/tensaku/compare/v0.28.0...v0.29.0) - 2026-09-05
+
+### Added
+
+- *(canvas)* expand onto a neutral background with a screenshot shadow
+- open images from launcher or positional CLI input ([#56](https://github.com/jondkinney/tensaku/pull/56))
+- add persistent fixed-canvas preference ([#50](https://github.com/jondkinney/tensaku/pull/50))
+
+### Fixed
+
+- *(export)* preserve source formats and support conversion ([#54](https://github.com/jondkinney/tensaku/pull/54))
+- *(render)* prevent canvas seams at fractional zoom
+- *(text)* preserve wrapping and full bounds when moving committed text
+- *(canvas)* use short, stable transitions for expanded edges
+- omit editor selection decorations from exports ([#53](https://github.com/jondkinney/tensaku/pull/53))
+- keep Save As filenames consistent with PNG output ([#54](https://github.com/jondkinney/tensaku/pull/54))
+- parent welcome dialog before presenting it ([#52](https://github.com/jondkinney/tensaku/pull/52))
+
+### Other
+
+- remove routine startup diagnostics
+- satisfy current Clippy pixel-chunk checks
+- update star history chart
+- update star history chart
+- update star history chart
+- update star history chart
+- update star history chart
+- update star history chart
+- update star history chart
+- update star history chart
+- update star history chart
+
 ## [0.28.0](https://github.com/jondkinney/tensaku/compare/v0.27.0...v0.28.0) - 2026-08-21
 
 ### Added
