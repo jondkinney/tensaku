@@ -122,6 +122,30 @@ pub fn set_current_drawable_is_selected(selected: bool) {
     CURRENT_SELECTED.with(|c| c.set(selected));
 }
 
+thread_local! {
+    static RENDER_EDITOR_DECORATIONS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// Text draws its editing UI inside Drawable::draw, so it needs the same
+/// screen/export distinction as the renderer's selection overlay.
+pub fn render_editor_decorations() -> bool {
+    RENDER_EDITOR_DECORATIONS.with(|value| value.get())
+}
+
+struct RenderDecorationsGuard(bool);
+
+impl RenderDecorationsGuard {
+    fn new(onscreen: bool) -> Self {
+        Self(RENDER_EDITOR_DECORATIONS.with(|value| value.replace(onscreen)))
+    }
+}
+
+impl Drop for RenderDecorationsGuard {
+    fn drop(&mut self) {
+        RENDER_EDITOR_DECORATIONS.with(|value| value.set(self.0));
+    }
+}
+
 glib::wrapper! {
     pub struct FemtoVGArea(ObjectSubclass<imp::FemtoVGArea>)
         @extends gtk::Widget, gtk::GLArea,

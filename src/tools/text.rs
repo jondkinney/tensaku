@@ -482,6 +482,7 @@ impl Drawable for Text {
         font: FontId,
         bounds: (Vec2D, Vec2D),
     ) -> Result<()> {
+        let editing = self.editing && crate::femtovg_area::render_editor_decorations();
         // (Cream pill background drawing moved below — it's now drawn
         // per-line after layout, so the pill snugly fits each
         // wrapped line of glyphs instead of the full multi-line bbox.)
@@ -791,7 +792,7 @@ impl Drawable for Text {
         // and glyphs in this same frame — no more 1-frame lag from
         // a stale `render_glow` cache during handle drags.
         let is_selected = crate::femtovg_area::current_drawable_is_selected();
-        let render_outline = self.editing || is_selected;
+        let render_outline = editing || is_selected;
         if render_outline {
             // Scale CSS-pixel widths to image units. Use the
             // renderer-published DPR so on-screen sizing stays
@@ -806,7 +807,7 @@ impl Drawable for Text {
             // committed and just selected, switch to a dashed outline
             // so the two states read as visually distinct without
             // needing extra UI chrome.
-            let path = if self.editing {
+            let path = if editing {
                 let mut p = Path::new();
                 p.rounded_rect(
                     editing_box.pos.x,
@@ -877,7 +878,7 @@ impl Drawable for Text {
         // (so they're visible) and below the glyphs (so text stays
         // readable). When the pill was drawn AFTER these, the cream
         // fill hid the selection highlight entirely.
-        if self.editing
+        if editing
             && let (Some(preedit), Some(preedit_range)) = (&self.preedit, &display.preedit_range)
         {
             self.draw_preedit_background(
@@ -889,7 +890,8 @@ impl Drawable for Text {
             );
         }
 
-        if let Some((sel_start_iter, sel_end_iter)) = self.text_buffer.selection_bounds() {
+        if editing && let Some((sel_start_iter, sel_end_iter)) = self.text_buffer.selection_bounds()
+        {
             let sel_start = sel_start_iter.offset() as usize;
             let sel_end = sel_end_iter.offset() as usize;
 
@@ -964,7 +966,7 @@ impl Drawable for Text {
             draw_baseline += line_height;
         }
 
-        if self.editing
+        if editing
             && let (Some(preedit), Some(preedit_range)) = (&self.preedit, &display.preedit_range)
         {
             self.draw_preedit_overlays(
@@ -977,7 +979,7 @@ impl Drawable for Text {
             )?;
         }
 
-        if self.editing {
+        if editing {
             self.draw_cursor_and_update_ime(
                 canvas,
                 font,

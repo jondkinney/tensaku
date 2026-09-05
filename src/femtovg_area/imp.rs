@@ -2811,6 +2811,7 @@ impl FemtoVgAreaMut {
         restore_transform: Transform2D,
         restore_scissor: Option<(f32, f32, f32, f32)>,
     ) -> Result<()> {
+        let _decorations = super::RenderDecorationsGuard::new(onscreen);
         // Clear canvas. Skipped when the caller has already filled
         // the canvas + drawn the drop shadow pre-scissor (the
         // `render_framebuffer` path does this so the shadow blur can
@@ -2831,7 +2832,7 @@ impl FemtoVgAreaMut {
         // visually correlate the cursor's anchored position against
         // the heuristic's output. Temporary — strip once the
         // detector is dialed in.
-        if std::env::var("TENSAKU_DEBUG_BANDS").is_ok() {
+        if onscreen && std::env::var("TENSAKU_DEBUG_BANDS").is_ok() {
             for b in crate::text_bands::bands() {
                 let mut path = femtovg::Path::new();
                 path.rect(
@@ -2914,7 +2915,7 @@ impl FemtoVgAreaMut {
             if s.drawable.is_spotlight() {
                 continue;
             }
-            let is_selected = selected_ids.contains(&s.id);
+            let is_selected = onscreen && selected_ids.contains(&s.id);
             // Render the selection glow underneath each selected drawable so
             // the wide blue trace is half-clipped by the drawable on top —
             // leaving only an outer halo.
@@ -2951,7 +2952,7 @@ impl FemtoVgAreaMut {
             if let Some(d) = at.get_drawable()
                 && (onscreen || !d.is_hover_preview())
             {
-                let resizing = at.is_resizing();
+                let resizing = onscreen && at.is_resizing();
                 super::set_current_drawable_is_selected(resizing);
                 d.draw(canvas, font, bounds)?;
                 super::set_current_drawable_is_selected(false);
@@ -2969,7 +2970,7 @@ impl FemtoVgAreaMut {
         if !pointer_is_active {
             let pt = self.pointer_tool.borrow();
             if let Some(d) = pt.get_drawable() {
-                super::set_current_drawable_is_selected(pt.is_resizing());
+                super::set_current_drawable_is_selected(onscreen && pt.is_resizing());
                 d.draw(canvas, font, bounds)?;
                 super::set_current_drawable_is_selected(false);
             }
@@ -2996,10 +2997,11 @@ impl FemtoVgAreaMut {
         } else {
             None
         };
-        if let Some(o) = self
-            .pointer_tool
-            .borrow()
-            .build_overlay(single_selected_drawable, self.device_pixel_ratio)
+        if onscreen
+            && let Some(o) = self
+                .pointer_tool
+                .borrow()
+                .build_overlay(single_selected_drawable, self.device_pixel_ratio)
         {
             o.draw(canvas, font, bounds)?;
         }
@@ -4408,6 +4410,108 @@ impl FemtoVgAreaMut {
 #[cfg(test)]
 mod tests {
     use super::{Pixbuf, Vec2D, resize_pixbuf_to_rect, tile_ranges};
+
+    #[test]
+    #[ignore = "Requires a GTK display and OpenGL"]
+    fn selecting_an_arrow_does_not_change_export_pixels() {
+        use super::*;
+        use crate::sketch_board::{MouseButton, MouseEventMsg, MouseEventType};
+        use crate::tools::{ArrowTool, ToolUpdateResult, Tools, ToolsManager};
+
+        gtk::init().unwrap();
+        crate::load_gl().unwrap();
+        let background = Pixbuf::new(gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, 128, 128).unwrap();
+        background.fill(0xffffffff);
+        let tools = ToolsManager::new();
+        let pointer = tools.get(&Tools::Pointer);
+        let (sender, _receiver) = relm4::channel();
+        let mut area = super::super::FemtoVGArea::default();
+        area.init(
+            sender,
+            Rc::new(RefCell::new(CropTool::default())),
+            pointer.clone(),
+            pointer.clone(),
+            background,
+        );
+        let window = gtk::Window::builder()
+            .default_width(256)
+            .default_height(256)
+            .child(&area)
+            .build();
+        window.present();
+        area.make_current();
+        assert!(area.error().is_none(), "OpenGL context must be available");
+        let imp = area.imp();
+        imp.ensure_canvas();
+
+        let mut arrow = ArrowTool::default();
+        let event = |type_, pos| MouseEventMsg {
+            type_,
+            pos,
+            button: MouseButton::Primary,
+            n_pressed: 1,
+            modifier: gtk::gdk::ModifierType::empty(),
+            release: false,
+        };
+        arrow.handle_mouse_event(event(MouseEventType::BeginDrag, Vec2D::new(30.0, 30.0)));
+        let ToolUpdateResult::Commit(drawable) =
+            arrow.handle_mouse_event(event(MouseEventType::EndDrag, Vec2D::new(60.0, 60.0)))
+        else {
+            panic!("arrow gesture should commit");
+        };
+        {
+            let mut inner = imp.inner();
+            let inner = inner.as_mut().unwrap();
+            let id = inner.commit(drawable);
+            let mut canvas = imp.canvas.borrow_mut();
+            let canvas = canvas.as_mut().unwrap();
+            let font = imp.font.borrow().unwrap();
+            let unselected = inner.render_native_resolution(canvas, font).unwrap();
+            pointer.borrow_mut().set_selected_drawables(vec![id]);
+            let selected = inner.render_native_resolution(canvas, font).unwrap();
+            assert_eq!(
+                unselected.buf(),
+                selected.buf(),
+                "selection must not affect saved pixels"
+            );
+            assert!(
+                selected
+                    .buf()
+                    .iter()
+                    .any(|p| p.r < 240 || p.g < 240 || p.b < 240),
+                "the arrow itself must still be exported"
+            );
+
+            // Check that the same selection still decorates the editor view.
+            let target = canvas
+                .create_image_empty(128, 128, PixelFormat::Rgba8, ImageFlags::empty())
+                .unwrap();
+            canvas.set_render_target(RenderTarget::Image(target));
+            canvas.reset_transform();
+            inner
+                .render(
+                    canvas,
+                    font,
+                    false,
+                    femtovg::Color::white(),
+                    true,
+                    true,
+                    RenderTarget::Image(target),
+                    Transform2D::identity(),
+                    None,
+                )
+                .unwrap();
+            let decorated = canvas.screenshot().unwrap();
+            assert_ne!(
+                decorated.buf(),
+                selected.buf(),
+                "editor selection should remain visible"
+            );
+            canvas.set_render_target(RenderTarget::Screen);
+            canvas.delete_image(target);
+        }
+        window.close();
+    }
 
     #[test]
     fn tile_ranges_covers_exactly_once() {

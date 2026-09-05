@@ -124,6 +124,8 @@ Exports use PNG regardless of the input format. Save As suggests the configured
 output name, or `<input-name>-edited.png` for an opened image. Captures and stdin
 input use an untitled name. A missing or different extension is changed to `.png`;
 if this selects a different existing file, Tensaku asks before replacing it.
+Saved images and clipboard copies omit selection handles, selection glow, and
+text-editing decorations. Selecting an annotation does not change the exported image.
 
 #### Color Selection Shortcuts <sup>0.20.1</sup>
 
