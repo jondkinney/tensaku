@@ -358,6 +358,10 @@ moving them back inside reveals the clipped portions. The setting applies immedi
 and persists across launches; it does not undo canvas expansion that already happened.
 Explicit cropping still works normally.
 
+With automatic growth enabled, new margins follow the screenshot's edge through
+a short transition, then settle to one solid color. Repeated small expansions
+use the same transition as a single large expansion.
+
 On the first launch after upgrading, Tensaku migrates old Preferences values from `state.toml` into missing `config.toml` keys. Explicit config values always win. Once migration succeeds, those legacy preference fields are removed from state so the two files cannot silently disagree.
 
 ### Command Line
