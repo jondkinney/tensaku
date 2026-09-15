@@ -1,8 +1,8 @@
 //! Tensaku — a modern screenshot annotation tool, forked from Satty.
 
 use configuration::{APP_CONFIG, Configuration};
-use std::io::Read;
-use std::process::exit;
+use std::io::{Read, Write};
+use std::process::{Command, Stdio, exit};
 use std::sync::LazyLock;
 use std::{fs, ptr};
 use std::{io, time::Duration};
@@ -2344,6 +2344,9 @@ fn run_capture_flow(mut scrolling: bool) -> Result<()> {
                     continue;
                 }
                 scroll_capture::ScrollRun::Captured(outcome) => {
+                    if APP_CONFIG.read().auto_copy() {
+                        copy_capture_to_clipboard(&outcome.image);
+                    }
                     load_gl()?;
                     return start_gui_with_toast(outcome.image, outcome.warning);
                 }
@@ -2373,8 +2376,53 @@ fn run_capture_flow(mut scrolling: bool) -> Result<()> {
                 continue;
             }
         };
+        if APP_CONFIG.read().auto_copy() {
+            copy_capture_to_clipboard(&image);
+        }
         load_gl()?;
         return start_gui_with_toast(image, None);
+    }
+}
+
+/// Put the freshly taken capture on the clipboard before the editor opens.
+///
+/// Not every screenshot gets annotated, so the clipboard should already
+/// hold the raw capture the moment the region is picked; `auto-copy`
+/// re-copies after every annotation change, so later edits simply
+/// overwrite it. The GTK clipboard is not an option here — no display
+/// has been opened yet — hence the same external helper
+/// `save_bytes_to_external_process` uses.
+fn copy_capture_to_clipboard(image: &Pixbuf) {
+    let command = APP_CONFIG
+        .read()
+        .copy_command()
+        .cloned()
+        .unwrap_or_else(|| "wl-copy --type image/png".to_string());
+
+    let copy = || -> Result<()> {
+        let data = image.save_to_bufferv("png", &[])?;
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .context("clipboard command provided no stdin")?;
+        stdin.write_all(&data)?;
+        drop(stdin);
+        if !child.wait()?.success() {
+            return Err(anyhow!("clipboard command '{command}' failed"));
+        }
+        Ok(())
+    };
+
+    // Never fatal: a missing clipboard helper must not cost the user the
+    // screenshot they just took.
+    if let Err(e) = copy() {
+        eprintln!("Could not copy the capture to the clipboard: {e}");
     }
 }
 
