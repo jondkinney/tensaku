@@ -440,7 +440,7 @@ Options:
       --save-after-copy
           After copying the screenshot, save it to a file as well Preferably use the `action_on_copy` option instead
       --auto-copy
-          Automatically copy to clipboard after every annotation change (0.21.0)
+          Automatically copy to clipboard after every annotation change (0.21.0). With --capture, the raw capture is also copied the moment the region is picked
       --actions-on-enter <ACTIONS_ON_ENTER>
           Actions to perform when pressing Enter [possible values: save-to-clipboard, save-to-file, save-to-file-as, copy-filepath-to-clipboard, exit]
       --actions-on-escape <ACTIONS_ON_ESCAPE>

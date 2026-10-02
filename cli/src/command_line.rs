@@ -145,7 +145,7 @@ pub struct CommandLine {
     #[arg(long)]
     pub save_after_copy: bool,
 
-    /// Automatically copy to clipboard after every annotation change (0.21.0)
+    /// Automatically copy to clipboard after every annotation change (0.21.0). With --capture, the raw capture is also copied the moment the region is picked
     #[arg(long)]
     pub auto_copy: bool,
 
