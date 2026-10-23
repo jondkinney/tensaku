@@ -125,6 +125,8 @@ fn main() -> Result<(), io::Error> {
             "chevron-double-down-regular",
             // Pasted-image drawables (Ctrl+V paste).
             "image-regular",
+            // Print preview button in the top toolbar's end cluster.
+            "print-regular",
         ],
     );
 

@@ -27,6 +27,7 @@ Tensaku extends Satty with a number of new capabilities:
 - **Zoom** — zoom the canvas with <kbd>Ctrl</kbd>+scroll or the <kbd>Ctrl</kbd>+digit shortcuts, with an on-screen zoom indicator.
 - **Reworked crop** — aspect-ratio presets, exact width/height entry, rotate and flip, a background-color matte, and pan/zoom while cropping.
 - **Reworked color picker** — a swatch grid with drag-to-reorder custom colors that persist across launches.
+- **Print** — <kbd>Ctrl+Shift+P</kbd> or the printer button opens a print preview: the sheet with the image on it, plus paper, orientation, margin, scaling, rotation and position, before the system print dialog picks the printer.
 - **Preferences dialog** — open with <kbd>Ctrl+,</kbd> to rebind tool shortcuts and toggle behaviors; the same values can be edited in `config.toml`.
 
 ## Install
@@ -109,6 +110,7 @@ Tensaku resolves its settings from two layers:
 - <kbd>Ctrl+S</kbd>: Save to specified output file
 - <kbd>Ctrl+Shift+S</kbd>: Save using file dialog <sup>0.20.0</sup>. The dialog uses `output-filename` as initial filename/path when available and remembers the last selected folder. <sup>0.21.0</sup>
 - <kbd>Ctrl+Alt+C</kbd>: Copy last saved filepath to clipboard <sup>0.20.1</sup>
+- <kbd>Ctrl+Shift+P</kbd>: Print — opens the print preview (<kbd>Ctrl+P</kbd> remains Pin to desktop)
 - <kbd>Ctrl+T</kbd>: Toggle toolbars
 - <kbd>Ctrl+L</kbd>: Toggle the layers panel (configurable — see `layer-panel-shortcut`)
 - <kbd>Ctrl+,</kbd>: Open Preferences
@@ -252,14 +254,14 @@ primary-highlighter = "block"
 # Disable notifications
 disable-notifications = false
 # Actions to trigger on right click (order is important)
-# [possible values: save-to-clipboard, save-to-file, save-to-file-as, copy-filepath-to-clipboard, exit]
+# [possible values: save-to-clipboard, save-to-file, save-to-file-as, copy-filepath-to-clipboard, print, exit]
 actions-on-right-click = []
 # Actions to trigger on Enter key (order is important)
-# [possible values: save-to-clipboard, save-to-file, save-to-file-as, copy-filepath-to-clipboard, exit]
+# [possible values: save-to-clipboard, save-to-file, save-to-file-as, copy-filepath-to-clipboard, print, exit]
 actions-on-enter = ["save-to-clipboard"]
 # Actions to trigger on Escape key (order is important). Window closing is
 # normally controlled by close-on-esc above.
-# [possible values: save-to-clipboard, save-to-file, save-to-file-as, copy-filepath-to-clipboard, exit]
+# [possible values: save-to-clipboard, save-to-file, save-to-file-as, copy-filepath-to-clipboard, print, exit]
 actions-on-escape = []
 # Action to perform when the Enter key is pressed [possible values: save-to-clipboard, save-to-file]
 # Deprecated: use actions-on-enter instead
@@ -352,6 +354,31 @@ custom = [
     "#008000",
 ]
 ```
+
+### Printing
+
+<kbd>Ctrl+Shift+P</kbd>, or the printer button in the top toolbar, opens a print
+preview. The left side shows the sheet as it will come out of the printer — paper,
+margins as a dashed guide, and the image on it. The right side is the layout:
+
+- **Paper** — click the paper button for the system page setup (paper size, orientation,
+  margins, and any printer-specific sizes). Orientation and a single margin, applied to
+  all four sides, are also right there in the panel. The margin starts at the widest one
+  the page setup asks for, so the image never lands in the printer's unprintable border.
+- **Size** — *Fit to page*, *Fill page* (covers the sheet, clipping the overflow),
+  *Actual size*, or *Custom*. Scale, printed width and printed height are all live and
+  linked; editing any of them switches to Custom. *Actual size* is the image at 96 dpi —
+  screenshot pixels at the size they had on screen. **Rotate 90°** turns the image on the
+  sheet without changing the paper's own orientation.
+- **Position** — the nine anchors place the image inside the margins, or drag it
+  anywhere on the sheet in the preview. The readout underneath gives the printed size in
+  millimeters and the dpi the printer is being asked for.
+
+<kbd>Enter</kbd> (or **Print…**) hands the job to the system print dialog, where the
+printer, copies and quality are chosen — including *Print to File* for a PDF. The
+placement is recalculated against whatever paper that dialog ends up with, so changing
+paper there still lands correctly on the sheet. Printer and paper choices are remembered
+for the rest of the session.
 
 ### Preferences Dialog
 

@@ -2121,6 +2121,9 @@ pub enum ToolbarEvent {
     ToggleFill,
     Reset,
     SaveFileAs,
+    /// User clicked the printer button (or pressed Ctrl+Shift+P).
+    /// Opens the print preview — see `crate::ui::print`.
+    Print,
     /// User clicked the gear button (or pressed Ctrl+,). Opens the
     /// preferences dialog where shortcut keys can be edited.
     OpenPreferences,
@@ -3564,6 +3567,15 @@ impl Component for ToolsToolbar {
                         set_icon_name: "save-multiple-regular",
                         install_tooltip_markup: "Save as (<span face=\"Adwaita Sans\">⌃ ⇧</span> S)",
                         connect_clicked[sender] => move |_| {sender.output_sender().emit(ToolbarEvent::SaveFileAs);},
+                    },
+                    gtk::Button {
+                        set_focusable: true,
+                        set_focus_on_click: false,
+                        set_hexpand: false,
+
+                        set_icon_name: "print-regular",
+                        install_tooltip_markup: "Print (<span face=\"Adwaita Sans\">⌃ ⇧</span> P)",
+                        connect_clicked[sender] => move |_| {sender.output_sender().emit(ToolbarEvent::Print);},
                     },
                     // Settings sits last, set off by a separator —
                     // mirrors the left cluster's trailing layers button.

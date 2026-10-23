@@ -1134,6 +1134,11 @@ impl SketchBoard {
                         }
                     }
                 }
+                Action::Print => {
+                    if let Some(ref pix_buf) = pix_buf {
+                        crate::ui::print::open(pix_buf, self.renderer.toplevel_window().as_ref());
+                    }
+                }
                 Action::SaveToFile => {
                     if let Some(ref pix_buf) = pix_buf {
                         if !self.handle_save(pix_buf) {
@@ -1182,7 +1187,11 @@ impl SketchBoard {
         let needs_pixbuf = actions.iter().any(|action| {
             matches!(
                 action,
-                Action::SaveToClipboard | Action::SaveToFile | Action::SaveToFileAs | Action::Pin
+                Action::SaveToClipboard
+                    | Action::SaveToFile
+                    | Action::SaveToFileAs
+                    | Action::Pin
+                    | Action::Print
             )
         });
 
@@ -2729,6 +2738,7 @@ impl SketchBoard {
                 })
             }
             ToolbarEvent::SaveFileAs => self.handle_action(&[Action::SaveToFileAs]),
+            ToolbarEvent::Print => self.handle_action(&[Action::Print]),
             ToolbarEvent::OpenPreferences => {
                 sender
                     .output_sender()
@@ -5497,6 +5507,16 @@ impl Component for SketchBoard {
                                 && ke.modifier == ModifierType::CONTROL_MASK
                             {
                                 self.renderer.request_render(&[Action::Pin]);
+                                ToolUpdateResult::Unmodified
+                            } else if ke.is_one_of(Key::p, KeyMappingId::UsP)
+                                && ke.modifier
+                                    == (ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK)
+                            {
+                                // Ctrl+Shift+P, not the usual Ctrl+P —
+                                // that one has been Pin to desktop since
+                                // before printing existed, and moving it
+                                // would break muscle memory.
+                                self.renderer.request_render(&[Action::Print]);
                                 ToolUpdateResult::Unmodified
                             } else if ke.is_one_of(Key::c, KeyMappingId::UsC)
                                 && ke.modifier

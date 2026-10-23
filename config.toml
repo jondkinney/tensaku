@@ -41,14 +41,14 @@ primary-highlighter = "block"
 # Disable notifications
 disable-notifications = false
 # Actions to trigger on right click (order is important)
-# [possible values: save-to-clipboard, save-to-file, exit]
+# [possible values: save-to-clipboard, save-to-file, print, exit]
 actions-on-right-click = []
 # Actions to trigger on Enter key (order is important)
-# [possible values: save-to-clipboard, save-to-file, exit]
+# [possible values: save-to-clipboard, save-to-file, print, exit]
 actions-on-enter = ["save-to-clipboard"]
 # Actions to trigger on Escape key (order is important). Window closing is
 # normally controlled by close-on-esc above.
-# [possible values: save-to-clipboard, save-to-file, exit]
+# [possible values: save-to-clipboard, save-to-file, print, exit]
 actions-on-escape = []
 # Action to perform when the Enter key is pressed [possible values: save-to-clipboard, save-to-file]
 # Deprecated: use actions-on-enter instead

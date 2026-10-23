@@ -393,6 +393,9 @@ pub enum Action {
     SaveToFile,
     SaveToFileAs,
     CopyFilepathToClipboard,
+    /// Open the print preview, where the image is placed on a sheet
+    /// before the system print dialog takes over. See `crate::ui::print`.
+    Print,
     Exit,
 }
 
