@@ -1300,7 +1300,7 @@ fn build_overlay(
             // the area overlay's S. Handing back beats making someone
             // close this and press a different keybind.
             if matches!(key, gtk::gdk::Key::a | gtk::gdk::Key::A)
-                && modifier.is_empty()
+                && (modifier - gtk::gdk::ModifierType::LOCK_MASK).is_empty()
                 && matches!(state_keys.borrow().phase, Phase::AwaitingDrag)
             {
                 switch_to_area.set(true);

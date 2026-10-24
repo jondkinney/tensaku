@@ -6815,7 +6815,13 @@ impl KeyEventMsg {
         Self {
             key,
             code,
-            modifier,
+            // Caps Lock rides along as LOCK_MASK on top of whatever is
+            // really held, and the shortcut chain compares the modifier
+            // set exactly (`ke.modifier == CONTROL_MASK`). So with Caps
+            // Lock on, every chord — Ctrl+C, Ctrl+V, undo, save — missed
+            // its arm and did nothing at all. A lock state says nothing
+            // about which modifiers are down, so it is not part of a chord.
+            modifier: modifier - ModifierType::LOCK_MASK,
         }
     }
 
@@ -7037,5 +7043,40 @@ mod launch_chord_tests {
         // ...and a mix keeps the harmless half.
         let mixed = other | ModifierType::SHIFT_MASK;
         assert_eq!(trusted_modifiers(mixed, false), other);
+    }
+}
+
+#[cfg(test)]
+mod caps_lock_tests {
+    use super::{Key, KeyEventMsg, ModifierType};
+
+    /// Caps Lock is reported as LOCK_MASK alongside the real chord.
+    /// Every shortcut compares the modifier set exactly, so the bit has
+    /// to be gone by the time a KeyEventMsg exists — otherwise Ctrl+C
+    /// and every other chord is dead while Caps Lock is on.
+    #[test]
+    fn caps_lock_is_not_part_of_a_chord() {
+        let event = KeyEventMsg::new(
+            Key::C,
+            54,
+            ModifierType::CONTROL_MASK | ModifierType::LOCK_MASK,
+        );
+        assert_eq!(event.modifier, ModifierType::CONTROL_MASK);
+    }
+
+    /// And a key pressed with nothing but Caps Lock on is an unmodified
+    /// key, which is what the single-letter tool shortcuts test for.
+    #[test]
+    fn caps_lock_alone_is_no_modifier() {
+        let event = KeyEventMsg::new(Key::A, 38, ModifierType::LOCK_MASK);
+        assert!(event.modifier.is_empty());
+    }
+
+    /// Nothing else is touched.
+    #[test]
+    fn real_modifiers_survive() {
+        let held = ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK;
+        let event = KeyEventMsg::new(Key::z, 52, held | ModifierType::LOCK_MASK);
+        assert_eq!(event.modifier, held);
     }
 }
