@@ -2285,8 +2285,10 @@ fn load_input_image() -> Result<Pixbuf> {
         pb_loader
             .pixbuf()
             .ok_or(anyhow!("Conversion to Pixbuf failed"))
+            .map(image_export::apply_exif_orientation)
     } else {
         let image = Pixbuf::from_file(&input_filename).context("couldn't load image")?;
+        let image = image_export::apply_exif_orientation(image);
         let format = image_export::ImageFormat::from_file(std::path::Path::new(&input_filename))
             .unwrap_or_default();
         APP_CONFIG.write().set_source_format(format);

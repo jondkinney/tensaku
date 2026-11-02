@@ -5,6 +5,18 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use relm4::gtk::gdk_pixbuf::{Colorspace, InterpType, Pixbuf};
 
+/// Rotate/flip `pixbuf` to match its embedded EXIF orientation tag.
+///
+/// `Pixbuf::from_file` and `PixbufLoader` decode raw sensor-orientation
+/// pixels and silently ignore any EXIF orientation tag, unlike browsers
+/// and most image viewers. A phone photo taken in portrait is commonly
+/// stored as landscape pixels plus an orientation tag, so without this
+/// it opens sideways. Screenshots carry no such tag, so this is a no-op
+/// for anything Tensaku itself captured.
+pub fn apply_exif_orientation(pixbuf: Pixbuf) -> Pixbuf {
+    pixbuf.apply_embedded_orientation().unwrap_or(pixbuf)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ImageFormat {
     #[default]
@@ -299,5 +311,75 @@ mod tests {
         let detected = ImageFormat::from_file(&path);
         std::fs::remove_file(&path).unwrap();
         assert_eq!(detected, Some(ImageFormat::Jpeg));
+    }
+
+    /// `testdata/exif-orientation-6.jpg` is a 24×16 grid of six 8×8
+    /// blocks (red, green, blue / yellow, magenta, cyan, in that
+    /// raster order) whose *stored* pixels are rotated 90° from that
+    /// layout and tagged EXIF `Orientation=6` ("rotate 90° CW to
+    /// display correctly") -- the layout a phone actually writes for a
+    /// portrait photo. Regenerated with:
+    ///
+    /// ```python
+    /// from PIL import Image
+    /// import piexif
+    /// img = Image.new("RGB", (24, 16))
+    /// colors = [(255,0,0),(0,255,0),(0,0,255),(255,255,0),(255,0,255),(0,255,255)]
+    /// for i, c in enumerate(colors):
+    ///     cx, cy = i % 3, i // 3
+    ///     for y in range(cy*8, cy*8+8):
+    ///         for x in range(cx*8, cx*8+8):
+    ///             img.putpixel((x, y), c)
+    /// exif = piexif.dump({"0th": {piexif.ImageIFD.Orientation: 6}})
+    /// img.rotate(90, expand=True).save(
+    ///     "exif-orientation-6.jpg", quality=100, subsampling=0, exif=exif
+    /// )
+    /// ```
+    ///
+    /// `ImageOps.exif_transpose` (Pillow's own EXIF-orientation
+    /// correction, used as the independent reference) confirms this
+    /// file corrects back to the intended 24×16 layout above.
+    #[test]
+    fn apply_exif_orientation_rotates_pixels_to_match_the_tag() {
+        let bytes = include_bytes!("testdata/exif-orientation-6.jpg");
+        let path = std::env::temp_dir().join(format!(
+            "tensaku-exif-orientation-{}.jpg",
+            std::process::id()
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        let raw = Pixbuf::from_file(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        // Unapplied, the file's raw pixel grid is portrait: this is
+        // exactly what a viewer ignoring the EXIF tag would show, i.e.
+        // the bug being fixed.
+        assert_eq!((raw.width(), raw.height()), (16, 24));
+
+        let corrected = apply_exif_orientation(raw);
+        assert_eq!((corrected.width(), corrected.height()), (24, 16));
+
+        let expected = [
+            (255u8, 0u8, 0u8),
+            (0, 255, 0),
+            (0, 0, 255),
+            (255, 255, 0),
+            (255, 0, 255),
+            (0, 255, 255),
+        ];
+        let pixels = corrected.read_pixel_bytes();
+        let (stride, channels) = (corrected.rowstride(), corrected.n_channels());
+        for (i, expected_color) in expected.iter().enumerate() {
+            let (block_x, block_y) = (i % 3, i / 3);
+            let (x, y) = (block_x * 8 + 4, block_y * 8 + 4);
+            let offset = (y as i32 * stride + x as i32 * channels) as usize;
+            let actual = (pixels[offset], pixels[offset + 1], pixels[offset + 2]);
+            let close = |a: u8, b: u8| (a as i16 - b as i16).abs() <= 20;
+            assert!(
+                close(actual.0, expected_color.0)
+                    && close(actual.1, expected_color.1)
+                    && close(actual.2, expected_color.2),
+                "block {i} at ({x},{y}): expected {expected_color:?}, got {actual:?}"
+            );
+        }
     }
 }

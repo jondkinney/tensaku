@@ -61,6 +61,7 @@ pub fn choose_image() -> Result<Option<(Pixbuf, PathBuf)>> {
         };
         match Pixbuf::from_file(&path) {
             Ok(image) => {
+                let image = crate::image_export::apply_exif_orientation(image);
                 *selected.borrow_mut() = Some((image, path));
                 if let Some(window) = weak_window.upgrade() {
                     window.close();
