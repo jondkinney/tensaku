@@ -33,6 +33,20 @@ use super::{CANVAS_PADDING_CSS, font_stack, set_font_stack};
 
 const TRANSPARENCY_SQUARE_SIZE: usize = 64;
 
+/// Font families probed (in order) to cover scripts the primary stack may
+/// not carry — currently Arabic. The first family fontconfig resolves is
+/// appended to the render font stack (see `build_text_context`), where
+/// femtovg's per-word fallback picks it up only for glyphs the earlier
+/// fonts are missing. Ordered sans-first so fallback Arabic matches the
+/// bundled Inter's look as closely as the system allows.
+const SCRIPT_FALLBACK_FAMILIES: &[&str] = &[
+    "Noto Sans Arabic",
+    "Noto Naskh Arabic",
+    "Noto Kufi Arabic",
+    "Amiri",
+    "DejaVu Sans",
+];
+
 /// Lowest auto-fit zoom a vertical window resize will shrink the
 /// image to. Enforced two ways so it holds under any window manager:
 /// `apply_vertical_resize_floor` pins a minimum height on `outer_box`
@@ -1219,6 +1233,24 @@ impl FemtoVGArea {
                 Err(e) => {
                     eprintln!("Fallback font: {}", e);
                 }
+            }
+        }
+
+        // Script fallbacks: the primary/configured stack usually covers only
+        // Latin (the bundled Inter has no Arabic glyphs), which renders
+        // non-Latin annotation text as missing glyphs. femtovg falls back
+        // per-word across this whole stack (see its `find_font` in
+        // textlayout.rs), so appending one Arabic-capable face is enough for
+        // Arabic/Persian/Urdu annotation text to shape and render. Configured
+        // families keep priority — these are only probed when nothing
+        // user-selected already covers the script. First fontconfig hit wins.
+        for family in SCRIPT_FALLBACK_FAMILIES {
+            // Silently skip families that are missing or already loaded —
+            // unlike the user-configured loops above, a miss here is expected
+            // on systems without that font, not a configuration problem.
+            if let Ok(id) = load_font(family, None) {
+                loaded_fonts.push(id);
+                break;
             }
         }
 

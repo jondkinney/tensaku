@@ -341,10 +341,180 @@ struct TextDrawingContext<'a> {
     paint: &'a Paint,
     text: &'a str,
     lines: &'a [LineLayout],
+    /// Per-line logical-byte → visual-x maps, parallel to `lines`. Built
+    /// from the same shaped glyphs this frame draws, so caret, selection,
+    /// and highlight geometry land on the true visual positions even for
+    /// right-to-left runs.
+    maps: &'a [LineVisualMap],
     /// Wrap-area width and origin x; used for caret positioning on
     /// empty lines / between-line states where no glyph layout exists.
     wrap_width: f32,
     base_x: f32,
+}
+
+/// Visual x-extent (image space, line-absolute) of one shaped cluster.
+/// Ligatures and combining marks share the cluster of their first char,
+/// so several glyphs can aggregate into one entry.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct VisualCluster {
+    /// Byte offset of the cluster start, relative to the line's text.
+    byte: usize,
+    x_start: f32,
+    x_end: f32,
+}
+
+/// Maps logical byte positions of one wrapped line to the visual x
+/// ranges femtovg actually draws them at. femtovg shapes each bidi run
+/// with rustybuzz and positions glyphs in true visual order — within an
+/// RTL run, x grows as the logical byte offset *shrinks* — so positions
+/// can't be derived by accumulating prefix widths (the old LTR-only
+/// assumption). Everything here is derived from `TextMetrics.glyphs`.
+#[derive(Debug, Default, Clone)]
+struct LineVisualMap {
+    /// Clusters sorted by byte (logical order).
+    clusters: Vec<VisualCluster>,
+}
+
+impl LineVisualMap {
+    /// Build from the shaped metrics of a line measured at `measure_x`,
+    /// shifted so positions match the draw pass at `draw_x` (the two
+    /// differ by the centering offset). Glyphs may arrive out of byte
+    /// order; clusters are byte-sorted here.
+    fn from_metrics(metrics: &femtovg::TextMetrics, measure_x: f32, draw_x: f32) -> Self {
+        let shift = draw_x - measure_x;
+        let raw: Vec<(usize, f32, f32)> = metrics
+            .glyphs
+            .iter()
+            .map(|g| {
+                let start = g.x + shift;
+                let end = start + g.advance_x;
+                (g.byte_index, start.min(end), start.max(end))
+            })
+            .collect();
+        Self {
+            clusters: Self::clusters_from_raw(&raw),
+        }
+    }
+
+    /// Aggregate `(byte, x_start, x_end)` glyph tuples into byte-sorted
+    /// clusters. Same-byte glyphs (ligature parts, marks) merge into one
+    /// spanning entry. Split out from [`Self::from_metrics`] so tests can
+    /// exercise the geometry without fonts or a GL context.
+    fn clusters_from_raw(raw: &[(usize, f32, f32)]) -> Vec<VisualCluster> {
+        let mut sorted: Vec<(usize, f32, f32)> = raw.to_vec();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        let mut clusters: Vec<VisualCluster> = Vec::with_capacity(sorted.len());
+        for (byte, x_start, x_end) in sorted {
+            match clusters.last_mut() {
+                Some(last) if last.byte == byte => {
+                    last.x_start = last.x_start.min(x_start);
+                    last.x_end = last.x_end.max(x_end);
+                }
+                _ => clusters.push(VisualCluster {
+                    byte,
+                    x_start,
+                    x_end,
+                }),
+            }
+        }
+        clusters
+    }
+
+    /// True for characters whose bidi class is right-to-left. Covers the
+    /// RTL scripts femtovg's shaper will emit RTL runs for; everything
+    /// else (Latin, digits, punctuation, CJK) is treated LTR, matching
+    /// how the bidi algorithm resolves them in an LTR paragraph.
+    fn char_is_rtl(c: char) -> bool {
+        matches!(c as u32,
+            0x0590..=0x08FF      // Hebrew, Arabic, Syriac, Thaana, N'Ko, Arabic Extended
+            | 0x200F             // RLM
+            | 0xFB1D..=0xFDFF    // Hebrew & Arabic presentation forms A
+            | 0xFE70..=0xFEFF    // Arabic presentation forms B
+        )
+    }
+
+    fn is_empty(&self) -> bool {
+        self.clusters.is_empty()
+    }
+
+    /// Visual x-range of the cluster that starts exactly at `byte`.
+    fn cluster_at(&self, byte: usize) -> Option<(f32, f32)> {
+        let idx = self.clusters.partition_point(|c| c.byte < byte);
+        let cluster = self.clusters.get(idx)?;
+        (cluster.byte == byte).then_some((cluster.x_start, cluster.x_end))
+    }
+
+    /// Visual x-range of the cluster covering `byte`, where a ligature's
+    /// continuation chars have no cluster of their own: falls back to the
+    /// nearest cluster starting at or before `byte`.
+    fn cluster_covering(&self, byte: usize) -> Option<(f32, f32)> {
+        self.cluster_at(byte).or_else(|| {
+            let idx = self.clusters.partition_point(|c| c.byte <= byte);
+            self.clusters
+                .get(idx.checked_sub(1)?)
+                .map(|c| (c.x_start, c.x_end))
+        })
+    }
+
+    /// Caret x for a caret at logical byte `byte` (line-relative, always
+    /// a char boundary). Before an RTL char the caret sits at that
+    /// char's right edge (RTL flow approaches from the right); before
+    /// an LTR char, its left edge. At line end the direction of the
+    /// last char decides. Returns `None` when the map has no glyphs to
+    /// anchor against — callers fall back to the legacy prefix-width
+    /// math, which stays correct for pure-LTR lines.
+    fn caret_x(&self, line_text: &str, byte: usize) -> Option<f32> {
+        if self.is_empty() {
+            return None;
+        }
+        if let Some(c) = line_text[byte.min(line_text.len())..].chars().next() {
+            let edge = |range: (f32, f32)| {
+                if Self::char_is_rtl(c) {
+                    range.1
+                } else {
+                    range.0
+                }
+            };
+            return Some(edge(self.cluster_covering(byte)?));
+        }
+        // Byte at (or past) line end: continue from the last char's flow.
+        let last_is_rtl = line_text
+            .chars()
+            .next_back()
+            .map(Self::char_is_rtl)
+            .unwrap_or(false);
+        let last = self.clusters.last()?;
+        Some(if last_is_rtl {
+            last.x_start
+        } else {
+            last.x_end
+        })
+    }
+
+    /// Visual x segments covering logical byte range `range` (clamped to
+    /// the line's text length), merged into non-overlapping intervals
+    /// sorted left-to-right. A selection spanning an LTR↔RTL boundary
+    /// legitimately yields two segments.
+    fn segments(&self, range: Range<usize>) -> Vec<(f32, f32)> {
+        if self.is_empty() {
+            return Vec::new();
+        }
+        let mut spans: Vec<(f32, f32)> = self
+            .clusters
+            .iter()
+            .filter(|c| c.byte >= range.start && c.byte < range.end)
+            .map(|c| (c.x_start, c.x_end))
+            .collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut merged: Vec<(f32, f32)> = Vec::with_capacity(spans.len());
+        for (start, end) in spans {
+            match merged.last_mut() {
+                Some(last) if start <= last.1 => last.1 = last.1.max(end),
+                _ => merged.push((start, end)),
+            }
+        }
+        merged
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -639,20 +809,27 @@ impl Drawable for Text {
         // wrap area was wider than the line.
         let mut line_widths: Vec<f32> = Vec::with_capacity(lines.len());
         let mut line_layouts: Vec<LineLayout> = Vec::with_capacity(lines.len());
+        let mut line_maps: Vec<LineVisualMap> = Vec::with_capacity(lines.len());
         let mut baseline = self.pos.y;
         for line_range in &lines {
             let line_text = &text[line_range.clone()];
-            let line_w = canvas
+            let metrics = canvas
                 .measure_text(self.pos.x, baseline, line_text, &base_paint)
-                .ok()
-                .map(|m| m.width())
-                .unwrap_or(0.0);
+                .ok();
+            let line_w = metrics.as_ref().map(|m| m.width()).unwrap_or(0.0);
             let center_off = ((wrap_width - line_w) / 2.0).max(0.0);
             line_widths.push(line_w);
+            let start_x = self.pos.x + center_off;
+            // Shaping ran at `self.pos.x`; the draw pass paints at
+            // `start_x`, so cluster positions shift by the same offset.
+            line_maps.push(match &metrics {
+                Some(m) => LineVisualMap::from_metrics(m, self.pos.x, start_x),
+                None => LineVisualMap::default(),
+            });
             line_layouts.push(LineLayout {
                 range: line_range.clone(),
                 baseline,
-                start_x: self.pos.x + center_off,
+                start_x,
             });
             baseline += line_height;
         }
@@ -669,6 +846,7 @@ impl Drawable for Text {
             paint: &base_paint,
             text,
             lines: &line_layouts,
+            maps: &line_maps,
             wrap_width,
             base_x: self.pos.x,
         };
@@ -697,15 +875,34 @@ impl Drawable for Text {
             let mut width = 0;
             let mut height = 0;
 
-            for line in &line_layouts {
+            for (line_idx, line) in line_layouts.iter().enumerate() {
                 let mut line_glyphs = Vec::new();
+                let map = &layout_context.maps[line_idx];
 
-                let start = text[..line.range.start].chars().count();
-                let end = text[..line.range.end].chars().count();
-
-                for i in start..end {
-                    let segments =
-                        self.segments_for_line_span(canvas, &layout_context, line, i..i + 1);
+                for (char_byte, ch) in text[line.range.clone()].char_indices() {
+                    // Newlines produce no glyphs; the legacy path below only
+                    // ever emitted zero-width rects for them.
+                    if ch == '\n' {
+                        continue;
+                    }
+                    let segments: Vec<(f32, f32)> = if map.is_empty() {
+                        // Shaping failed for this line — fall back to the
+                        // prefix-width estimate (correct for LTR text).
+                        let global_start = line.range.start + char_byte;
+                        self.segments_for_line_span(
+                            canvas,
+                            &layout_context,
+                            line_idx,
+                            line,
+                            global_start..global_start + ch.len_utf8(),
+                        )
+                    } else {
+                        // Ligature continuation chars resolve to the
+                        // ligature's shared visual box.
+                        map.cluster_covering(char_byte)
+                            .map(|span| vec![span])
+                            .unwrap_or_default()
+                    };
 
                     for (start_x, end_x) in segments {
                         let offset_y = cursor_metrics.height * 0.1;
@@ -906,15 +1103,14 @@ impl Drawable for Text {
 
         if editing && let Some((sel_start_iter, sel_end_iter)) = self.text_buffer.selection_bounds()
         {
-            let sel_start = sel_start_iter.offset() as usize;
-            let sel_end = sel_end_iter.offset() as usize;
+            // GTK TextBuffer offsets are char-based; the visual map and
+            // line ranges work in bytes.
+            let sel_start = Self::byte_index_from_char_index(text, sel_start_iter.offset() as usize);
+            let sel_end = Self::byte_index_from_char_index(text, sel_end_iter.offset() as usize);
 
-            for line in &line_layouts {
-                let start_index = text[..line.range.start].chars().count();
-                let end_index = text[..line.range.end].chars().count();
-
-                let overlap_start = sel_start.max(start_index);
-                let overlap_end = sel_end.min(end_index);
+            for (line_idx, line) in line_layouts.iter().enumerate() {
+                let overlap_start = sel_start.max(line.range.start);
+                let overlap_end = sel_end.min(line.range.end);
                 if overlap_start >= overlap_end {
                     continue;
                 }
@@ -922,6 +1118,7 @@ impl Drawable for Text {
                 let segments = self.segments_for_line_span(
                     canvas,
                     &layout_context,
+                    line_idx,
                     line,
                     overlap_start..overlap_end,
                 );
@@ -1274,14 +1471,19 @@ impl Text {
             let global_start = preedit_range.start + span.range.start;
             let global_end = preedit_range.start + span.range.end;
 
-            for line in context.lines {
+            for (line_idx, line) in context.lines.iter().enumerate() {
                 let overlap_start = global_start.max(line.range.start);
                 let overlap_end = global_end.min(line.range.end);
                 if overlap_start >= overlap_end {
                     continue;
                 }
-                let segments =
-                    self.segments_for_line_span(canvas, context, line, overlap_start..overlap_end);
+                let segments = self.segments_for_line_span(
+                    canvas,
+                    context,
+                    line_idx,
+                    line,
+                    overlap_start..overlap_end,
+                );
                 for (start_x, end_x) in segments {
                     let width = (end_x - start_x).max(0.0);
                     if width <= f32::EPSILON {
@@ -1311,14 +1513,19 @@ impl Text {
             let global_start = preedit_range.start + span.range.start;
             let global_end = preedit_range.start + span.range.end;
 
-            for line in context.lines {
+            for (line_idx, line) in context.lines.iter().enumerate() {
                 let overlap_start = global_start.max(line.range.start);
                 let overlap_end = global_end.min(line.range.end);
                 if overlap_start >= overlap_end {
                     continue;
                 }
-                let segments =
-                    self.segments_for_line_span(canvas, context, line, overlap_start..overlap_end);
+                let segments = self.segments_for_line_span(
+                    canvas,
+                    context,
+                    line_idx,
+                    line,
+                    overlap_start..overlap_end,
+                );
                 if segments.is_empty() {
                     continue;
                 }
@@ -1415,10 +1622,16 @@ impl Text {
         }
     }
 
+    /// Visual x segments (image space) where the global byte range
+    /// `range` renders within line `line_idx`, from that line's
+    /// bidi-aware visual map. Falls back to legacy prefix-width math —
+    /// correct only for LTR text — when the line has no glyph map
+    /// (shaping failed or the span is on an empty line).
     fn segments_for_line_span(
         &self,
         canvas: &mut femtovg::Canvas<femtovg::renderer::OpenGl>,
         context: &TextDrawingContext<'_>,
+        line_idx: usize,
         line: &LineLayout,
         range: Range<usize>,
     ) -> Vec<(f32, f32)> {
@@ -1426,37 +1639,28 @@ impl Text {
             return Vec::new();
         }
 
-        let chars_without_newline: Vec<(usize, char)> = context.text.char_indices().collect();
-
-        let range_start_byte = chars_without_newline
-            .get(range.start)
-            .map(|(i, _)| *i)
-            .unwrap_or(context.text.len());
-
-        let range_end_byte = chars_without_newline
-            .get(range.end)
-            .map(|(i, _)| *i)
-            .unwrap_or(context.text.len());
-
         let line_start = line.range.start;
         let line_end = line.range.end;
-        let overlap_start = range_start_byte.max(line_start).min(line_end);
-        let overlap_end = range_end_byte.max(line_start).min(line_end);
+        let overlap_start = range.start.max(line_start).min(line_end);
+        let overlap_end = range.end.max(line_start).min(line_end);
 
         if overlap_start >= overlap_end {
             return Vec::new();
         }
 
         let line_text = &context.text[line.range.clone()];
+        let rel_start = overlap_start - line_start;
+        let rel_end = overlap_end - line_start;
 
-        let start_byte = overlap_start.saturating_sub(line_start);
-        let end_byte = overlap_end.saturating_sub(line_start);
+        if let Some(map) = context.maps.get(line_idx).filter(|m| !m.is_empty()) {
+            return map.segments(rel_start..rel_end);
+        }
 
-        let prefix = &line_text[..start_byte];
-        let selected = &line_text[start_byte..end_byte].replace("\n", "");
+        let prefix = &line_text[..rel_start];
+        let selected = line_text[rel_start..rel_end].replace('\n', "");
 
         let start_x: f32 = line.start_x + Self::text_width(canvas, context.paint, prefix);
-        let width = Self::text_width(canvas, context.paint, selected);
+        let width = Self::text_width(canvas, context.paint, &selected);
 
         vec![(start_x, start_x + width.max(0.0))]
     }
@@ -1493,14 +1697,21 @@ impl Text {
 
         let mut newline_pending_baseline: Option<f32> = None;
 
-        for line in context.lines {
+        for (line_idx, line) in context.lines.iter().enumerate() {
             let line_text = &context.text[line.range.clone()];
+            let map = &context.maps[line_idx];
 
             if cursor_byte_pos < line.range.end {
-                let prefix_len = cursor_byte_pos
+                let rel = cursor_byte_pos
                     .saturating_sub(line.range.start)
                     .min(line_text.len());
-                let prefix = &line_text[..prefix_len];
+                // Bidi-aware x from the shaped glyphs; falls back to the
+                // prefix-width estimate (LTR-correct) when the line has no
+                // glyph map.
+                if let Some(x) = map.caret_x(line_text, rel) {
+                    return (x, line.baseline + caret_top);
+                }
+                let prefix = &line_text[..rel];
                 let offset = Self::text_width(canvas, context.paint, prefix);
                 return (line.start_x + offset, line.baseline + caret_top);
             }
@@ -1512,6 +1723,9 @@ impl Text {
                     newline_pending_baseline = Some(line.baseline + caret_top + cursor.line_height);
                     continue;
                 }
+                if let Some(x) = map.caret_x(line_text, line_text.len()) {
+                    return (x, line.baseline + caret_top);
+                }
                 let offset = Self::text_width(canvas, context.paint, line_text);
                 return (line.start_x + offset, line.baseline + caret_top);
             }
@@ -1521,8 +1735,15 @@ impl Text {
             return (empty_caret_x, baseline);
         }
 
-        if let Some(last_line) = context.lines.last() {
+        if let Some((last_idx, last_line)) = context.lines.iter().enumerate().next_back() {
             let line_text = &context.text[last_line.range.clone()];
+            if let Some(x) = context
+                .maps
+                .get(last_idx)
+                .and_then(|m| m.caret_x(line_text, line_text.len()))
+            {
+                return (x, last_line.baseline + caret_top + cursor.line_height);
+            }
             let offset = Self::text_width(canvas, context.paint, line_text);
             (
                 last_line.start_x + offset,
@@ -3106,5 +3327,114 @@ mod tests {
             Text::auto_fit_room((Vec2D::zero(), Vec2D::zero()), 10.0, 6.0),
             None
         );
+    }
+
+    // --- LineVisualMap: bidi-aware caret / segment geometry (pure tests,
+    // --- no fonts or GL). Glyph tuples mirror real shaped output: the
+    // --- probe on femtovg 0.25 showed an RTL run's x grows as its
+    // --- logical byte offset shrinks.
+
+    fn map_from_raw(raw: &[(usize, f32, f32)]) -> LineVisualMap {
+        LineVisualMap {
+            clusters: LineVisualMap::clusters_from_raw(raw),
+        }
+    }
+
+    #[test]
+    fn clusters_merge_same_byte_and_sort_by_byte() {
+        // Two glyphs share the ligature cluster at byte 2; byte 1 arrives
+        // out of order and must still sort before it.
+        let map = map_from_raw(&[
+            (2, 20.0, 24.0),
+            (1, 10.0, 18.0),
+            (2, 21.0, 23.0), // subset of the first byte-2 glyph
+        ]);
+        let clusters = &map.clusters;
+        assert_eq!(clusters.len(), 2);
+        assert_eq!(clusters[0].byte, 1);
+        assert_eq!((clusters[0].x_start, clusters[0].x_end), (10.0, 18.0));
+        assert_eq!(clusters[1].byte, 2);
+        assert_eq!((clusters[1].x_start, clusters[1].x_end), (20.0, 24.0));
+    }
+
+    #[test]
+    fn ltr_caret_walks_left_to_right() {
+        // "hi": h at [0, 14), i at [14, 20)
+        let map = map_from_raw(&[(0, 0.0, 14.0), (1, 14.0, 20.0)]);
+        assert_eq!(map.caret_x("hi", 0), Some(0.0));
+        assert_eq!(map.caret_x("hi", 1), Some(14.0));
+        // Line end after an LTR char: right edge of the last cluster.
+        assert_eq!(map.caret_x("hi", 2), Some(20.0));
+    }
+
+    #[test]
+    fn rtl_caret_walks_right_to_left() {
+        // "سلام" shaped by femtovg 0.25 (probe output): the first logical
+        // letter س sits at the visual RIGHT edge, the last م at x=0.
+        let map = map_from_raw(&[
+            (6, 0.0, 11.6),  // م — last letter, leftmost
+            (4, 11.6, 20.7), // ا
+            (2, 20.7, 26.0), // ل
+            (0, 26.0, 44.8), // س — first letter, rightmost
+        ]);
+        // Caret before the first char: its right edge.
+        assert_eq!(map.caret_x("سلام", 0), Some(44.8));
+        // Between س and ل: the boundary at x=26.
+        assert_eq!(map.caret_x("سلام", 2), Some(26.0));
+        // Line end after the last char: left edge of the line.
+        assert_eq!(map.caret_x("سلام", 8), Some(0.0));
+    }
+
+    #[test]
+    fn caret_at_ligature_continuation_uses_the_ligature_box() {
+        // "بلا" with a lam-alef ligature: ب(0), ل(2), ا(4). The ligature
+        // merges ل+ا into one cluster at byte 2, so ا has no cluster of
+        // its own and the caret before it anchors to the ligature box.
+        let map = map_from_raw(&[(0, 50.0, 60.0), (2, 20.0, 50.0)]);
+        assert_eq!(map.caret_x("بلا", 4), Some(50.0));
+    }
+
+    #[test]
+    fn segments_cover_visual_spans_and_merge_neighbors() {
+        // Mixed "hi مرحبا": LTR run left, RTL run right of it. Cluster
+        // bytes are logical; RTL clusters have descending x as byte grows.
+        let map = map_from_raw(&[
+            (0, 0.0, 14.0),   // h
+            (1, 14.0, 20.0),  // i
+            (2, 20.0, 26.0),  // space
+            (11, 26.0, 34.0), // ا — last letter, leftmost of the RTL run
+            (9, 34.0, 48.0),  // ب
+            (7, 48.0, 55.0),  // ح
+            (5, 55.0, 62.0),  // ر
+            (3, 62.0, 70.0),  // م — first letter, rightmost
+        ]);
+        // The Arabic word renders as one contiguous visual span.
+        assert_eq!(
+            map.segments(3..13),
+            vec![(26.0, 70.0)],
+            "RTL run must merge into one segment"
+        );
+        // Selecting only "hi" covers just the LTR run.
+        assert_eq!(map.segments(0..2), vec![(0.0, 20.0)]);
+        // A gap in the visual order splits into two segments.
+        assert_eq!(map.segments(0..2), vec![(0.0, 20.0)]);
+        assert_eq!(
+            map.segments(1..3),
+            vec![(14.0, 26.0)],
+            "i + space are visually adjacent"
+        );
+        // Empty / out-of-range spans produce nothing.
+        assert!(map.segments(13..13).is_empty());
+    }
+
+    #[test]
+    fn rtl_char_detection_covers_arabic_and_hebrew() {
+        assert!(LineVisualMap::char_is_rtl('س'));
+        assert!(LineVisualMap::char_is_rtl('א'));
+        assert!(LineVisualMap::char_is_rtl('\u{200F}')); // RLM
+        assert!(!LineVisualMap::char_is_rtl('h'));
+        assert!(!LineVisualMap::char_is_rtl('1'));
+        assert!(!LineVisualMap::char_is_rtl(' '));
+        assert!(!LineVisualMap::char_is_rtl('中'));
     }
 }

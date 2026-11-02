@@ -1,0 +1,111 @@
+[package]
+name = "femtovg"
+description = "Antialiased 2D vector drawing library"
+version = "0.25.0"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+authors = [
+    "Peter Todorov <ptodorov@cytec.bg>",
+    "Adam Nemecek <adamnemecek@gmail.com>",
+]
+keywords = ["graphics", "canvas", "vector", "drawing", "gpu"]
+categories = ["graphics"]
+repository = "https://github.com/femtovg/femtovg"
+edition = "2021"
+exclude = ["assets", "examples"]
+rust-version = "1.88"
+
+[profile.release]
+debug = true
+
+[dependencies]
+fnv = { version = "1.0.7" }
+rgb = "0.8.50"
+bytemuck = { version = "1.16", features = ["derive"] }
+imgref = "1.11.0"
+bitflags = "2.6.0"
+rustybuzz = { version = "0.20.0", optional = true }
+unicode-bidi = { version = "0.3.17", optional = true }
+unicode-segmentation = { version = "1.12.0", optional = true }
+slotmap = "1.0.7"
+lru = { version = "0.18.0", optional = true, default-features = false }
+image = { version = "0.25.0", optional = true, default-features = false }
+serde = { version = "1.0", optional = true, features = ["derive", "rc"] }
+glow = { version = "0.17.0", default-features = false }
+log = "0.4"
+wgpu = { version = "29.0.3", optional = true, default-features = false, features = ["wgsl"] }
+itertools = "0.14"
+ttf-parser = { version = "0.25.1", optional = true }
+swash = { version = "0.2.6", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+glutin = { version = "0.32", optional = true, default-features = false }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web_sys = { version = "0.3", package = "web-sys", features = [
+    "WebGlContextAttributes",
+    "HtmlImageElement",
+    "WebGl2RenderingContext",
+] }
+wasm-bindgen = "0.2"
+wgpu = { version = "29.0.3", optional = true, default-features = false, features = ["web"] }
+
+[features]
+default = ["image-loading", "textlayout"]
+image-loading = ["image"]
+debug_inspector = []
+wgpu = ["dep:wgpu"]
+textlayout = ["dep:rustybuzz", "dep:unicode-bidi", "dep:unicode-segmentation", "dep:lru", "dep:ttf-parser"]
+swash = ["dep:swash"]
+
+[dev-dependencies]
+winit = { version = "0.30.12" }
+euclid = "0.22.3"
+rand = "0.10"
+usvg = { version = "0.47.0" }
+instant = { version = "0.1", features = ["now"] }
+resource = "0.6.1"
+image = { version = "0.25.0", default-features = false, features = [
+    "jpeg",
+    "png",
+] }
+cosmic-text = "0.19.0"
+swash = "0.2.6"
+lazy_static = "1.4.0"
+pollster = "0.4"
+wgpu = { version = "29.0.3" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+glutin = "0.32.3"
+glutin-winit = "0.5.0"
+raw-window-handle = "0.6.2"
+parley = "0.9.0"
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+web_sys = { version = "0.3", package = "web-sys", features = [
+    "console",
+    "WebGlContextAttributes",
+] }
+console_error_panic_hook = "0.1.5"
+instant = { version = "0.1", features = ["wasm-bindgen", "now"] }
+resource = { version = "0.6.1", features = ["force-static"] }
+getrandom = { version = "0.4.1", features = ["wasm_js"] }
+wgpu = { version = "29.0.3", features = ["webgl"] }
+wasm-bindgen-futures = { version = "0.4.45" }
+
+[[example]]
+name = "book_example_1_1"
+path = "book/src/1_getting_started/1_setting_up.rs"
+
+[[example]]
+name = "book_example_1_2"
+path = "book/src/1_getting_started/2_rendering.rs"
+
+[[example]]
+name = "book_example_1_3"
+path = "book/src/1_getting_started/3_event_loop.rs"
+
+[package.metadata.docs.rs]
+features = ["glutin/egl"]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

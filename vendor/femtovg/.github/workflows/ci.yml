@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        rust:
+          - stable
+          - beta
+          - 1.92.0  # MSRV
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Install system dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install libxkbcommon-dev libwayland-dev libfontconfig-dev
+      - name: Install toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust }}
+          override: true
+          profile: minimal
+          target: wasm32-unknown-unknown
+      - run: cargo build --verbose
+      - run: cargo build --all-features --features glutin/wayland,glutin/egl --verbose
+      - run: cargo build --no-default-features --verbose
+      - run: cargo build --verbose --target wasm32-unknown-unknown
+      - run: cargo build --verbose --examples
+      - run: cargo build --verbose --examples --features wgpu
+      - run: cargo build --target=wasm32-unknown-unknown --example demo
+      - run: cargo test
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install libxkbcommon-dev libwayland-dev libfontconfig-dev
+      - name: Install stable toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+            toolchain: stable
+            override: true
+            components: rustfmt, clippy
+      - name: Run rustfmt
+        run: cargo fmt --all -- --check
+      - name: Run clippy
+        uses: actions-rs/clippy-check@v1
+        if: github.repository == 'femtovg/femtovg'
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          args: --all-features --features glutin/wayland,glutin/egl --no-deps
